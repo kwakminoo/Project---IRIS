@@ -1,0 +1,198 @@
+import 'package:flutter/material.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+void main() {
+  runApp(IRISApp());
+}
+
+class IRISApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'IRIS',
+      debugShowCheckedModeBanner: false,
+      home: IRISHomePage(),
+    );
+  }
+}
+
+class IRISHomePage extends StatefulWidget {
+  @override
+  _IRISHomePageState createState() => _IRISHomePageState();
+}
+
+class _IRISHomePageState extends State<IRISHomePage> {
+  late stt.SpeechToText _speech;
+  bool _isListening = false;
+  String _userInput = "말을 시작해보세요";
+  String _gptResponse = "";
+  TextEditingController _textController = TextEditingController();
+
+  final bool useFakeGpt = true; // 여기를 false로 바꾸면 진짜 GPT 호출됨
+  final String openAIApiKey = "여기에_네_API_키_넣기"; // ★ 네 API 키 여기 입력 ★
+
+  @override
+  void initState() {
+    super.initState();
+    _speech = stt.SpeechToText();
+  }
+
+  void _listen() async {
+    if (!_isListening) {
+      bool available = await _speech.initialize(
+        onStatus: (status) => print('음성 상태: $status'),
+        onError: (error) => print('음성 에러: $error'),
+      );
+      if (available) {
+        setState(() => _isListening = true);
+        _speech.listen(onResult: (result) {
+          setState(() {
+            _userInput = result.recognizedWords;
+          });
+          _sendToGPT(_userInput);
+        });
+      }
+    } else {
+      setState(() => _isListening = false);
+      _speech.stop();
+    }
+  }
+
+  void _submitText() {
+    if (_textController.text.trim().isNotEmpty) {
+      setState(() {
+        _userInput = _textController.text;
+      });
+      _sendToGPT(_textController.text);
+      _textController.clear();
+    }
+  }
+
+  void _sendToGPT(String input) async {
+    if (useFakeGpt) {
+      // 가짜 응답
+      setState(() {
+        _gptResponse = "GPT 응답 (가짜): \"$input\"에 대한 답변입니다.";
+      });
+    } else {
+      // 진짜 GPT API 호출
+      try {
+        var url = Uri.parse("https://api.openai.com/v1/chat/completions");
+        var response = await http.post(
+          url,
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer $openAIApiKey",
+          },
+          body: jsonEncode({
+            "model": "gpt-3.5-turbo",
+            "messages": [
+              {"role": "user", "content": input}
+            ],
+            "temperature": 0.7,
+          }),
+        );
+
+        if (response.statusCode == 200) {
+          var data = jsonDecode(response.body);
+          var reply = data["choices"][0]["message"]["content"];
+          setState(() {
+            _gptResponse = "GPT 응답: $reply";
+          });
+        } else {
+          setState(() {
+            _gptResponse = "GPT 응답 실패: 상태코드 ${response.statusCode}";
+          });
+        }
+      } catch (e) {
+        setState(() {
+          _gptResponse = "GPT 연결 중 오류 발생: $e";
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Center(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // 파란 구체
+              Container(
+                width: 150,
+                height: 150,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [Colors.blueAccent, Colors.blue.withOpacity(0.3)],
+                    center: Alignment.center,
+                    radius: 0.8,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.blueAccent.withOpacity(0.7),
+                      blurRadius: 30,
+                      spreadRadius: 10,
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(height: 20),
+              // 마이크 버튼
+              FloatingActionButton(
+                onPressed: _listen,
+                child: Icon(_isListening ? Icons.mic : Icons.mic_none),
+                backgroundColor: Colors.blueAccent,
+              ),
+              SizedBox(height: 30),
+              // 사용자가 입력한 문장
+              Text(
+                _userInput,
+                style: TextStyle(color: Colors.white, fontSize: 20),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 10),
+              // GPT 응답 출력
+              Text(
+                _gptResponse,
+                style: TextStyle(color: Colors.greenAccent, fontSize: 18),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 30),
+              // 텍스트 입력창 + 전송 버튼
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: TextField(
+                  controller: _textController,
+                  style: TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: '여기에 입력하세요',
+                    hintStyle: TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: Colors.white10,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(30),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: EdgeInsets.symmetric(vertical: 10, horizontal: 20),
+                    suffixIcon: IconButton(
+                      icon: Icon(Icons.send, color: Colors.blueAccent),
+                      onPressed: _submitText,
+                    ),
+                  ),
+                  onSubmitted: (_) => _submitText(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
