@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:lottie/lottie.dart';
 
 void main() {
   runApp(IRISApp());
@@ -23,7 +24,7 @@ class IRISHomePage extends StatefulWidget {
   _IRISHomePageState createState() => _IRISHomePageState();
 }
 
-class _IRISHomePageState extends State<IRISHomePage> {
+class _IRISHomePageState extends State<IRISHomePage> with TickerProviderStateMixin {
   late stt.SpeechToText _speech;
   bool _isListening = false;
   String _userInput = "말을 시작해보세요";
@@ -31,19 +32,22 @@ class _IRISHomePageState extends State<IRISHomePage> {
   TextEditingController _textController = TextEditingController();
 
   final bool useFakeGpt = true; // 여기를 false로 바꾸면 진짜 GPT 호출됨
-  final String openAIApiKey = "여기에_네_API_키_넣기"; // ★ 네 API 키 여기 입력 ★
+  final String openAIApiKey = "여기에_네_API_키_넣기";
+
+  late final AnimationController _waveController;
 
   @override
   void initState() {
     super.initState();
     _speech = stt.SpeechToText();
+    _waveController = AnimationController(vsync: this);
   }
 
   void _listen() async {
     if (!_isListening) {
       bool available = await _speech.initialize(
-        onStatus: (status) => print('음성 상태: $status'),
-        onError: (error) => print('음성 에러: $error'),
+        onStatus: (status) => print('음성 상태: \$status'),
+        onError: (error) => print('음성 에러: \$error'),
       );
       if (available) {
         setState(() => _isListening = true);
@@ -71,20 +75,22 @@ class _IRISHomePageState extends State<IRISHomePage> {
   }
 
   void _sendToGPT(String input) async {
+    _waveController.repeat();
+
     if (useFakeGpt) {
-      // 가짜 응답
+      await Future.delayed(Duration(seconds: 2));
       setState(() {
-        _gptResponse = "GPT 응답 (가짜): \"$input\"에 대한 답변입니다.";
+        _gptResponse = "GPT 응답 (가짜): \"\$input\"에 대한 답변입니다.";
       });
+      _waveController.stop();
     } else {
-      // 진짜 GPT API 호출
       try {
         var url = Uri.parse("https://api.openai.com/v1/chat/completions");
         var response = await http.post(
           url,
           headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer $openAIApiKey",
+            "Authorization": "Bearer \$openAIApiKey",
           },
           body: jsonEncode({
             "model": "gpt-3.5-turbo",
@@ -99,17 +105,19 @@ class _IRISHomePageState extends State<IRISHomePage> {
           var data = jsonDecode(response.body);
           var reply = data["choices"][0]["message"]["content"];
           setState(() {
-            _gptResponse = "GPT 응답: $reply";
+            _gptResponse = "GPT 응답: \$reply";
           });
         } else {
           setState(() {
-            _gptResponse = "GPT 응답 실패: 상태코드 ${response.statusCode}";
+            _gptResponse = "GPT 응답 실패: 상태코드 \${response.statusCode}";
           });
         }
       } catch (e) {
         setState(() {
-          _gptResponse = "GPT 연결 중 오류 발생: $e";
+          _gptResponse = "GPT 연결 중 오류 발생: \$e";
         });
+      } finally {
+        _waveController.stop();
       }
     }
   }
@@ -123,24 +131,16 @@ class _IRISHomePageState extends State<IRISHomePage> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // 파란 구체
-              Container(
+              // 파형 애니메이션
+              SizedBox(
                 width: 150,
                 height: 150,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [Colors.blueAccent, Colors.blue.withOpacity(0.3)],
-                    center: Alignment.center,
-                    radius: 0.8,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.blueAccent.withOpacity(0.7),
-                      blurRadius: 30,
-                      spreadRadius: 10,
-                    ),
-                  ],
+                child: Lottie.asset(
+                  'assets/Animation - 1745933971143.json',
+                  controller: _waveController,
+                  onLoaded: (composition) {
+                    _waveController.duration = composition.duration;
+                  },
                 ),
               ),
               SizedBox(height: 20),
