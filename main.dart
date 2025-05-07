@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:lottie/lottie.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'dart:convert';
 
 void main() {
   runApp(IRISApp());
@@ -26,6 +27,7 @@ class IRISHomePage extends StatefulWidget {
 
 class _IRISHomePageState extends State<IRISHomePage> with TickerProviderStateMixin {
   late stt.SpeechToText _speech;
+  late FlutterTts _flutterTts;
   bool _isListening = false;
   String _userInput = "말을 시작해보세요";
   String _gptResponse = "";
@@ -40,7 +42,14 @@ class _IRISHomePageState extends State<IRISHomePage> with TickerProviderStateMix
   void initState() {
     super.initState();
     _speech = stt.SpeechToText();
+    _flutterTts = FlutterTts();
     _waveController = AnimationController(vsync: this);
+  }
+
+  void _speak(String text) async {
+    await _flutterTts.setLanguage("ko-KR");
+    await _flutterTts.setPitch(1.0);
+    await _flutterTts.speak(text);
   }
 
   void _listen() async {
@@ -82,6 +91,7 @@ class _IRISHomePageState extends State<IRISHomePage> with TickerProviderStateMix
       setState(() {
         _gptResponse = "GPT 응답 (가짜): \"\$input\"에 대한 답변입니다.";
       });
+      _speak(_gptResponse);
       _waveController.stop();
     } else {
       try {
@@ -107,15 +117,18 @@ class _IRISHomePageState extends State<IRISHomePage> with TickerProviderStateMix
           setState(() {
             _gptResponse = "GPT 응답: \$reply";
           });
+          _speak(_gptResponse);
         } else {
           setState(() {
             _gptResponse = "GPT 응답 실패: 상태코드 \${response.statusCode}";
           });
+          _speak(_gptResponse);
         }
       } catch (e) {
         setState(() {
           _gptResponse = "GPT 연결 중 오류 발생: \$e";
         });
+        _speak(_gptResponse);
       } finally {
         _waveController.stop();
       }
