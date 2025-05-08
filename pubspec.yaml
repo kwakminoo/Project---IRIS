@@ -10,10 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_tts: ^3.8.0
+  flutter_tts: ^4.2.2
   cupertino_icons: ^1.0.8
   speech_to_text: ^6.5.0
   http: ^1.2.0
+  lottie: ^2.6.0
 
 dev_dependencies:
   flutter_test:
@@ -22,5 +23,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
   assets:
+    - assets/IRIS Background.gif
     - assets/Animation - 1745933971143.json
+    - assets/Animation - 1745934034203.json
+
