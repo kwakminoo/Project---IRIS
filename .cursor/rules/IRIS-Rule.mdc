@@ -1,0 +1,167 @@
+---
+alwaysApply: true
+---
+
+---
+
+# 3. `.cursor/rules/iris.mdc`
+
+`.cursor/rules/iris.mdc` 경로에 생성하세요.
+
+```md
+---
+description: Iris project rules
+globs: **/*
+alwaysApply: true
+---
+
+# Iris Cursor Rules
+
+You are working on Iris, a local-first Jarvis-like AI assistant.
+
+## Identity
+
+- Project name: Iris
+- Do not rename it to Dexter, Jarvis, Friday, or any other name.
+- Iris is a local-first personal AI assistant with hybrid workflow monitoring.
+
+## Model Rule
+
+- Primary LLM direction: Gemma 4 local model.
+- Use Ollama or LM Studio compatible HTTP API for local LLM connection.
+- Do not make Claude API or Gemini API the default model.
+- If Gemma 4 is unavailable, return a fallback response.
+
+## Architecture Rule
+
+Keep these layers separated:
+
+1. `ai/`  
+   LLM client, prompt builder, response parser.
+
+2. `assistant/`  
+   Agent adapter, OpenCLO/OpenClaw adapter, task planner, safety guard.
+
+3. `audio/`  
+   STT, TTS, barge-in.
+
+4. `automation/`  
+   App launching, window control, keyboard/mouse control, layout engine, action executor.
+
+5. `modes/`  
+   Work mode, game mode, creative mode, mode manager.
+
+6. `monitoring/`  
+   Monitor manager, target registry, OCR, terminal log collector, browser tab monitor, state detector, alert generator.
+
+7. `ui/`  
+   Main window, visualizer, chat panel, monitor dashboard, notification panel, report window.
+
+8. `storage/`  
+   SQLite database and logs.
+
+## Safety Rule
+
+Never execute computer control directly.
+
+Before executing:
+- Ask user for confirmation.
+- Check Safety Guard.
+- Log the action.
+- Execute only if approved.
+
+Blocked by default:
+- File deletion
+- Payment
+- Password input
+- Personal data submission
+- System setting changes
+- Dangerous shell commands
+- Unapproved keyboard/mouse control
+
+## Work Mode Rule
+
+When the user says something like:
+- "작업 시작할게"
+- "일해야겠다"
+- "개발 시작하자"
+
+Do not immediately launch apps.
+
+Iris must ask:
+"어떤 작업을 실행할까요? 최근 작업을 이어갈까요, 새로운 작업인가요?"
+
+Then suggest recent work from `recent_work_manager`.
+
+After the user selects a task, Iris should ask for confirmation before launching apps and arranging windows.
+
+## Game Mode Rule
+
+When the user says:
+- "게임할래"
+- "롤 켜줘"
+- "게임 시작하자"
+
+Do not immediately launch the game.
+
+Iris must ask:
+"어떤 게임을 실행할까요?"
+
+Then optionally ask whether to open related apps:
+- Discord
+- YouTube Music
+- OP.GG
+- Steam
+- OBS
+
+Run only after user approval.
+
+## Monitoring Rule
+
+Iris monitoring must be hybrid.
+
+Use the best method for each target:
+
+- Iris-launched terminal command: stdout/stderr logs
+- Existing terminal window: UI Automation + OCR
+- Cursor / VS Code: UI Automation + OCR
+- Chrome ChatGPT / Gemini / Discord / Midjourney: Chrome Extension + DOM
+- Current screen: screenshot + OCR
+- System errors: Windows Event Log as supporting source
+- Complex visual state: future VLM adapter
+
+Do not rely only on current screen OCR.
+
+## Privacy Rule
+
+- Do not store raw screenshots by default.
+- Do not store full OCR text by default.
+- Store summarized events only.
+- Sensitive pages must be excluded from monitoring.
+
+## Code Style
+
+- Use Python 3.11+.
+- Use Korean comments for important logic.
+- Keep files modular.
+- Do not place unrelated features in one file.
+- Handle missing dependencies gracefully.
+
+## Code Convention Rule
+
+Follow `docs/code-convention.md` for all implementation.
+
+Do not create large mixed-responsibility files.
+
+Respect module boundaries:
+- `ai/` handles LLM.
+- `assistant/` handles agent and safety.
+- `audio/` handles STT/TTS.
+- `automation/` handles app/window/input actions.
+- `modes/` handles work/game/creative mode.
+- `monitoring/` handles target observation and detection.
+- `ui/` handles PyQt6 UI only.
+- `storage/` handles SQLite.
+
+All public functions should use type hints when practical.
+All important logic should include Korean comments.
