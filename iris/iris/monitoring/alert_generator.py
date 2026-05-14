@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
+from iris.ai.prompt_builder import IRIS_SYSTEM_PROMPT
 from iris.monitoring.models import DetectionResult, StatusCategory
 
 
@@ -39,15 +40,16 @@ def build_alert_text(
     if gemma is None or result.category in (StatusCategory.NORMAL, StatusCategory.UNKNOWN):
         return base
     try:
-        prompt = (
-            "다음 모니터링 알림을 사용자에게 보여줄 한 문장 한국어로 짧게 다듬어줘. "
-            "따옴표 없이 한 문장만.\n"
-            f"{base}"
+        sys = (
+            IRIS_SYSTEM_PROMPT
+            + "\n\n[이번 호출 과제]\n"
+            "아래 모니터링 알림을 사용자에게 보여줄 한 문장 한국어로만 짧게 다듬습니다. "
+            "따옴표 없이 한 문장만 출력하세요."
         )
         refined = gemma.chat(
             [
-                ChatMessage("system", "You output one short Korean sentence only."),
-                ChatMessage("user", prompt),
+                ChatMessage("system", sys),
+                ChatMessage("user", base),
             ]
         )
         if refined and len(refined) < 400:

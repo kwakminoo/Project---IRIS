@@ -1,7 +1,8 @@
-"""Gemma 4 로컬 HTTP 클라이언트 (Ollama / OpenAI 호환)."""
+"""Gemma 4 로컬 LLM 클라이언트 — Ollama /api/chat 기본, OpenAI 호환 경로 선택."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
@@ -19,15 +20,43 @@ class ChatMessage:
 
 
 FALLBACK_KO = (
-    "로컬 언어 모델에 연결할 수 없습니다. Ollama 또는 LM Studio가 실행 중인지, "
-    "GEMMA_API_BASE_URL 과 GEMMA_MODEL_NAME 을 확인해 주세요."
+    "로컬 언어 모델에 연결할 수 없습니다. Ollama가 실행 중인지, "
+    "OLLAMA_BASE_URL·GEMMA_MODEL_NAME(예: gemma4:e2b)을 확인해 주세요."
+)
+
+_STRIP_EMPTY_KO = (
+    "모델이 내부 사고만 반환한 것 같습니다. "
+    "질문을 조금 바꿔 다시 시도해 주세요."
+)
+
+# 모델이 노출하면 안 되는 사고/리즈닝 블록 제거
+_THINK_BLOCK = re.compile(
+    r"(?is)"
+    r"(?:<think>.*?</think>"
+    r"|<thinking>.*?</thinking>"
+    r"|<reasoning>.*?</reasoning>"
+    r"|<redacted_reasoning>.*?</redacted_reasoning>"
+    r"|<{3}[\s\S]*?>{3})"
 )
 
 
-class GemmaClient:
-    """로컬 LLM 호출. 실패 시 한국어 fallback."""
+def _sanitize_visible_reply(text: str) -> str:
+    """Thinking / 내부 리즈닝 태그 제거 후 사용자에게 보일 본문만 남김."""
+    t = _THINK_BLOCK.sub("", text)
+    # 모델이 태그 없이 "Thought:" 블록만 쓰는 경우 일부 제거
+    t = re.sub(
+        r"(?im)^\s*(?:thought|thinking|reasoning|내부\s*사고|사고\s*과정)\s*[:：]\s*.+$",
+        "",
+        t,
+    )
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t
 
-    def __init__(self, settings: Settings, timeout_sec: float = 60.0) -> None:
+
+class GemmaClient:
+    """Ollama /api/chat 호출. 실패·빈 응답 시 한국어 fallback (앱 종료 없음)."""
+
+    def __init__(self, settings: Settings, timeout_sec: float = 120.0) -> None:
         self._settings = settings
         self._timeout = timeout_sec
 
@@ -36,13 +65,19 @@ class GemmaClient:
             return FALLBACK_KO
         try:
             if self._settings.gemma_backend == "openai_compatible":
-                return self._chat_openai_compatible(messages)
-            return self._chat_ollama(messages)
-        except (httpx.HTTPError, OSError, ValueError, KeyError):
+                raw = self._chat_openai_compatible(messages)
+            else:
+                raw = self._chat_ollama(messages)
+            cleaned = _sanitize_visible_reply(raw)
+            if not cleaned:
+                return _STRIP_EMPTY_KO if raw.strip() else FALLBACK_KO
+            return cleaned
+        except Exception:
             return FALLBACK_KO
 
     def _chat_ollama(self, messages: Sequence[ChatMessage]) -> str:
-        base = self._settings.gemma_api_base_url.rstrip("/")
+        # Ollama 전용 베이스 URL (기본 http://localhost:11434)
+        base = self._settings.ollama_base_url.rstrip("/")
         url = f"{base}/api/chat"
         payload = {
             "model": self._settings.gemma_model_name,
@@ -57,7 +92,7 @@ class GemmaClient:
             text = msg.get("content")
             if isinstance(text, str) and text.strip():
                 return text.strip()
-            return FALLBACK_KO
+            return ""
 
     def _chat_openai_compatible(self, messages: Sequence[ChatMessage]) -> str:
         base = self._settings.gemma_api_base_url.rstrip("/")
@@ -73,9 +108,9 @@ class GemmaClient:
             data = r.json()
             choices = data.get("choices") or []
             if not choices:
-                return FALLBACK_KO
+                return ""
             msg = choices[0].get("message") or {}
             text = msg.get("content")
             if isinstance(text, str) and text.strip():
                 return text.strip()
-            return FALLBACK_KO
+            return ""

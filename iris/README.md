@@ -26,6 +26,11 @@ python -m playwright install chromium
 ## 실행
 
 ```powershell
+
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\IRIS\iris"
+
+.\.venv\Scripts\python.exe -m iris
+
 python -m iris
 ```
 

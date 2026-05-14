@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 
-from iris.audio.tts_engine import TtsEngine
+
+class TtsStopCapable(Protocol):
+    """Barge-in이 호출하는 최소 TTS 인터페이스."""
+
+    def stop(self) -> None: ...
 
 
 class BargeInController:
@@ -19,7 +23,7 @@ class BargeInController:
 
     def __init__(
         self,
-        tts: TtsEngine,
+        tts: TtsStopCapable,
         ui_hook: Optional[Callable[[], None]] = None,
         grace_ms: int = 450,
         threshold: float = 0.02,

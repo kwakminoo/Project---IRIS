@@ -6,8 +6,9 @@ from typing import Sequence
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from iris.agent.needs_agent import format_hits_for_gemma_context, research_hits_with_intent
 from iris.ai.gemma_client import ChatMessage, GemmaClient
-from iris.agent.needs_agent import research_hits
+from iris.core.command_router import CommandKind
 
 
 class LlmWorker(QThread):
@@ -24,12 +25,13 @@ class LlmWorker(QThread):
 
 
 class SearchWorker(QThread):
-    finished_hits = pyqtSignal(str, list)
+    finished_hits = pyqtSignal(str, list, str)
 
-    def __init__(self, query_text: str) -> None:
+    def __init__(self, query_text: str, intent: CommandKind = CommandKind.WEB_SEARCH) -> None:
         super().__init__()
         self._query_text = query_text
+        self._intent = intent
 
     def run(self) -> None:
-        q, hits = research_hits(self._query_text)
-        self.finished_hits.emit(q, hits)
+        q, hits = research_hits_with_intent(self._query_text, self._intent)
+        self.finished_hits.emit(q, hits, self._intent.name)
