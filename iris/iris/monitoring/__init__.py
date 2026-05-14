@@ -9,7 +9,6 @@ from iris.monitoring.models import (
     StatusCategory,
     TargetType,
 )
-from iris.monitoring.target_registry import TargetRegistry
 from iris.monitoring.terminal_log_collector import (
     MonitoredCommandHandle,
     TerminalLogRegistry,
@@ -23,7 +22,6 @@ __all__ = [
     "MonitoredCommandHandle",
     "MonitoredTarget",
     "StatusCategory",
-    "TargetRegistry",
     "TargetType",
     "TerminalLogRegistry",
     "is_process_running",

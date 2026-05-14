@@ -1,10 +1,8 @@
-"""OpenCLO/OpenClaw 어댑터 스텁."""
+"""호환용 별칭 — OpenClawActionBackend."""
 
 from __future__ import annotations
 
+from iris.assistant.openclaw_adapter import OpenClawActionBackend as OpenCloAdapter
+from iris.assistant.openclaw_adapter import OpenClawResult
 
-class OpenCloAdapter:
-    """추후 연동."""
-
-    def enabled(self) -> bool:
-        return False
+__all__ = ["OpenCloAdapter", "OpenClawResult"]

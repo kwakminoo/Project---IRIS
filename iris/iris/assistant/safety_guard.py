@@ -22,7 +22,11 @@ class ActionCategory(Enum):
 _DANGER_PATTERNS: list[tuple[ActionCategory, re.Pattern[str]]] = [
     (
         ActionCategory.FILE_DELETE,
-        re.compile(r"(삭제|지워|rm\s+-rf|format\s+c:|드라이브\s*포맷)", re.IGNORECASE),
+        re.compile(
+            r"(삭제|지워|rm\s+-rf|format\s+c:|드라이브\s*포맷|파일\s*이동|폴더\s*이동|"
+            r"덮어쓰|overwrite|move\s+to\s+trash)",
+            re.IGNORECASE,
+        ),
     ),
     (ActionCategory.PAYMENT, re.compile(r"(결제|카드\s*번호|송금)", re.IGNORECASE)),
     (ActionCategory.PASSWORD, re.compile(r"(비밀번호|password\s*입력)", re.IGNORECASE)),

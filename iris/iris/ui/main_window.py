@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
-from PyQt6.QtWidgets import QLabel, QMainWindow, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter, QVBoxLayout, QWidget
 
 from iris.agent.report_window import ReportWindow
 from iris.ai.gemma_client import ChatMessage, GemmaClient
-from iris.ai.prompt_builder import build_messages
 from iris.assistant.agent_adapter import IrisAssistant
+from iris.assistant.openclaw_adapter import OpenClawActionBackend, openclaw_backend_status_label
+from iris.agent.needs_agent import format_hits_for_gemma_context
+from iris.assistant.tool_layer import is_search_intent
 from iris.automation.action_executor import ActionExecutor
 from iris.audio.barge_in import BargeInController
+from iris.audio.speech_formatter import format_speech, infer_speech_tone
 from iris.audio.stt_engine import SttEngine
 from iris.audio.tts_engine import TtsEngine
+from iris.audio.tts_qt_playback import EdgeTtsPlaybackBridge
 from iris.config.app_paths import detect_app_paths
 from iris.config.settings import load_settings
-from iris.core.command_router import CommandKind, classify_command
+from iris.core.command_router import CommandKind
+from iris.core.intent_router import route_user_intent
 from iris.core.context_manager import PendingMonitoringAction
 from iris.core.state_machine import AppState, StateMachine
 from iris.monitoring import BrowserTabMonitor, MonitorManager, TerminalLogRegistry
@@ -72,15 +78,18 @@ class MainWindow(QMainWindow):
         self._term_log = TerminalLogRegistry()
         self._browser = BrowserTabMonitor()
         self._app_paths = detect_app_paths()
+        self._openclaw = OpenClawActionBackend.from_settings(self._settings)
         self._executor = ActionExecutor(
             self._db,
             self._app_paths,
             register_target=lambda k, h: self._targets.register(k, h),
+            openclaw=self._openclaw,
         )
-        self._assistant = IrisAssistant(self._db, self._executor)
         self._gemma = GemmaClient(self._settings)
+        self._assistant = IrisAssistant(self._db, self._executor, self._gemma, self._app_paths)
         self._stt = SttEngine(self._settings)
-        self._tts = TtsEngine(self._settings)
+        self._tts_bridge = EdgeTtsPlaybackBridge(self)
+        self._tts = TtsEngine(self._settings, self._tts_bridge, parent=self)
         self._bridge = UiBridge(self)
         self._bridge.barge_in.connect(self._barge_slot)
         self._bridge.tts_finished.connect(self._tts_done_slot)
@@ -103,13 +112,32 @@ class MainWindow(QMainWindow):
 
         self._status_label = QLabel("상태: IDLE")
         root.addWidget(self._status_label)
+        self._openclaw_status = QLabel(openclaw_backend_status_label(self._openclaw))
+        self._openclaw_status.setObjectName("OpenclawStatus")
+        root.addWidget(self._openclaw_status)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         left_lay = QVBoxLayout(left)
         self._viz = Visualizer()
-        self._viz.setMinimumHeight(260)
+        self._viz.setMinimumHeight(300)
         left_lay.addWidget(self._viz, 1)
+        if os.environ.get("IRIS_DEBUG_PARTICLE") == "1":
+            dbg = QWidget()
+            dbg_row = QHBoxLayout(dbg)
+            dbg_row.setContentsMargins(0, 4, 0, 0)
+            for st in (
+                AppState.IDLE,
+                AppState.LISTENING,
+                AppState.PROCESSING,
+                AppState.RESPONDING,
+                AppState.ALERTING,
+            ):
+                btn = QPushButton(st.name)
+                btn.clicked.connect(lambda _checked=False, s=st: self._state.set_state(s))
+                dbg_row.addWidget(btn)
+            dbg_row.addStretch(1)
+            left_lay.addWidget(dbg)
         self._chat = ChatPanel()
         left_lay.addWidget(self._chat, 2)
         splitter.addWidget(left)
@@ -195,6 +223,7 @@ class MainWindow(QMainWindow):
         if isinstance(s, AppState):
             self._viz.set_state(s)
             self._status_label.setText(f"상태: {s.name}")
+            self._openclaw_status.setText(openclaw_backend_status_label(self._openclaw))
 
     def _speak(self, text: str) -> None:
         def on_start() -> None:
@@ -211,32 +240,50 @@ class MainWindow(QMainWindow):
         self._state.set_state(AppState.PROCESSING)
         self._last_user_text = text
 
-        kind = classify_command(text)
-        if kind is CommandKind.WEB_OR_REPORT:
-            self._start_search_worker(text)
+        intent = route_user_intent(text)
+        if is_search_intent(intent):
+            self._start_search_worker(text, intent)
             return
 
-        reply = self._assistant.handle_user_text(text)
+        reply = self._assistant.handle_user_text(text, routed=intent)
         if reply:
             self._finish_assistant_reply(reply, store_history=False)
             return
 
-        messages = build_messages(text, extra_context=None, history=self._history[-8:])
-        self._llm_worker = LlmWorker(self._gemma, messages)
+        messages = self._assistant.build_general_chat_messages(
+            text,
+            history=self._history[-8:],
+        )
+        self._llm_worker = LlmWorker(self._assistant.gemma_client, messages)
         self._llm_worker.finished_text.connect(self._on_llm_done)
         self._llm_worker.start()
 
-    def _start_search_worker(self, text: str) -> None:
-        self._search_worker = SearchWorker(text)
+    def _start_search_worker(self, text: str, intent: CommandKind) -> None:
+        self._search_worker = SearchWorker(text, intent=intent)
         self._search_worker.finished_hits.connect(self._on_search_done)
         self._search_worker.start()
 
-    def _on_search_done(self, query: str, hits: object) -> None:
+    def _on_search_done(self, query: str, hits: object, intent_name: str) -> None:
         self._report.set_hits(query, hits)  # type: ignore[arg-type]
         self._report.show()
-        msg = f"Iris: '{query}' 검색 결과를 보고서 창에 표시했습니다."
-        self._db.insert_log("web", query, f"hits={len(hits)}")  # type: ignore[arg-type]
-        self._finish_assistant_reply(msg, store_history=False)
+        try:
+            intent = CommandKind[intent_name]
+        except KeyError:
+            intent = CommandKind.WEB_SEARCH
+        self._db.insert_log("web", query, f"hits={len(hits)} intent={intent.name}")  # type: ignore[arg-type]
+        ctx = format_hits_for_gemma_context(
+            query,
+            hits,  # type: ignore[arg-type]
+            intent_label=intent.name,
+        )
+        messages = self._assistant.build_general_chat_messages(
+            self._last_user_text,
+            history=self._history[-8:],
+            extra_context=ctx,
+        )
+        self._llm_worker = LlmWorker(self._assistant.gemma_client, messages)
+        self._llm_worker.finished_text.connect(self._on_llm_done)
+        self._llm_worker.start()
 
     def _on_llm_done(self, text: str) -> None:
         self._finish_assistant_reply(text, store_history=True)
@@ -247,7 +294,9 @@ class MainWindow(QMainWindow):
         if store_history:
             self._history.append(ChatMessage("user", self._last_user_text))
             self._history.append(ChatMessage("assistant", text))
-        self._speak(text)
+        tone = infer_speech_tone(from_llm=store_history, reply_text=text)
+        spoken = format_speech(text, tone)
+        self._speak(spoken)
 
     def _on_listen(self) -> None:
         """짧은 마이크 녹음 후 STT (구조용)."""
@@ -276,6 +325,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._monitor_mgr.stop()
+        self._tts.stop()
         self._barge.stop()
         self._db.close()
         event.accept()

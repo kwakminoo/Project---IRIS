@@ -1,4 +1,4 @@
-"""사용자 입력 명령 유형 분류."""
+"""사용자 입력 명령 유형 분류 (Intent Router / Tool Layer 공용)."""
 
 from __future__ import annotations
 
@@ -8,15 +8,21 @@ from enum import Enum, auto
 
 class CommandKind(Enum):
     GENERAL_CHAT = auto()
-    LAUNCH_APP = auto()
+    APP_LAUNCH = auto()
     WINDOW_CONTROL = auto()
-    WEB_OR_REPORT = auto()
+    FILE_TASK = auto()
+    WEB_SEARCH = auto()
     WORK_MODE = auto()
     GAME_MODE = auto()
     CREATIVE_MODE = auto()
-    COMPUTER_ACTION = auto()
     MONITORING_STATUS = auto()
-    ALERT_COMMAND = auto()
+    COMPUTER_ACTION = auto()
+    COMPLEX_AUTOMATION = auto()
+    # --- Tool layer: 주제·최신 정보 검색 → 웹 에이전트 후 Gemma 요약 ---
+    CURRENT_INFO_SEARCH = auto()
+    MOVIE_SEARCH = auto()
+    NEWS_SEARCH = auto()
+    WEATHER_SEARCH = auto()
 
 
 _WORK_PATTERNS = re.compile(
@@ -37,15 +43,46 @@ _WEB_PATTERNS = re.compile(
 )
 _MONITOR_PATTERNS = re.compile(r"(모니터링|상태\s*확인|지금\s*뭐\s*해)", re.IGNORECASE)
 _ALERT_PATTERNS = re.compile(r"(알림|경고)", re.IGNORECASE)
+_TERMINAL_STATUS = re.compile(
+    r"(터미널|콘솔|cmd|powershell|프롬프트).*(멈|멈춤|안\s*돌|응답\s*없|확인|어떤지|살아|봐줘|봐)",
+    re.IGNORECASE,
+)
+_MOVIE_PATTERNS = re.compile(
+    r"(영화|개봉작|상영작|박스오피스|극장가|스크린).*(뭐|추천|알려|있어|보여|해줘|궁금|볼만)|"
+    r"요즘.*영화|영화.*(요즘|뭐\s*있|추천|볼만|상영)",
+    re.IGNORECASE,
+)
+_NEWS_PATTERNS = re.compile(
+    r"(뉴스|헤드라인|속보).*(뭐|알려|줘|해줘|정리)|오늘\s*뉴스|최신\s*뉴스",
+    re.IGNORECASE,
+)
+_WEATHER_PATTERNS = re.compile(
+    r"(날씨|기온|미세먼지|초미세|강수|황사|폭우|폭설|체감온도)",
+    re.IGNORECASE,
+)
+_CURRENT_INFO_PATTERNS = re.compile(
+    r"(최신|실시간).*(정보|소식|동향|이슈)|요즘\s*세계|요즘\s*무슨\s*일|"
+    r"지금\s*세계|최근\s*이슈|요즘\s*뭐가\s*이슈",
+    re.IGNORECASE,
+)
 _DANGER_COMPUTER = re.compile(
     r"(마우스\s*클릭|키보드|쉘\s*실행|rm\s+-rf|포맷|레지스트리\s*삭제)",
     re.IGNORECASE,
 )
 _LAUNCH = re.compile(r"(실행해줘|켜줘|열어줘|launch|open\s+app)", re.IGNORECASE)
+_FILE_TASK = re.compile(
+    r"(파일\s*찾아|문서\s*찾아|파일\s*검색|제안서|\.pptx|\.docx|\.pdf).*(찾아|검색|열어)|"
+    r"(찾아줘|검색해).*(파일|문서|제안서)",
+    re.IGNORECASE,
+)
+_COMPLEX_AUTO = re.compile(
+    r"(자동으로\s*해|매크로|복잡한\s*작업|스크립트로\s*해|전부\s*한번에)",
+    re.IGNORECASE,
+)
 
 
 def classify_command(text: str) -> CommandKind:
-    """간단 휴리스틱 분류 (한국어 우선)."""
+    """간단 휴리스틱 분류 (한국어 우선). 순서가 의도 정확도에 중요함."""
     t = text.strip()
     if not t:
         return CommandKind.GENERAL_CHAT
@@ -56,18 +93,38 @@ def classify_command(text: str) -> CommandKind:
         return CommandKind.GAME_MODE
     if _CREATIVE_PATTERNS.search(t):
         return CommandKind.CREATIVE_MODE
+
+    if _FILE_TASK.search(t):
+        return CommandKind.FILE_TASK
+    if _COMPLEX_AUTO.search(t):
+        return CommandKind.COMPLEX_AUTOMATION
+
+    # 터미널/프로세스 상태 → 모니터링 (Manager·대시보드와 연계)
+    if _TERMINAL_STATUS.search(t):
+        return CommandKind.MONITORING_STATUS
+
+    if _MOVIE_PATTERNS.search(t):
+        return CommandKind.MOVIE_SEARCH
+    if _NEWS_PATTERNS.search(t):
+        return CommandKind.NEWS_SEARCH
+    if _WEATHER_PATTERNS.search(t):
+        return CommandKind.WEATHER_SEARCH
+    if _CURRENT_INFO_PATTERNS.search(t):
+        return CommandKind.CURRENT_INFO_SEARCH
+
     if _WEB_PATTERNS.search(t):
-        return CommandKind.WEB_OR_REPORT
+        return CommandKind.WEB_SEARCH
     if _MONITOR_PATTERNS.search(t):
         return CommandKind.MONITORING_STATUS
     if _ALERT_PATTERNS.search(t):
-        return CommandKind.ALERT_COMMAND
+        return CommandKind.MONITORING_STATUS
+
     if _DANGER_COMPUTER.search(t):
         return CommandKind.COMPUTER_ACTION
     if _LAUNCH.search(t):
-        return CommandKind.LAUNCH_APP
+        return CommandKind.APP_LAUNCH
 
-    if "창" in t and ("포커스" in t or "이동" in t or "크기" in t):
+    if "창" in t and ("포커스" in t or "이동" in t or "크기" in t or "배치" in t):
         return CommandKind.WINDOW_CONTROL
 
     return CommandKind.GENERAL_CHAT
