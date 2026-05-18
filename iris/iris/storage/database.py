@@ -114,6 +114,58 @@ class Database:
                 last_checked_at TEXT NOT NULL,
                 FOREIGN KEY (target_id) REFERENCES targets(id)
             );
+            CREATE TABLE IF NOT EXISTS task_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL UNIQUE,
+                current_goal TEXT NOT NULL DEFAULT '',
+                tools_run_json TEXT NOT NULL DEFAULT '[]',
+                observations_json TEXT NOT NULL DEFAULT '[]',
+                approvals_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS memory_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                source_hint TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS automation_tool_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                approved INTEGER NOT NULL,
+                success INTEGER NOT NULL,
+                result TEXT
+            );
+            CREATE TABLE IF NOT EXISTS notification_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                target_id INTEGER,
+                event_id INTEGER,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                user_decision TEXT NOT NULL DEFAULT '',
+                snooze_until TEXT,
+                FOREIGN KEY (target_id) REFERENCES targets(id)
+            );
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER,
+                category TEXT NOT NULL DEFAULT '',
+                pref_type TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                UNIQUE(target_id, category, pref_type)
+            );
             """
         )
         self._conn.commit()
@@ -298,6 +350,13 @@ class Database:
     def get_target(self, target_id: int) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM targets WHERE id=?", (target_id,)).fetchone()
 
+    def set_target_enabled(self, target_id: int, enabled: bool) -> None:
+        self._conn.execute(
+            "UPDATE targets SET enabled=? WHERE id=?",
+            (1 if enabled else 0, target_id),
+        )
+        self._conn.commit()
+
     # --- events ---
 
     def insert_event(
@@ -453,4 +512,212 @@ class Database:
             TargetType.SYSTEM_LOG,
             title="Windows 이벤트",
             process_name="System",
+        )
+
+    # --- user_preferences ---
+
+    def get_preference(self, key: str, default: str = "") -> str:
+        row = self._conn.execute(
+            "SELECT value FROM user_preferences WHERE key=?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_preference(self, key: str, value: str) -> None:
+        ts = datetime.utcnow().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO user_preferences (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (key, value, ts),
+        )
+        self._conn.commit()
+
+    def get_auto_approve_low_risk(self) -> bool:
+        return self.get_preference("auto_approve_low_risk", "0") in ("1", "true", "True")
+
+    def set_auto_approve_low_risk(self, enabled: bool) -> None:
+        self.set_preference("auto_approve_low_risk", "1" if enabled else "0")
+
+    # --- task_sessions ---
+
+    def upsert_task_session(
+        self,
+        session_key: str,
+        current_goal: str,
+        tools_run_json: str = "[]",
+        observations_json: str = "[]",
+        approvals_json: str = "[]",
+    ) -> int:
+        ts = datetime.utcnow().isoformat()
+        row = self._conn.execute(
+            "SELECT id FROM task_sessions WHERE session_key=?", (session_key,)
+        ).fetchone()
+        if row:
+            tid = int(row["id"])
+            self._conn.execute(
+                """
+                UPDATE task_sessions
+                SET current_goal=?, tools_run_json=?, observations_json=?,
+                    approvals_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (current_goal, tools_run_json, observations_json, approvals_json, ts, tid),
+            )
+        else:
+            cur = self._conn.execute(
+                """
+                INSERT INTO task_sessions
+                (session_key, current_goal, tools_run_json, observations_json,
+                 approvals_json, updated_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_key, current_goal, tools_run_json, observations_json, approvals_json, ts, ts),
+            )
+            tid = int(cur.lastrowid)
+        self._conn.commit()
+        return tid
+
+    def get_task_session(self, session_key: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM task_sessions WHERE session_key=?", (session_key,)
+        ).fetchone()
+
+    # --- memory_summaries ---
+
+    def insert_memory_summary(self, category: str, summary: str, source_hint: str = "") -> int:
+        ts = datetime.utcnow().isoformat()
+        cur = self._conn.execute(
+            """
+            INSERT INTO memory_summaries (category, summary, source_hint, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (category, summary[:4000], source_hint[:500], ts),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def list_memory_summaries(self, limit: int = 20) -> list[sqlite3.Row]:
+        return list(
+            self._conn.execute(
+                "SELECT * FROM memory_summaries ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        )
+
+    # --- automation_tool_logs ---
+
+    def insert_automation_tool_log(
+        self,
+        tool_name: str,
+        summary: str,
+        approved: bool,
+        success: bool,
+        result: str | None = None,
+    ) -> None:
+        ts = datetime.utcnow().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO automation_tool_logs
+            (timestamp, tool_name, summary, approved, success, result)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, tool_name, summary[:1000], 1 if approved else 0, 1 if success else 0, result),
+        )
+        self._conn.commit()
+
+    # --- notification_log / notification_prefs ---
+
+    def insert_notification_log(
+        self,
+        target_id: int | None,
+        event_id: int | None,
+        category: str,
+        title: str,
+        message: str,
+        user_decision: str = "",
+        snooze_until: str | None = None,
+    ) -> int:
+        ts = datetime.utcnow().isoformat()
+        cur = self._conn.execute(
+            """
+            INSERT INTO notification_log
+            (timestamp, target_id, event_id, category, title, message,
+             user_decision, snooze_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, target_id, event_id, category, title[:500], message[:2000], user_decision, snooze_until),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def set_notification_pref(
+        self,
+        pref_type: str,
+        value: str,
+        target_id: int | None = None,
+        category: str = "",
+    ) -> None:
+        """pref_type: cooldown_seconds | ignore | snooze_until | disabled."""
+        ts = datetime.utcnow().isoformat()
+        tid = target_id if target_id is not None else -1
+        self._conn.execute(
+            """
+            INSERT INTO notification_prefs (target_id, category, pref_type, value, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(target_id, category, pref_type)
+            DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (tid, category, pref_type, value, ts),
+        )
+        self._conn.commit()
+
+    def get_notification_pref(
+        self,
+        pref_type: str,
+        target_id: int | None = None,
+        category: str = "",
+    ) -> str | None:
+        tid = target_id if target_id is not None else -1
+        row = self._conn.execute(
+            """
+            SELECT value FROM notification_prefs
+            WHERE target_id=? AND category=? AND pref_type=?
+            """,
+            (tid, category, pref_type),
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def is_target_notification_disabled(self, target_id: int) -> bool:
+        v = self.get_notification_pref("disabled", target_id=target_id, category="")
+        return v in ("1", "true", "True")
+
+    def is_notification_ignored(self, target_id: int, category: str) -> bool:
+        v = self.get_notification_pref("ignore", target_id=target_id, category=category)
+        return v in ("1", "true", "True")
+
+    def get_notification_snooze_until(self, target_id: int, category: str) -> str | None:
+        return self.get_notification_pref("snooze_until", target_id=target_id, category=category)
+
+    def get_notification_cooldown_seconds(
+        self, target_id: int, category: str, default: float = 90.0
+    ) -> float:
+        v = self.get_notification_pref("cooldown_seconds", target_id=target_id, category=category)
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except ValueError:
+            return default
+
+    def get_last_notification_shown_at(self, target_id: int, category: str) -> str | None:
+        return self.get_notification_pref("last_shown_at", target_id=target_id, category=category)
+
+    def set_last_notification_shown_at(self, target_id: int, category: str) -> None:
+        self.set_notification_pref(
+            "last_shown_at",
+            datetime.utcnow().isoformat(),
+            target_id=target_id,
+            category=category,
         )

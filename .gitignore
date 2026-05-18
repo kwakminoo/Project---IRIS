@@ -5,8 +5,10 @@ __pycache__/
 *.so
 .Python
 .venv/
+.venv-tts/
 venv/
 env/
+.cache/
 
 # 환경 변수·비밀 (로컬만)
 .env

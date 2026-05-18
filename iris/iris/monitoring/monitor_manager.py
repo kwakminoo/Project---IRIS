@@ -22,6 +22,7 @@ from iris.monitoring import windows_event_collector
 
 if TYPE_CHECKING:
     from iris.ai.gemma_client import GemmaClient
+    from iris.monitoring.notification_policy import NotificationPolicy
     from iris.storage.database import Database
 
 
@@ -39,6 +40,7 @@ class MonitorManager(QObject):
         gemma: Optional["GemmaClient"],
         terminal_registry: TerminalLogRegistry,
         browser_monitor: BrowserTabMonitor,
+        notification_policy: Optional["NotificationPolicy"] = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -47,6 +49,11 @@ class MonitorManager(QObject):
         self._gemma = gemma
         self._terminal_registry = terminal_registry
         self._browser = browser_monitor
+        from iris.monitoring.notification_policy import NotificationPolicy as _NP
+
+        self._notif_policy = notification_policy or _NP(
+            db, default_cooldown_seconds=float(settings.monitor_interval_seconds) * 30 or 90.0
+        )
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
         self._http_server: ThreadingHTTPServer | None = None
@@ -177,6 +184,15 @@ class MonitorManager(QObject):
 
         if res.category not in (StatusCategory.NORMAL, StatusCategory.UNKNOWN):
             if res.category != prev_cat:
+                cat_val = res.category.value
+                suppress = self._notif_policy.should_suppress(tid, cat_val)
+                if suppress:
+                    self._db.insert_log(
+                        "monitor",
+                        f"alert_suppressed:{suppress}",
+                        f"target={tid} cat={cat_val}",
+                    )
+                    return
                 eid = self._db.insert_event(
                     tid,
                     title,
@@ -187,10 +203,14 @@ class MonitorManager(QObject):
                 )
                 msg = build_alert_text(self._gemma, res, title)
                 focus = title or process_name or "Chrome"
+                self._notif_policy.mark_shown(tid, cat_val)
+                self._notif_policy.log_notification(
+                    tid, eid, cat_val, title, msg[:500], "shown"
+                )
                 self.alert_emitted.emit(
                     title,
                     msg,
-                    res.category.value,
+                    cat_val,
                     tid,
                     focus,
                     res.recommended_action,

@@ -1,0 +1,14 @@
+# Iris XTTS-v2 선택 의존성
+# 기본 Iris 실행에는 필요 없음.
+#
+# 중요: Coqui TTS는 Python 3.9~3.11 만 지원합니다 (3.12·3.13 불가).
+# Windows 예: py -3.11 -m venv .venv-tts && .venv-tts\Scripts\activate
+#            pip install -r requirements.txt -r requirements-tts.txt
+#
+# 상업 배포 전 Coqui TTS / XTTS-v2 라이선스(CPML 등) 검토가 필요합니다.
+
+TTS>=0.22.0,<0.23
+torch>=2.1.0
+torchaudio>=2.1.0
+soundfile>=0.12.1
+pydub>=0.25.1

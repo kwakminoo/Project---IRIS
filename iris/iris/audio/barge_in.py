@@ -8,6 +8,8 @@ from typing import Callable, Optional, Protocol
 
 import numpy as np
 
+from iris.audio.input_device import resolve_input_device
+
 
 class TtsStopCapable(Protocol):
     """Barge-in이 호출하는 최소 TTS 인터페이스."""
@@ -27,6 +29,7 @@ class BargeInController:
         ui_hook: Optional[Callable[[], None]] = None,
         grace_ms: int = 450,
         threshold: float = 0.02,
+        input_device: int | None = None,
     ) -> None:
         self._tts = tts
         self._ui_hook = ui_hook
@@ -35,6 +38,7 @@ class BargeInController:
         self._thread: Optional[threading.Thread] = None
         self._active = threading.Event()
         self._tts_start_ts = 0.0
+        self._input_device = input_device
 
     def notify_tts_started(self) -> None:
         self._tts_start_ts = time.time()
@@ -50,6 +54,10 @@ class BargeInController:
                 return
             sample_rate = 16000
             block = int(sample_rate * 0.2)
+            device_choice, _reason = resolve_input_device(sd, self._input_device)
+            if device_choice is None:
+                self._active.clear()
+                return
 
             def callback(indata, frames, time_info, status):  # noqa: ARG001
                 if not self._active.is_set():
@@ -68,6 +76,7 @@ class BargeInController:
                     channels=1,
                     samplerate=sample_rate,
                     blocksize=block,
+                    device=device_choice.device,
                     callback=callback,
                 ):
                     while self._active.is_set():

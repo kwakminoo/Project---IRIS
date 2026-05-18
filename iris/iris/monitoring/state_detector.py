@@ -160,3 +160,8 @@ def detect_state(
         return DetectionResult(StatusCategory.UNKNOWN, 0.2, "수집 텍스트 없음", "")
 
     return DetectionResult(StatusCategory.NORMAL, 0.5, "특이 패턴 없음", "")
+
+
+def category_needs_dialogue(category: StatusCategory) -> bool:
+    """대화/UI에 제안을 띄울 카테고리."""
+    return category not in (StatusCategory.NORMAL, StatusCategory.UNKNOWN)

@@ -20,9 +20,13 @@ def build_messages(
     user_text: str,
     extra_context: str | None = None,
     history: Sequence[ChatMessage] | None = None,
+    *,
+    memory_context: str | None = None,
 ) -> list[ChatMessage]:
-    """시스템 + (선택)컨텍스트 + 히스토리 + 사용자 메시지."""
+    """시스템 + (선택)메모리·컨텍스트 + 히스토리 + 사용자 메시지."""
     sys = IRIS_SYSTEM_PROMPT
+    if memory_context:
+        sys = sys + "\n\n[기억·작업 세션]\n" + memory_context.strip()
     if extra_context:
         sys = sys + "\n\n[컨텍스트]\n" + extra_context.strip()
     out: list[ChatMessage] = [ChatMessage("system", sys)]

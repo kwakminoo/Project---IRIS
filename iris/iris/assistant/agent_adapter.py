@@ -15,11 +15,13 @@ from iris.core.command_router import CommandKind, classify_command
 from iris.core.context_manager import (
     DialogueContext,
     DialogueStep,
+    PendingAutomationTool,
     PendingMonitoringAction,
     PendingPlan,
     PendingUserAction,
 )
 from iris.core.recent_work_manager import format_recent_work_suggestion, seed_demo_recent_work
+from iris.memory.memory_manager import MemoryManager
 from iris.modes import creative_mode, game_mode, work_mode
 from iris.storage.database import Database
 
@@ -69,6 +71,7 @@ class IrisAssistant:
         self._gemma = gemma
         self._app_paths = app_paths
         self.ctx = DialogueContext()
+        self.memory = MemoryManager(db)
         seed_demo_recent_work(db)
 
     @property
@@ -84,7 +87,22 @@ class IrisAssistant:
         extra_context: str | None = None,
     ) -> list[ChatMessage]:
         """시스템 프롬프트가 포함된 LLM 메시지 조립 (Ollama 호출 전 단계)."""
-        return build_messages(user_text, extra_context=extra_context, history=history)
+        mem = self.memory.build_extra_context()
+        hist = list(history) if history is not None else self.memory.short_term_history()
+        return build_messages(
+            user_text,
+            extra_context=extra_context,
+            history=hist,
+            memory_context=mem or None,
+        )
+
+    def run_agent_loop(self, text: str, *, routed: CommandKind | None = None) -> str:
+        """JSON 계획 → 도구 실행 → observation 요약 Agent loop."""
+        from iris.assistant.orchestrator import AgentOrchestrator
+
+        if not hasattr(self, "_agent_orchestrator"):
+            self._agent_orchestrator = AgentOrchestrator(self._db, self, self._gemma)
+        return self._agent_orchestrator.run(text, intent=routed)
 
     def set_monitor_pending(self, pending: PendingMonitoringAction) -> bool:
         """모니터링 승인 대기. 작업/게임/단일 액션 승인 대기 중이면 True 반환하지 않고 스킵."""
@@ -97,6 +115,7 @@ class IrisAssistant:
             return False
         self.ctx.pending = None
         self.ctx.pending_action = None
+        self.ctx.pending_automation = None
         self.ctx.pending_monitor = pending
         self.ctx.step = DialogueStep.MONITOR_WAIT_APPROVAL
         return True
@@ -114,6 +133,9 @@ class IrisAssistant:
 
         if self.ctx.step == DialogueStep.MONITOR_WAIT_APPROVAL and self.ctx.pending_monitor:
             return self._handle_monitor_approval(text)
+
+        if self.ctx.step == DialogueStep.ACTION_WAIT_APPROVAL and self.ctx.pending_automation:
+            return self._handle_automation_approval(text)
 
         # 멀티턴: 질문 단계 후속 입력
         if self.ctx.step == DialogueStep.WORK_ASK_TASK:
@@ -144,7 +166,7 @@ class IrisAssistant:
             return self._start_creative_flow(text)
 
         if kind is CommandKind.MONITORING_STATUS:
-            return self._monitoring_status_reply()
+            return self.monitoring_status_reply()
 
         if kind is CommandKind.COMPUTER_ACTION:
             return (
@@ -166,6 +188,10 @@ class IrisAssistant:
 
         # 일반 대화는 상위에서 LLM 호출로 처리
         return ""
+
+    def monitoring_status_reply(self) -> str:
+        """MonitorManager·DB와 연계된 요약 (오케스트레이터·UI 공용)."""
+        return self._monitoring_status_reply()
 
     def _monitoring_status_reply(self) -> str:
         """MonitorManager·DB와 연계된 요약 (UI 대시보드 보조)."""
@@ -194,12 +220,112 @@ class IrisAssistant:
         lines.append("상세 로그·알림은 오른쪽 모니터링 대시보드와 알림 패널을 확인해 주세요.")
         return "\n".join(lines)
 
+    def request_automation_tool(
+        self,
+        tool_name: str,
+        params: dict,
+        summary: str,
+        *,
+        settings: object | None = None,
+    ) -> str:
+        """AutomationToolRegistry — LOW_RISK+설정 시 즉시 실행, 아니면 승인 대기."""
+        from iris.automation.tool_types import AutomationToolContext
+
+        ctx = AutomationToolContext(
+            params=params,
+            approved=False,
+            auto_approve_low_risk=self._db.get_auto_approve_low_risk(),
+            app_paths=self._app_paths,
+            settings=settings,
+            summary=summary,
+        )
+        reg = self._executor.tool_registry
+        preview = reg.preview(tool_name, ctx)
+        if not reg.needs_approval(tool_name, ctx):
+            msg = self._executor.run_automation_tool(
+                tool_name, params, approved=True, summary=summary, settings=settings
+            )
+            self.memory.save_task_session(
+                summary[:200],
+                tools_run=[tool_name],
+                observations=[msg[:200]],
+            )
+            return f"Iris: {msg}"
+
+        self.ctx.pending = None
+        self.ctx.pending_action = None
+        self.ctx.pending_automation = PendingAutomationTool(
+            tool_name=tool_name,
+            params=params,
+            summary=summary,
+            preview=preview,
+        )
+        self.ctx.step = DialogueStep.ACTION_WAIT_APPROVAL
+        return f"Iris: {preview}\n실행할까요? ('응' / '승인' 또는 '취소')"
+
+    def _handle_automation_approval(self, text: str) -> str:
+        pa = self.ctx.pending_automation
+        if not pa:
+            self.ctx.clear()
+            return "Iris: 대기 중인 자동화 동작이 없습니다."
+        if _is_reject(text):
+            self.ctx.clear()
+            self._db.insert_log("automation_tool", "reject", pa.summary)
+            self.memory.save_task_session(
+                pa.summary[:200], approvals=["rejected:" + pa.tool_name]
+            )
+            return "Iris: 자동화 실행을 취소했습니다."
+        if not _is_approval(text):
+            return "Iris: 실행하려면 '응' 또는 '승인' 이라고 말씀해 주세요. 취소는 '취소' 입니다."
+
+        self.ctx.clear()
+        msg = self._executor.run_automation_tool(
+            pa.tool_name,
+            pa.params,
+            approved=True,
+            summary=pa.summary,
+        )
+        self.memory.save_task_session(
+            pa.summary[:200],
+            tools_run=[pa.tool_name],
+            observations=[msg[:200]],
+            approvals=["approved:" + pa.tool_name],
+        )
+        self._db.insert_log("automation_tool", "approved", f"{pa.tool_name}: {msg[:500]}")
+        return f"Iris: 승인 확인. {msg}"
+
     def _bind_action_approval(self, pa: PendingUserAction, question: str) -> str:
         """단일 실행 승인 대기 상태로 전환."""
         self.ctx.pending = None
         self.ctx.pending_action = pa
+        self.ctx.pending_automation = None
         self.ctx.step = DialogueStep.ACTION_WAIT_APPROVAL
         return f"Iris: {question}"
+
+    def _execute_user_action_now(self, pa: PendingUserAction) -> str:
+        """1~3단계 단일 실행은 승인 대기 없이 바로 실행한다."""
+        req = IrisExecutionRequest(
+            command_kind=pa.command_kind,
+            user_text=pa.user_original_text,
+            summary=pa.summary,
+            approved=True,
+            app_key=pa.app_key,
+            display_name=pa.display_name,
+        )
+        msg = self._executor.execute_iris_request(req)
+        self._db.insert_log("execute", pa.summary, msg)
+        return "Iris: 요청을 실행합니다.\n" + msg
+
+    def _execute_preset_now(self, pending: PendingPlan) -> str:
+        """모드 프리셋 실행도 현재 정책상 3단계 이하로 보고 바로 실행한다."""
+        preset = find_preset(pending.preset_id)
+        if not preset:
+            return "Iris: 프리셋을 찾을 수 없습니다."
+        plan = plan_from_preset(preset)
+        msg = self._executor.execute_plan(plan, preset, approved=True)
+        self._db.insert_log("execute", pending.title, msg)
+        self.ctx.clear()
+        return "Iris: 요청한 환경을 실행합니다.\n" + msg
 
     def _start_app_launch_flow(self, text: str) -> str:
         app_key, display = _resolve_launch_target(text)
@@ -218,7 +344,7 @@ class IrisAssistant:
             app_key=app_key,
             display_name=display,
         )
-        return self._bind_action_approval(pa, f"{display}를 실행할까요?")
+        return self._execute_user_action_now(pa)
 
     def _start_window_control_flow(self, text: str) -> str:
         summary = f"창 제어 요청: {text.strip()[:200]}"
@@ -227,7 +353,7 @@ class IrisAssistant:
             summary=summary,
             user_original_text=text,
         )
-        return self._bind_action_approval(pa, "요청하신 창을 포커스하고 배치할까요?")
+        return self._execute_user_action_now(pa)
 
     def _start_file_task_flow(self, text: str) -> str:
         summary = f"파일 작업 요청: {text.strip()[:200]}"
@@ -236,7 +362,7 @@ class IrisAssistant:
             summary=summary,
             user_original_text=text,
         )
-        return self._bind_action_approval(pa, "파일 검색·탐색을 진행할까요?")
+        return self._execute_user_action_now(pa)
 
     def _start_complex_automation_flow(self, text: str) -> str:
         summary = f"복잡 자동화 요청: {text.strip()[:200]}"
@@ -245,7 +371,7 @@ class IrisAssistant:
             summary=summary,
             user_original_text=text,
         )
-        return self._bind_action_approval(pa, "말씀하신 자동화를 실행할까요?")
+        return self._execute_user_action_now(pa)
 
     def _start_work_flow(self, text: str) -> str:
         self.ctx.pending_action = None
@@ -263,8 +389,7 @@ class IrisAssistant:
                 app_keys=list(preset.suggested_app_keys),
                 work_type_label=preset.title,
             )
-            self.ctx.step = DialogueStep.WORK_WAIT_APPROVAL
-            return work_mode.propose_work_apps_message(preset)
+            return self._execute_preset_now(self.ctx.pending)
         return ""
 
     def _start_game_flow(self, text: str) -> str:
@@ -279,8 +404,7 @@ class IrisAssistant:
             app_keys=list(preset.suggested_app_keys),
             work_type_label="game",
         )
-        self.ctx.step = DialogueStep.GAME_WAIT_APPROVAL
-        return game_mode.propose_side_apps_message(preset)
+        return self._execute_preset_now(self.ctx.pending)
 
     def _continue_game_flow(self, text: str) -> str:
         if self.ctx.step == DialogueStep.GAME_ASK_TITLE:
@@ -292,8 +416,7 @@ class IrisAssistant:
                 app_keys=list(preset.suggested_app_keys),
                 work_type_label="game",
             )
-            self.ctx.step = DialogueStep.GAME_WAIT_APPROVAL
-            return game_mode.propose_side_apps_message(preset)
+            return self._execute_preset_now(self.ctx.pending)
         return ""
 
     def _start_creative_flow(self, text: str) -> str:
@@ -311,8 +434,7 @@ class IrisAssistant:
                 app_keys=list(preset.suggested_app_keys),
                 work_type_label="creative",
             )
-            self.ctx.step = DialogueStep.CREATIVE_WAIT_APPROVAL
-            return creative_mode.propose_creative_apps_message(preset)
+            return self._execute_preset_now(self.ctx.pending)
         return ""
 
     def _handle_pending_approval(self, text: str) -> str:
