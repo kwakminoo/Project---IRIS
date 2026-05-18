@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 
 class DragTab(QWidget):
     """프레임리스 창 드래그용."""
+
+    settings_clicked = pyqtSignal()
 
     def __init__(self, parent_window: QWidget) -> None:
         super().__init__()
@@ -17,9 +19,16 @@ class DragTab(QWidget):
         lay.setContentsMargins(12, 8, 12, 8)
         title = QLabel("Iris")
         title.setObjectName("DragTitle")
+        btn_settings = QPushButton("⚙")
+        btn_settings.setToolTip("설정")
+        btn_settings.setFixedWidth(36)
+        btn_settings.clicked.connect(self.settings_clicked.emit)
         btn_close = QPushButton("✕")
         btn_close.setFixedWidth(36)
         btn_close.clicked.connect(parent_window.close)
+        lay.addWidget(title)
+        lay.addStretch(1)
+        lay.addWidget(btn_settings)
         lay.addWidget(btn_close)
         self._drag_pos = None
 

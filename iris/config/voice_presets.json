@@ -1,0 +1,29 @@
+{
+  "iris_default": {
+    "description": "차분하고 명확한 기본 아이리스 음성",
+    "speed": 1.0,
+    "fx": {
+      "enabled": true,
+      "reverb": 0.08,
+      "chorus": 0.04,
+      "robotic_texture": 0.03
+    }
+  },
+  "iris_jarvis": {
+    "description": "자비스 스타일의 약한 기계 질감이 있는 음성",
+    "speed": 0.96,
+    "fx": {
+      "enabled": true,
+      "reverb": 0.12,
+      "chorus": 0.08,
+      "robotic_texture": 0.08
+    }
+  },
+  "iris_clean": {
+    "description": "효과 없는 깨끗한 음성",
+    "speed": 1.0,
+    "fx": {
+      "enabled": false
+    }
+  }
+}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,28 +20,12 @@ def _sentences_for_ssml(plain: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def wrap_edge_ssml(plain: str, break_ms: int = 280) -> str:
-    """
-    Edge neural 보이스용 SSML (문장 사이 짧은 pause).
-
-    plain에 XML 특수문자가 있으면 이스케이프.
-    """
+def format_edge_plain_text(plain: str) -> str:
+    """edge-tts에는 SSML이 아니라 순수 텍스트만 전달한다."""
     segs = _sentences_for_ssml(plain)
     if not segs:
         segs = [plain.strip() or "네."]
-    inner_parts: list[str] = []
-    for i, seg in enumerate(segs):
-        esc = html.escape(seg, quote=False)
-        inner_parts.append(esc)
-        if i < len(segs) - 1:
-            inner_parts.append(f'<break time="{break_ms}ms"/>')
-    inner = "".join(inner_parts)
-    return (
-        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
-        "xml:lang='ko-KR'>"
-        f"{inner}"
-        "</speak>"
-    )
+    return "\n".join(segs)
 
 
 class EdgeTTSEngine:
@@ -53,7 +36,7 @@ class EdgeTTSEngine:
 
     async def render_to_file(self, text: str, out_path: Path) -> bool:
         """
-        SSML 또는 일반 텍스트를 MP3로 저장.
+        일반 텍스트를 MP3로 저장.
 
         Returns:
             성공 여부
@@ -68,7 +51,7 @@ class EdgeTTSEngine:
         pitch = self._settings.tts_pitch
         volume = self._settings.tts_volume
 
-        payload = text if text.lstrip().startswith("<speak") else wrap_edge_ssml(text)
+        payload = format_edge_plain_text(text)
 
         try:
             comm = edge_tts.Communicate(payload, voice=voice, rate=rate, pitch=pitch, volume=volume)

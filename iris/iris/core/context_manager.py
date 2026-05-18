@@ -35,6 +35,17 @@ class PendingMonitoringAction:
     focus_hint: str
     suggested_input: str
     category: str
+    natural_language: str = ""  # 대화에 제시할 제안 문장
+
+
+@dataclass
+class PendingAutomationTool:
+    """자동화 ToolRegistry 승인 대기."""
+
+    tool_name: str
+    params: Dict[str, Any]
+    summary: str
+    preview: str
 
 
 @dataclass
@@ -66,6 +77,7 @@ class DialogueContext:
     pending: Optional[PendingPlan] = None
     pending_action: Optional[PendingUserAction] = None
     pending_monitor: Optional[PendingMonitoringAction] = None
+    pending_automation: Optional[PendingAutomationTool] = None
     slots: Dict[str, Any] = field(default_factory=dict)
 
     def clear(self) -> None:
@@ -73,4 +85,5 @@ class DialogueContext:
         self.pending = None
         self.pending_action = None
         self.pending_monitor = None
+        self.pending_automation = None
         self.slots.clear()

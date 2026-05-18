@@ -12,6 +12,8 @@ from iris.assistant.openclaw_adapter import OpenClawActionBackend
 from iris.assistant.safety_guard import ActionRequest, evaluate
 from iris.assistant.task_planner import TaskPlan
 from iris.automation import layout_engine, process_launcher, window_controller
+from iris.automation.tool_registry import AutomationToolRegistry
+from iris.automation.tool_types import AutomationToolContext
 from iris.config.preset_modes import LayoutHint, PresetMode
 from iris.core.command_router import CommandKind
 from iris.storage.database import Database
@@ -60,6 +62,35 @@ class ActionExecutor:
             session_id="na",
             timeout_seconds=1,
         )
+        self._tool_registry = AutomationToolRegistry(db)
+
+    @property
+    def tool_registry(self) -> AutomationToolRegistry:
+        return self._tool_registry
+
+    def run_automation_tool(
+        self,
+        tool_name: str,
+        params: dict,
+        *,
+        approved: bool,
+        summary: str = "",
+        settings: object | None = None,
+    ) -> str:
+        """AutomationToolRegistry 실행 래퍼."""
+        ctx = AutomationToolContext(
+            params=params,
+            approved=approved,
+            auto_approve_low_risk=self._db.get_auto_approve_low_risk(),
+            app_paths=self._app_paths,
+            settings=settings,
+            summary=summary or tool_name,
+        )
+        if self._tool_registry.needs_approval(tool_name, ctx) and not approved:
+            preview = self._tool_registry.preview(tool_name, ctx)
+            return f"승인 필요: {preview}"
+        res = self._tool_registry.run(tool_name, ctx)
+        return res.message if res.success else f"실패: {res.message}"
 
     def execute_iris_request(self, req: IrisExecutionRequest) -> str:
         """Safety → 백엔드 선택 → SQLite 기록."""

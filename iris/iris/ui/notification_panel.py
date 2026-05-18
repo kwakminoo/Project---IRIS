@@ -1,35 +1,84 @@
-"""알림 패널 — 쿨다운·클릭 시 창 포커스."""
+"""알림 패널 — SQLite 쿨다운·무시·스누즈·대상 비활성."""
 
 from __future__ import annotations
 
-import time
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from iris.automation import window_controller
 
+if TYPE_CHECKING:
+    from iris.monitoring.notification_policy import NotificationPolicy
+
+
+class _AlertPayload:
+    """리스트 아이템에 실리는 알림 메타."""
+
+    __slots__ = ("target_id", "category", "event_id", "focus_hint", "title")
+
+    def __init__(
+        self,
+        target_id: int,
+        category: str,
+        event_id: int,
+        focus_hint: str,
+        title: str,
+    ) -> None:
+        self.target_id = target_id
+        self.category = category
+        self.event_id = event_id
+        self.focus_hint = focus_hint
+        self.title = title
+
 
 class NotificationPanel(QWidget):
-    """동일 (target_id, category) 알림은 cooldown 초 내 생략."""
+    """DB 정책 + 인메모리 보조. 우클릭: 무시·스누즈·대상 끄기."""
+
+    action_requested = pyqtSignal(str, int, str, int)  # decision, target_id, category, event_id
 
     def __init__(
         self,
         cooldown_seconds: float = 90.0,
+        policy: Optional["NotificationPolicy"] = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._cooldown_sec = cooldown_seconds
-        self._last_shown: dict[tuple[int, str], float] = {}
+        self._policy = policy
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel("알림"))
         self._list = QListWidget()
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._context_menu)
         self._list.itemClicked.connect(self._on_click)
         lay.addWidget(self._list, 1)
+        btn_row = QHBoxLayout()
+        self._btn_snooze = QPushButton("나중에 (15분)")
+        self._btn_snooze.clicked.connect(lambda: self._on_decision("snooze"))
+        btn_row.addWidget(self._btn_snooze)
+        self._btn_ignore = QPushButton("이 유형 무시")
+        self._btn_ignore.clicked.connect(lambda: self._on_decision("ignore"))
+        btn_row.addWidget(self._btn_ignore)
+        self._btn_disable = QPushButton("대상 끄기")
+        self._btn_disable.clicked.connect(lambda: self._on_decision("disable_target"))
+        btn_row.addWidget(self._btn_disable)
+        lay.addLayout(btn_row)
+
+    def set_policy(self, policy: "NotificationPolicy") -> None:
+        self._policy = policy
 
     def add_note(self, text: str) -> None:
-        """레거시 단순 문자열."""
         self._list.addItem(text)
 
     def try_add_alert(
@@ -39,24 +88,60 @@ class NotificationPanel(QWidget):
         title: str,
         message: str,
         focus_hint: str,
+        event_id: int = 0,
     ) -> bool:
-        """쿨다운 통과 시 True."""
-        key = (target_id, category)
-        now = time.monotonic()
-        last = self._last_shown.get(key, 0.0)
-        if now - last < self._cooldown_sec:
-            return False
-        self._last_shown[key] = now
+        """정책 통과 시 True (MonitorManager가 DB 쿨다운 처리 후 UI만 표시)."""
         line = f"[{category}] {title}\n{message}"
         item = QListWidgetItem(line)
-        item.setData(Qt.ItemDataRole.UserRole, focus_hint)
+        payload = _AlertPayload(target_id, category, event_id, focus_hint, title)
+        item.setData(Qt.ItemDataRole.UserRole, payload)
         self._list.insertItem(0, item)
         while self._list.count() > 80:
             self._list.takeItem(self._list.count() - 1)
         return True
 
-    def _on_click(self, item: QListWidgetItem) -> None:
-        hint = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(hint, str) or not hint.strip():
+    def _current_payload(self) -> _AlertPayload | None:
+        item = self._list.currentItem()
+        if item is None and self._list.count() > 0:
+            item = self._list.item(0)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        return data if isinstance(data, _AlertPayload) else None
+
+    def _on_decision(self, decision: str) -> None:
+        p = self._current_payload()
+        if p is None:
             return
-        window_controller.focus_and_place(hint.strip(), 40, 40, 1000, 700)
+        if self._policy:
+            if decision == "ignore":
+                self._policy.dismiss_permanently(p.target_id, p.category)
+            elif decision == "snooze":
+                self._policy.snooze(p.target_id, p.category, 15)
+            elif decision == "disable_target":
+                self._policy.disable_target(p.target_id)
+            self._policy.log_notification(
+                p.target_id,
+                p.event_id or None,
+                p.category,
+                p.title,
+                "",
+                user_decision=decision,
+            )
+        self.action_requested.emit(decision, p.target_id, p.category, p.event_id)
+
+    def _context_menu(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        self._list.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.addAction("나중에 (15분)", lambda: self._on_decision("snooze"))
+        menu.addAction("이 유형 무시", lambda: self._on_decision("ignore"))
+        menu.addAction("대상 모니터링 끄기", lambda: self._on_decision("disable_target"))
+        menu.exec(self._list.mapToGlobal(pos))
+
+    def _on_click(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(data, _AlertPayload) and data.focus_hint.strip():
+            window_controller.focus_and_place(data.focus_hint.strip(), 40, 40, 1000, 700)
