@@ -15,6 +15,19 @@ class WindowInfo:
     height: int
 
 
+def get_active_window_title() -> str:
+    """현재 포커스 창 제목 (실패 시 빈 문자열)."""
+    try:
+        import pygetwindow as gw  # type: ignore
+
+        w = gw.getActiveWindow()
+        if w and w.title:
+            return str(w.title)
+    except Exception:
+        pass
+    return ""
+
+
 def list_window_titles() -> List[str]:
     """제목 목록 (가능할 때만)."""
     try:

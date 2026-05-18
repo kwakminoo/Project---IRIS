@@ -73,6 +73,76 @@ Validation:
 
 ---
 
+## Phase 1.5: Computer Use Agent / 1.5단계: Computer Use 에이전트
+
+<a id="phase-15-computer-use-agent"></a>
+
+Goal:
+
+- Build Iris-centered **Perception → Action → Verify** multi-step agent as the default execution path.
+  - 한국어: Iris 중심의 인식·행동·검증 multi-step 에이전트를 기본 실행 경로로 구축합니다.
+
+Architecture reference:
+
+- `docs/architecture.md` — 4-tier model, PAV, Safety + loop coexistence
+- `docs/domain-design.md` — `PerceptionObservation`, `ActionStep`, `VerifyResult`, `AgentLoop`
+
+### Phase A: Orchestrator & tool policy {#phase-15-a}
+
+Code tasks (documentation done; implement in code):
+
+- [ ] Deprecate orchestrator rule that blocks direct manipulation tools in JSON plans
+- [ ] Introduce or extend `ComputerUseAgent` (or `AgentOrchestrator` with PAV loop)
+- [ ] Remove / narrow `action_plan.BLOCKED_TOOLS` for Tier 1–2 tools
+- [ ] Expand `action_plan.ALLOWED_TOOLS` (`launch_app`, `focus_window`, `type_text`, `click`, `open_url`, …)
+- [ ] Wire sequential `AutomationToolRegistry.execute` per planned step
+- [ ] Log each step to `automation_tool_logs`
+
+Validation:
+
+- Orchestrator plan can include `launch_app` and `focus_window` without hard reject
+- Multi-step plan executes in order with step index in logs
+
+### Phase B: Perception & Verify {#phase-15-b}
+
+- [ ] `PerceptionObservation` builder: active window + `list_open_windows` + UIA summary
+- [ ] OCR/VLM scene summary hook (no raw screenshot / full OCR persistence)
+- [ ] `VerifyResult` after each `ActionStep`: re-perceive and compare to goal
+- [ ] Replan on failure (shortcut-first policy)
+- [ ] Max steps and loop timeout guard
+
+Validation:
+
+- Failed click triggers replan or retry within same loop
+- Verify status stored per step
+
+### Phase C: Tier 2 universal GUI {#phase-15-c}
+
+- [ ] UIA + OCR unified "scene" for Tier 2 decisions
+- [ ] Generic `type_text`, `click`, window focus without per-app adapters
+- [ ] Optional VLM adapter stub for complex visual state
+- [ ] Integrate risk classification per GUI action
+
+Validation:
+
+- Agent can complete a cross-app flow (e.g. launch app → focus window → type) without Tier 4
+
+### Phase D: Tier 4 fallback & integration {#phase-15-d}
+
+- [ ] OpenClaw adapter: invoke only on loop failure or long-tail flag
+- [ ] Hermes adapter: same Tier 4 contract as OpenClaw
+- [ ] UI: show loop status, paused CRITICAL approval, Tier 4 delegation
+- [ ] Connect hybrid monitoring events to proactive loop hints (optional)
+- [ ] End-to-end demo: voice command → PAV loop → spoken result
+
+Validation:
+
+- Tier 4 not called on simple Tier 1 success path
+- CRITICAL `run_shell` pauses loop until user approves
+- `python -m pytest -q` passes for new agent tests
+
+---
+
 ## Phase 2: Basic Monitoring / 2단계: 기본 모니터링
 
 Goal:

@@ -6,15 +6,132 @@ This document defines the core domain concepts of Iris.
 
 - 한국어 설명: 이 문서는 Iris의 핵심 도메인 개념을 정의합니다.
 
-Iris has seven main domains:
+Iris has nine main domains:
 
 1. Assistant / 비서
-2. Command / 명령
-3. Automation / 자동화
-4. Mode / 모드
-5. Monitoring / 모니터링
-6. Safety / 안전
-7. Storage / 저장소
+2. **Computer Use (PAV)** / Computer Use (인식·행동·검증)
+3. Command / 명령
+4. Automation / 자동화
+5. Mode / 모드
+6. Monitoring / 모니터링
+7. Safety / 안전
+8. Storage / 저장소
+9. External Agent (Tier 4) / 외부 에이전트
+
+The default execution path is a **multi-step agent loop**, not a single `AssistantResponse` turn.
+
+---
+
+## 1.1 Computer Use: Perception / Action / Verify
+
+Computer Use is the cross-cutting domain for Jarvis-style PC control.
+
+### PerceptionObservation / 인식 관측
+
+Represents a summarized view of PC state at one step (not raw storage).
+
+- 한국어 설명: 한 스텝 시점의 PC 상태 요약입니다. 원본 스크린샷·전체 OCR은 기본 저장하지 않습니다.
+
+Fields:
+
+- id
+- active_window_title
+- active_process_name
+- open_windows_summary (from `list_open_windows`)
+- uia_snapshot_summary
+- ocr_or_vlm_scene_summary
+- captured_at
+- source: uia | ocr | vlm | hybrid
+
+Sources:
+
+- Active window / 활성 창
+- `list_open_windows` / 열린 창 목록
+- UIA snapshot summary / UIA 스냅샷 요약
+- OCR or VLM scene summary / OCR·VLM 장면 요약
+
+### ActionStep / 행동 스텝
+
+Represents one tool invocation in the agent loop.
+
+- 한국어 설명: 에이전트 루프에서 `AutomationToolRegistry`를 통해 실행하는 단일 조작입니다.
+
+Fields:
+
+- id
+- tool_name (e.g. `launch_app`, `focus_window`, `type_text`, `click`, `run_shell`, `open_url`)
+- arguments
+- tier: 1 | 2 (1 = dedicated tool, 2 = universal GUI)
+- risk_level
+- requires_approval
+- parent_loop_id
+- step_index
+
+Rule:
+
+- Steps run **sequentially** inside `ComputerUseAgent` or extended `AgentOrchestrator`.
+- CRITICAL_RISK steps block until `UserApproval` is granted.
+
+### VerifyResult / 검증 결과
+
+Represents outcome comparison after an `ActionStep`.
+
+- 한국어 설명: 행동 후 재인식 결과를 목표와 비교한 판정입니다.
+
+Fields:
+
+- id
+- action_step_id
+- perception_observation_id
+- status: success | failed | partial | unknown
+- goal_match_score (optional)
+- failure_reason
+- suggested_next: retry | replan | shortcut | tier4_delegate
+- verified_at
+
+Rules:
+
+- On **failed**: replan within the same loop; prefer keyboard shortcuts over fragile mouse paths.
+- On repeated failure: optionally delegate to Tier 4 (`OpenClawAdapter`, `HermesAdapter`).
+
+### AgentLoop / 에이전트 루프
+
+Represents one multi-step Computer Use session for a user goal.
+
+Fields:
+
+- id
+- user_command_id
+- goal_text
+- status: running | paused_approval | completed | failed | delegated_tier4
+- max_steps
+- current_step
+- perception_observation_ids[]
+- action_step_ids[]
+- verify_result_ids[]
+- started_at
+- ended_at
+
+---
+
+## 1.2 Tier 4 External Agent / 외부 에이전트 (선택)
+
+### ExternalAgentDelegation / 외부 에이전트 위임
+
+Represents handoff when Iris loop cannot complete the goal.
+
+Fields:
+
+- id
+- agent_loop_id
+- agent_type: openclaw | hermes
+- reason: failure | long_tail | user_requested
+- delegated_at
+- result_summary
+
+Rule:
+
+- OpenClaw and Hermes are **not** the Jarvis body. Iris orchestrator remains central; Tier 4 is fallback only.
 
 ---
 

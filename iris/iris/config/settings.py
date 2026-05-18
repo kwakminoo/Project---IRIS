@@ -108,6 +108,11 @@ class Settings:
     openclaw_cli_path: str
     openclaw_session_id: str
     openclaw_timeout_seconds: int
+    # Tier 4 외부 에이전트 — 로컬 Computer Use 실패 시에만(기본 비활성)
+    external_agent_backend: str  # none | openclaw | hermes
+    external_agent_fallback_enabled: bool
+    external_agent_verify_perception: bool  # 성공 주장 시 1회 perceive_desktop 검증
+    hermes_cli_path: str
     # Barge-in / 상시 음성
     barge_in_enabled: bool
     always_listen_enabled: bool
@@ -121,8 +126,17 @@ class Settings:
     voice_require_wake_word: bool
     voice_wake_words: tuple[str, ...]
     voice_followup_seconds: float
-    # 멀티-역할 파이프라인 (Router·Dialogue·Coordinator)
+    # TurnCoordinator 기본 경로 (Computer Use PAV). UI는 IRIS_MULTI_AGENT와 무관하게 Coordinator 사용
     multi_agent_enabled: bool
+    # LLM Intent Router (Gemma 1회 JSON → lane/goal). false면 classify_command + resolve_route_lane만
+    llm_intent_router_enabled: bool
+    # LLM 승인 분류 (pending_cu·자동화 후속). false면 규칙 is_rule_approval만
+    llm_approval_enabled: bool
+    # 웹 URL 열기: chrome | edge | firefox | system
+    default_web_browser: str
+    # Computer Use Phase B: UIA / VLM 하이브리드 인식
+    computer_use_uia_enabled: bool
+    computer_use_vlm_enabled: bool
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -200,6 +214,10 @@ def load_settings(env_path: Path | None = None) -> Settings:
         openclaw_cli_path=os.getenv("OPENCLAW_CLI_PATH", "openclaw").strip(),
         openclaw_session_id=os.getenv("OPENCLAW_SESSION_ID", "iris-action").strip(),
         openclaw_timeout_seconds=_env_int("OPENCLAW_TIMEOUT_SECONDS", 90),
+        external_agent_backend=os.getenv("EXTERNAL_AGENT_BACKEND", "none").strip().lower(),
+        external_agent_fallback_enabled=_env_bool("EXTERNAL_AGENT_FALLBACK_ENABLED", False),
+        external_agent_verify_perception=_env_bool("EXTERNAL_AGENT_VERIFY_PERCEPTION", False),
+        hermes_cli_path=os.getenv("HERMES_CLI_PATH", "hermes").strip(),
         barge_in_enabled=_env_bool("BARGE_IN_ENABLED", False),
         always_listen_enabled=_env_bool("ALWAYS_LISTEN_ENABLED", True),
         always_listen_sample_rate=_env_int("ALWAYS_LISTEN_SAMPLE_RATE", 16000),
@@ -216,5 +234,10 @@ def load_settings(env_path: Path | None = None) -> Settings:
             if w.strip()
         ),
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
-        multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", False),
+        multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
+        llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
+        llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),
+        default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),
+        computer_use_uia_enabled=_env_bool("COMPUTER_USE_UIA_ENABLED", True),
+        computer_use_vlm_enabled=_env_bool("COMPUTER_USE_VLM_ENABLED", False),
     )

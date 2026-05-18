@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QPushButton, QSpli
 from iris.agent.report_window import ReportWindow
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.assistant.agent_adapter import IrisAssistant
-from iris.assistant.openclaw_adapter import OpenClawActionBackend, openclaw_backend_status_label
+from iris.assistant.external_agent_adapter import external_backend_status_line
 from iris.agent.needs_agent import format_hits_for_gemma_context
 from iris.assistant.tool_layer import is_search_intent
 from iris.automation.action_executor import ActionExecutor
@@ -66,6 +66,7 @@ def _apply_dark_theme(w: QWidget) -> None:
         QPushButton:hover { background-color: #4338ca; }
         QLabel#DragTitle { font-weight: 700; font-size: 16px; color: #c4b5fd; }
         QLabel#PanelTitle { font-weight: 600; color: #93c5fd; }
+        QLabel#ModelStatus { color: #a5b4fc; font-weight: 600; }
         """
     )
 
@@ -84,15 +85,16 @@ class MainWindow(QMainWindow):
         self._term_log = TerminalLogRegistry()
         self._browser = BrowserTabMonitor()
         self._app_paths = detect_app_paths()
-        self._openclaw = OpenClawActionBackend.from_settings(self._settings)
         self._executor = ActionExecutor(
             self._db,
             self._app_paths,
             register_target=lambda k, h: self._targets.register(k, h),
-            openclaw=self._openclaw,
+            settings=self._settings,
         )
         self._gemma = GemmaClient(self._settings)
-        self._assistant = IrisAssistant(self._db, self._executor, self._gemma, self._app_paths)
+        self._assistant = IrisAssistant(
+            self._db, self._executor, self._gemma, self._app_paths, self._settings
+        )
         self._stt = SttEngine(self._settings)
         self._tts = TtsEngine(self._settings, parent=self)
         self._tts.status_changed.connect(self._on_tts_status_changed)
@@ -138,14 +140,19 @@ class MainWindow(QMainWindow):
         self._drag.settings_clicked.connect(self._open_settings_dialog)
         root.addWidget(self._drag)
 
+        self._model_label = QLabel()
+        self._model_label.setObjectName("ModelStatus")
+        self._refresh_model_label()
+        root.addWidget(self._model_label)
+
         self._status_label = QLabel("상태: IDLE")
         root.addWidget(self._status_label)
         self._tts_status_label = QLabel(self._tts.status_label)
         self._tts_status_label.setObjectName("TtsStatus")
         root.addWidget(self._tts_status_label)
-        self._openclaw_status = QLabel(openclaw_backend_status_label(self._openclaw))
-        self._openclaw_status.setObjectName("OpenclawStatus")
-        root.addWidget(self._openclaw_status)
+        self._backend_status = QLabel(external_backend_status_line(self._settings))
+        self._backend_status.setObjectName("BackendStatus")
+        root.addWidget(self._backend_status)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
@@ -171,6 +178,8 @@ class MainWindow(QMainWindow):
             dbg_row.addStretch(1)
             left_lay.addWidget(dbg)
         self._chat = ChatPanel()
+        self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
+        self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
         left_lay.addWidget(self._chat, 2)
         splitter.addWidget(left)
 
@@ -242,6 +251,7 @@ class MainWindow(QMainWindow):
         self._continuous_listen.stt_started.connect(self._on_stt_started)
         self._continuous_listen.utterance_failed.connect(self._on_utterance_failed)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
+        self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
         self._voice_gate = VoiceCommandGate(
             wake_words=self._settings.voice_wake_words,
             require_wake_word=self._settings.voice_require_wake_word,
@@ -251,12 +261,26 @@ class MainWindow(QMainWindow):
             self._continuous_listen.start()
         self._warmup_stt_async()
 
+    def _model_status_line(self) -> str:
+        """현재 LLM 모델 태그 (예: 모델: gemma4:e4b)."""
+        if not self._settings.use_local_llm:
+            return "모델: (로컬 LLM 비활성)"
+        name = self._settings.gemma_model_name.strip()
+        return f"모델: {name}" if name else "모델: (미설정)"
+
+    def _refresh_model_label(self) -> None:
+        self._model_label.setText(self._model_status_line())
+
     def _apply_runtime_settings(self) -> None:
         """저장된 설정을 현재 세션에 반영한다."""
         self._settings = load_settings(self._env_path)
         self._gemma = GemmaClient(self._settings)
-        self._assistant = IrisAssistant(self._db, self._executor, self._gemma, self._app_paths)
+        self._assistant = IrisAssistant(
+            self._db, self._executor, self._gemma, self._app_paths, self._settings
+        )
+        self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._rebuild_voice_input()
+        self._refresh_model_label()
         self._notes.add_note(
             f"설정 적용: 모델={self._settings.gemma_model_name}, "
             f"마이크={self._settings.always_listen_input_device}"
@@ -281,6 +305,7 @@ class MainWindow(QMainWindow):
                     str(selection.input_device) if selection.input_device is not None else None
                 ),
                 "ALWAYS_LISTEN_SPEECH_RMS": f"{selection.speech_rms:.4f}",
+                "DEFAULT_WEB_BROWSER": selection.default_web_browser,
             },
         )
         self._apply_runtime_settings()
@@ -356,7 +381,7 @@ class MainWindow(QMainWindow):
         if isinstance(s, AppState):
             self._viz.set_state(s)
             self._status_label.setText(f"상태: {s.name}")
-            self._openclaw_status.setText(openclaw_backend_status_label(self._openclaw))
+            self._backend_status.setText(external_backend_status_line(self._settings))
 
     def _pause_voice_input(self) -> None:
         if self._settings.always_listen_enabled:
@@ -491,18 +516,13 @@ class MainWindow(QMainWindow):
         """승인·Agent loop·검색 위임 — 백그라운드 스레드."""
         if self._agent_worker and self._agent_worker.isRunning():
             self._agent_worker.requestInterruption()
-        self._agent_worker = AgentWorker(
-            self._assistant,
-            text,
-            multi_agent=self._settings.multi_agent_enabled,
-        )
+        self._agent_worker = AgentWorker(self._assistant, text)
         self._agent_worker.finished_reply.connect(self._on_agent_worker_reply)
         self._agent_worker.delegate_search.connect(self._on_agent_delegate_search)
-        if self._settings.multi_agent_enabled:
-            self._agent_worker.early_ack.connect(
-                self._on_agent_early_ack,
-                Qt.ConnectionType.QueuedConnection,
-            )
+        self._agent_worker.early_ack.connect(
+            self._on_agent_early_ack,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._agent_worker.start()
 
     @pyqtSlot(str)
@@ -511,9 +531,8 @@ class MainWindow(QMainWindow):
         self._early_ack_tts_done = False
         self._final_reply_received = False
         self._skip_followup_tts = False
-        display = ack if ack.startswith("Iris:") else f"Iris: {ack}"
         self._db.insert_log("assistant_early_ack", ack, None)
-        self._chat.append_message_typed("Iris", display)
+        self._chat.append_message_typed("Iris", ack)
         tone = infer_speech_tone(from_llm=False, reply_text=ack)
         if self._settings.tts_enable_speech_formatter:
             spoken = format_speech(
@@ -552,12 +571,7 @@ class MainWindow(QMainWindow):
             return
 
         if spoken_followup.strip():
-            followup_display = (
-                spoken_followup
-                if spoken_followup.startswith("Iris:")
-                else f"Iris: {spoken_followup}"
-            )
-            self._chat.append_message_typed("Iris", followup_display)
+            self._chat.append_message_typed("Iris", spoken_followup)
 
         self._assistant.memory.add_turn("assistant", user_visible)
         self._db.insert_log("assistant", user_visible, None)

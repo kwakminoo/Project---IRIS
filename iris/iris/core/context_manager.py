@@ -70,6 +70,17 @@ class PendingUserAction:
 
 
 @dataclass
+class PendingComputerUseGoal:
+    """Computer Use 승인 대기 — 후속 '진행해줘'·CU 중간 CRITICAL 도구 확인."""
+
+    goal: str
+    risk_hint: str = "low"  # low | medium | high | critical
+    prompt: str = ""  # 사용자에게 제시한 확인 문구
+    require_rule_approval: bool = False  # CRITICAL 도구 등 — LLM approve 무시
+    slots: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class DialogueContext:
     """세션 단계 및 슬롯."""
 
@@ -78,6 +89,7 @@ class DialogueContext:
     pending_action: Optional[PendingUserAction] = None
     pending_monitor: Optional[PendingMonitoringAction] = None
     pending_automation: Optional[PendingAutomationTool] = None
+    pending_cu: Optional[PendingComputerUseGoal] = None
     slots: Dict[str, Any] = field(default_factory=dict)
 
     def clear(self) -> None:
@@ -86,4 +98,9 @@ class DialogueContext:
         self.pending_action = None
         self.pending_monitor = None
         self.pending_automation = None
+        self.pending_cu = None
         self.slots.clear()
+
+    def clear_pending_cu(self) -> None:
+        """CU 승인 대기만 해제 (다른 멀티턴·자동화 상태는 유지)."""
+        self.pending_cu = None

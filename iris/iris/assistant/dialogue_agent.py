@@ -23,7 +23,8 @@ _ACK_TEMPLATES: list[tuple[re.Pattern[str], str]] = [
 
 _DIALOGUE_SYSTEM = (
     "당신은 Iris, 사용자의 로컬 AI 비서입니다. "
-    "짧고 친절한 한국어로만 답하세요. 컴퓨터 조작·앱 실행·계획은 말하지 마세요."
+    "짧고 친절한 한국어로만 답하세요. 마크다운 없이 일반 문장만 쓰세요. "
+    "컴퓨터 조작·앱 실행·계획은 말하지 마세요."
 )
 
 
@@ -43,11 +44,35 @@ class DialogueAgent:
         raw = self._gemma.chat(messages)
         return self._with_iris_prefix(raw)
 
+    def cu_early_ack(self, goal: str, slots: dict | None = None) -> str:
+        """Computer Use 실행 전 짧은 확인 — 완료 주장 없이 진행만 알림."""
+        g = (goal or "").strip()
+        slot = slots or {}
+        query = slot.get("query") or slot.get("search_query") or slot.get("title")
+        if isinstance(query, str) and query.strip():
+            q = query.strip()[:40]
+            if re.search(r"유튜브|youtube", g, re.I):
+                return f"유튜브에서 '{q}' 검색·재생을 진행할게요."
+            return f"'{q}' 관련 요청을 진행할게요."
+        if re.search(r"유튜브|youtube", g, re.I):
+            return "유튜브에서 요청하신 재생을 진행할게요."
+        if re.search(r"카톡|카카오", g, re.I):
+            return "카카오톡에서 요청을 진행할게요."
+        if len(g) > 36:
+            return f"{g[:36]}… 작업을 진행할게요."
+        if g:
+            return f"{g} — 진행할게요."
+        return "요청을 진행할게요."
+
     def ack(self, user_text: str, kind: CommandKind) -> str:
         """실행 전 짧은 확인 문장 (템플릿, LLM 미사용)."""
         for pat, msg in _ACK_TEMPLATES:
             if pat.search(user_text):
                 return msg
+        if kind is CommandKind.GET_SYSTEM_INFO:
+            return "사양을 잠깐 확인할게요."
+        if kind is CommandKind.OPEN_URL:
+            return "링크를 열게요."
         if kind is CommandKind.APP_LAUNCH:
             return "요청하신 앱을 실행할게요."
         if kind is CommandKind.WINDOW_CONTROL:

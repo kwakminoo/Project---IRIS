@@ -1,15 +1,4 @@
 ---
-alwaysApply: true
----
-
----
-
-# 3. `.cursor/rules/iris.mdc`
-
-`.cursor/rules/iris.mdc` 경로에 생성하세요.
-
-```md
----
 description: Iris project rules
 globs: **/*
 alwaysApply: true
@@ -23,7 +12,9 @@ You are working on Iris, a local-first Jarvis-like AI assistant.
 
 - Project name: Iris
 - Do not rename it to Dexter, Jarvis, Friday, or any other name.
-- Iris is a local-first personal AI assistant with hybrid workflow monitoring.
+- Iris is **not** a chat-only bot. Iris is an **execution assistant** that perceives PC state, acts through tools, and verifies outcomes.
+- Default execution path: **multi-step agent loop** (Perception → Action → Verify), not single-turn replies.
+- Iris combines: voice dialogue + barge-in, hybrid monitoring, SQLite session memory, work/game/creative multi-turn modes.
 
 ## Model Rule
 
@@ -32,52 +23,61 @@ You are working on Iris, a local-first Jarvis-like AI assistant.
 - Do not make Claude API or Gemini API the default model.
 - If Gemma 4 is unavailable, return a fallback response.
 
+## 4-Tier Execution Model
+
+Iris orchestrates computer control through four tiers:
+
+| Tier | Role | Examples |
+|------|------|----------|
+| **Tier 1** | Dedicated deterministic tools | `get_system_info`, `launch_app`, `open_url`, `focus_window` |
+| **Tier 2** | Universal GUI (Computer Use) | UIA/OCR/VLM + keyboard/mouse/window (app-agnostic adapters) |
+| **Tier 3** | Verify loop | Re-perceive UI/screen after each step; success/fail judgment; replan |
+| **Tier 4** | External agents (optional fallback) | OpenClaw, Hermes — delegate only on failure or long-tail tasks |
+
+- OpenClaw and Hermes are **not** the Jarvis body. Iris orchestrator remains central; Tier 4 is optional fallback only.
+
+## Perception / Action / Verify
+
+- **Perception**: active window, `list_open_windows`, UIA snapshot summary, OCR/VLM scene summary. Do not store raw screenshots or full OCR text by default.
+- **Action**: `AutomationToolRegistry` tools (`launch_app`, `focus_window`, `type_text`, `click`, `run_shell`, `open_url`, …) invoked sequentially by `ComputerUseAgent` or extended `AgentOrchestrator`.
+- **Verify**: compare observation to goal; on failure retry or alternate path (prefer keyboard shortcuts) within the same loop.
+
+## Orchestrator Policy (documentation direction)
+
+- The legacy rule in `assistant/orchestrator.py` that **blocks direct manipulation tools** in JSON plans is **deprecated**.
+- Target: `ComputerUseAgent` or extended `AgentOrchestrator` **sequentially calls** Tier 1–2 automation tools inside the agent loop.
+- Code changes (Phase A): unblock `action_plan.BLOCKED_TOOLS`, expand `ALLOWED_TOOLS` — see `docs/implementation-plan.md` Phase 1.5.
+
 ## Architecture Rule
 
 Keep these layers separated:
 
-1. `ai/`  
-   LLM client, prompt builder, response parser.
-
-2. `assistant/`  
-   Agent adapter, OpenCLO/OpenClaw adapter, task planner, safety guard.
-
-3. `audio/`  
-   STT, TTS, barge-in.
-
-4. `automation/`  
-   App launching, window control, keyboard/mouse control, layout engine, action executor.
-
-5. `modes/`  
-   Work mode, game mode, creative mode, mode manager.
-
-6. `monitoring/`  
-   Monitor manager, target registry, OCR, terminal log collector, browser tab monitor, state detector, alert generator.
-
-7. `ui/`  
-   Main window, visualizer, chat panel, monitor dashboard, notification panel, report window.
-
-8. `storage/`  
-   SQLite database and logs.
+1. `ai/` — LLM client, prompt builder, response parser.
+2. `assistant/` — Agent orchestrator, Computer Use agent, OpenClaw/Hermes Tier 4 adapters, task planner, safety guard.
+3. `audio/` — STT, TTS, barge-in.
+4. `automation/` — App launching, window control, keyboard/mouse, `AutomationToolRegistry`, action executor.
+5. `modes/` — Work mode, game mode, creative mode, mode manager.
+6. `monitoring/` — Monitor manager, target registry, OCR, terminal log collector, browser tab monitor, state detector, alert generator.
+7. `ui/` — Main window, visualizer, chat panel, monitor dashboard, notification panel, report window.
+8. `storage/` — SQLite database and logs.
 
 ## Safety Rule
 
-Never execute computer control directly.
+Computer Use loops and Safety Guard **coexist**:
 
-Before executing:
-- Ask user for confirmation.
-- Check Safety Guard.
-- Log the action.
-- Execute only if approved.
+- LOW_RISK, MEDIUM_RISK, HIGH_RISK: may run inside the agent loop without extra approval.
+- CRITICAL_RISK: always require explicit user approval before execution (`run_shell`, file deletion, payment, password, system settings, sensitive browser actions).
+- Dangerous patterns may be blocked even when approved.
+- Always check Safety Guard, log actions, and never bypass approval for CRITICAL_RISK.
 
-Blocked by default:
+Blocked by default (even in Computer Use loop):
+
 - File deletion
 - Payment
 - Password input
 - Personal data submission
 - System setting changes
-- Dangerous shell commands
-- Unapproved keyboard/mouse control
+- Dangerous shell commands (without CRITICAL approval)
 
 ## Work Mode Rule
 
@@ -132,6 +132,8 @@ Use the best method for each target:
 
 Do not rely only on current screen OCR.
 
+Monitoring feeds **proactive suggestions** alongside the Computer Use loop.
+
 ## Privacy Rule
 
 - Do not store raw screenshots by default.
@@ -155,9 +157,9 @@ Do not create large mixed-responsibility files.
 
 Respect module boundaries:
 - `ai/` handles LLM.
-- `assistant/` handles agent and safety.
+- `assistant/` handles agent orchestration, Computer Use, safety, Tier 4 adapters.
 - `audio/` handles STT/TTS.
-- `automation/` handles app/window/input actions.
+- `automation/` handles app/window/input actions and tool registry.
 - `modes/` handles work/game/creative mode.
 - `monitoring/` handles target observation and detection.
 - `ui/` handles PyQt6 UI only.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
 from unittest.mock import patch
 
@@ -44,7 +45,11 @@ class _FakeGemma:
 def _make_assistant(tmp_path: Path, gemma: _FakeGemma) -> IrisAssistant:
     db = Database(path=tmp_path / "coord.db")
     executor = ActionExecutor(db, {})
-    return IrisAssistant(db, executor, gemma, {})  # type: ignore[arg-type]
+    settings = SimpleNamespace(
+        llm_intent_router_enabled=False,
+        tts_enable_speech_formatter=False,
+    )
+    return IrisAssistant(db, executor, gemma, {}, settings)  # type: ignore[arg-type]
 
 
 def test_is_chat_only_greeting() -> None:
@@ -131,13 +136,13 @@ def test_direct_action_early_ack_before_execute(tmp_path: Path) -> None:
         order.append("execute")
         return "Iris: 브라우저에서 URL을 열었습니다."
 
-    with patch.object(assistant, "request_automation_tool", side_effect=_mock_execute):
-        coord.run_turn("유튜브 틀어줘", on_early_ack=on_ack)
+    with patch.object(assistant, "handle_user_text", side_effect=_mock_execute):
+        coord.run_turn("Cursor 열어줘", on_early_ack=on_ack)
 
     assert order == ["early_ack", "execute"]
 
 
-def test_youtube_open_url_direct(tmp_path: Path) -> None:
+def test_fast_tool_system_info_lane(tmp_path: Path) -> None:
     gemma = _FakeGemma()
     assistant = _make_assistant(tmp_path, gemma)
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
@@ -145,15 +150,97 @@ def test_youtube_open_url_direct(tmp_path: Path) -> None:
     with patch.object(
         assistant,
         "request_automation_tool",
-        return_value="Iris: 브라우저에서 URL을 열었습니다.",
+        return_value="Iris: 운영체제는 Windows, RAM 16GB.",
     ) as mock_tool:
-        result = coord.run_turn("유튜브 틀어줘")
+        result = coord.run_turn("지금 컴퓨터 사양 어떻게 돼?")
 
-    assert result.route == RouteLane.DIRECT_ACTION.value
-    assert "유튜브" in (result.early_ack or "")
-    assert result.spoken_followup is not None
-    assert "유튜브를 열게요" not in (result.spoken_followup or "")
+    assert result.route == RouteLane.FAST_TOOL.value
     mock_tool.assert_called_once()
     args = mock_tool.call_args[0]
-    assert args[0] == "open_url"
-    assert args[1]["url"] == "https://www.youtube.com"
+    assert args[0] == "get_system_info"
+
+
+def test_computer_use_lane_multi_step(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+
+    with patch.object(
+        assistant,
+        "run_computer_use_loop",
+        return_value="Iris: 메시지를 보냈습니다.",
+    ) as mock_cu:
+        result = coord.run_turn("카톡 열고 철수에게 안녕이라고 보내줘")
+
+    assert result.route == RouteLane.COMPUTER_USE.value
+    mock_cu.assert_called_once()
+    assert "메시지" in result.user_visible or "보냈" in result.user_visible
+
+
+def test_discord_stays_direct_action(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+    kind = route_user_intent("디스코드 켜줘")
+    routed = resolve_route_lane("디스코드 켜줘", kind, DialogueContext())
+    assert kind is CommandKind.APP_LAUNCH
+    assert routed.lane is RouteLane.DIRECT_ACTION
+
+
+def test_youtube_routes_computer_use(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+
+    with patch.object(
+        assistant,
+        "run_computer_use_loop",
+        return_value="Iris: 유튜브에서 재생을 시작했습니다.",
+    ) as mock_cu:
+        result = coord.run_turn("유튜브 틀어줘")
+
+    assert result.route == RouteLane.COMPUTER_USE.value
+    mock_cu.assert_called_once()
+    assert mock_cu.call_args.kwargs.get("goal") == "유튜브 틀어줘"
+    assert "재생" in result.user_visible or "유튜브" in result.user_visible
+
+
+def test_computer_use_early_ack_before_cu(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+    order: list[str] = []
+
+    def on_ack(ack: str) -> None:
+        order.append("early_ack")
+
+    def _mock_cu(*_a: object, **_k: object) -> str:
+        order.append("cu")
+        return "Iris: 작업을 마쳤습니다."
+
+    with patch.object(assistant, "run_computer_use_loop", side_effect=_mock_cu):
+        result = coord.run_turn("유튜브에서 아이유 틀어줘", on_early_ack=on_ack)
+
+    assert order == ["early_ack", "cu"]
+    assert result.early_ack is not None
+    assert "진행" in result.early_ack
+    assert "마쳤" not in (result.early_ack or "")
+    assert "마쳤" in result.user_visible
+
+
+def test_explicit_https_still_direct_action(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+    url = "https://example.com/page"
+
+    with patch.object(
+        assistant,
+        "request_automation_tool",
+        return_value="Iris: 브라우저에서 URL을 열었습니다.",
+    ) as mock_tool:
+        result = coord.run_turn(f"이 링크 열어줘 {url}")
+
+    assert result.route == RouteLane.DIRECT_ACTION.value
+    mock_tool.assert_called_once()
+    assert mock_tool.call_args[0][1]["url"] == url

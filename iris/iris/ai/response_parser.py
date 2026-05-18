@@ -25,3 +25,8 @@ def try_parse_json_intent(text: str) -> ParsedIntent:
         return ParsedIntent(raw=json.loads(m.group(0)))
     except json.JSONDecodeError:
         return ParsedIntent(raw=None)
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """LLM 응답에서 첫 JSON 객체 dict 추출 (Intent Router·Planner 공용)."""
+    return try_parse_json_intent(text).raw

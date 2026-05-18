@@ -16,7 +16,10 @@ class CommandKind(Enum):
     GAME_MODE = auto()
     CREATIVE_MODE = auto()
     MONITORING_STATUS = auto()
+    GET_SYSTEM_INFO = auto()
+    OPEN_URL = auto()
     COMPUTER_ACTION = auto()
+    COMPUTER_USE = auto()
     COMPLEX_AUTOMATION = auto()
     # --- Tool layer: 주제·최신 정보 검색 → 웹 에이전트 후 Gemma 요약 ---
     CURRENT_INFO_SEARCH = auto()
@@ -79,6 +82,28 @@ _COMPLEX_AUTO = re.compile(
     r"(자동으로\s*해|매크로|복잡한\s*작업|스크립트로\s*해|전부\s*한번에)",
     re.IGNORECASE,
 )
+# 복합·멀티 스텝 → Computer Use 루프 (단일 사양 조회는 GET_SYSTEM_INFO)
+_COMPUTER_USE_MULTI = re.compile(
+    r"(.+)(열고|켜고|하고\s*나서|한\s*다음|이어서)(.+)",
+    re.IGNORECASE,
+)
+_GET_SYSTEM_INFO_PATTERN = re.compile(
+    r"(사양|스펙|CPU|RAM|메모리|GPU|그래픽|그래픽카드|디스크|저장\s*공간|운영체제|\bOS\b)"
+    r".*(알려|어떻게|몇|얼마|뭐야|확인|보여|조회|돼)|"
+    r"(지금\s*)?(내\s*)?(컴퓨터|PC|시스템).*(사양|스펙|성능|상태|어떻게)|"
+    r"(사양|스펙)\s*(이|가)?\s*(뭐|어떻게|야|지)",
+    re.IGNORECASE,
+)
+_URL_IN_TEXT = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_OPEN_URL_VERB = re.compile(
+    r"(열|켜|launch|open|보여|틀|재생|접속|들려|url|링크|주소|이동)",
+    re.IGNORECASE,
+)
+_YOUTUBE_OPEN_HINT = re.compile(
+    r"(유튜브|youtube|yt).*(틀|재생|열|켜|보|들)|"
+    r"(틀|재생|열|켜).*(유튜브|youtube)",
+    re.IGNORECASE,
+)
 
 
 def classify_command(text: str) -> CommandKind:
@@ -96,6 +121,16 @@ def classify_command(text: str) -> CommandKind:
 
     if _FILE_TASK.search(t):
         return CommandKind.FILE_TASK
+
+    if _URL_IN_TEXT.search(t) and (_OPEN_URL_VERB.search(t) or _YOUTUBE_OPEN_HINT.search(t)):
+        return CommandKind.OPEN_URL
+
+    if _COMPUTER_USE_MULTI.search(t):
+        return CommandKind.COMPUTER_USE
+
+    if _GET_SYSTEM_INFO_PATTERN.search(t):
+        return CommandKind.GET_SYSTEM_INFO
+
     if _COMPLEX_AUTO.search(t):
         return CommandKind.COMPLEX_AUTOMATION
 

@@ -25,6 +25,7 @@ class AutomationToolContext:
     auto_approve_low_risk: bool = False  # 레거시 필드: 현재는 3단계까지 기본 자동 허용
     app_paths: Dict[str, str] = field(default_factory=dict)
     settings: Any = None  # iris.config.settings.Settings (순환 import 방지)
+    database: Any = None  # iris.storage.database.Database (선택, perceive 힌트용)
     summary: str = ""
 
 

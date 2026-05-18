@@ -17,3 +17,11 @@ def test_app_launch() -> None:
 
 def test_general_chat() -> None:
     assert classify_command("안녕") is CommandKind.GENERAL_CHAT
+
+
+def test_pc_specs_is_get_system_info() -> None:
+    assert classify_command("PC 사양 알려줘") is CommandKind.GET_SYSTEM_INFO
+
+
+def test_discord_launch_is_app_launch_not_computer_use() -> None:
+    assert classify_command("디스코드 켜줘") is CommandKind.APP_LAUNCH
