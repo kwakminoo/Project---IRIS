@@ -7,6 +7,7 @@ from typing import Dict, Sequence
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.ai.prompt_builder import build_messages
+from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_pending
 from iris.assistant.safety_guard import quick_block_user_text
 from iris.assistant.task_planner import plan_from_preset
 from iris.automation.action_executor import ActionExecutor, IrisExecutionRequest
@@ -24,16 +25,6 @@ from iris.core.recent_work_manager import format_recent_work_suggestion, seed_de
 from iris.memory.memory_manager import MemoryManager
 from iris.modes import creative_mode, game_mode, work_mode
 from iris.storage.database import Database
-
-
-def _is_approval(text: str) -> bool:
-    t = text.strip().lower()
-    return t in {"응", "네", "좋아", "승인", "실행", "확인", "yes", "ok", "y", "ㅇㅇ"}
-
-
-def _is_reject(text: str) -> bool:
-    t = text.strip().lower()
-    return t in {"아니", "취소", "no", "n", "싫어"}
 
 
 _LAUNCH_SPECS: list[tuple[re.Pattern[str], str, str]] = [
@@ -65,11 +56,13 @@ class IrisAssistant:
         executor: ActionExecutor,
         gemma: GemmaClient,
         app_paths: Dict[str, str],
+        settings: object | None = None,
     ) -> None:
         self._db = db
         self._executor = executor
         self._gemma = gemma
         self._app_paths = app_paths
+        self._settings = settings
         self.ctx = DialogueContext()
         self.memory = MemoryManager(db)
         seed_demo_recent_work(db)
@@ -103,6 +96,31 @@ class IrisAssistant:
         if not hasattr(self, "_agent_orchestrator"):
             self._agent_orchestrator = AgentOrchestrator(self._db, self, self._gemma)
         return self._agent_orchestrator.run(text, intent=routed)
+
+    def run_computer_use_loop(
+        self,
+        text: str,
+        *,
+        goal: str | None = None,
+        slots: dict | None = None,
+        routed: CommandKind | None = None,
+    ) -> str:
+        """Perceive → Plan → Act → Verify multi-step Computer Use 루프 (음성·텍스트 공용)."""
+        from iris.assistant.computer_use_agent import ComputerUseAgent
+
+        _ = routed  # 분류는 TurnCoordinator·LLM Intent Router에서 완료
+        cu_goal = (goal or text).strip()
+        if not hasattr(self, "_computer_use_agent"):
+            self._computer_use_agent = ComputerUseAgent(
+                self,
+                self._gemma,
+                self._executor.tool_registry,
+                max_steps=20,
+            )
+        body = self._computer_use_agent.run(cu_goal, slots=slots)
+        if body.startswith("Iris:"):
+            return body
+        return f"Iris: {body}"
 
     def set_monitor_pending(self, pending: PendingMonitoringAction) -> bool:
         """모니터링 승인 대기. 작업/게임/단일 액션 승인 대기 중이면 True 반환하지 않고 스킵."""
@@ -168,6 +186,27 @@ class IrisAssistant:
         if kind is CommandKind.MONITORING_STATUS:
             return self.monitoring_status_reply()
 
+        if kind is CommandKind.GET_SYSTEM_INFO:
+            return self.request_automation_tool(
+                "get_system_info",
+                {},
+                "시스템 사양·리소스 요약",
+                settings=self._settings,
+            )
+
+        if kind is CommandKind.OPEN_URL:
+            from iris.assistant.router_policy import detect_open_url
+
+            url = detect_open_url(text)
+            if not url:
+                return "Iris: 열 URL을 찾지 못했습니다."
+            return self.request_automation_tool(
+                "open_url",
+                {"url": url},
+                f"URL 열기: {url}",
+                settings=self._settings,
+            )
+
         if kind is CommandKind.COMPUTER_ACTION:
             return (
                 "Iris: 해당 조작은 안전 정책상 자동 실행하지 않습니다. "
@@ -188,6 +227,30 @@ class IrisAssistant:
 
         # 일반 대화는 상위에서 LLM 호출로 처리
         return ""
+
+    def _llm_approval_enabled(self) -> bool:
+        settings = self._settings
+        if settings is None:
+            return True
+        return bool(getattr(settings, "llm_approval_enabled", True))
+
+    def _classify_approval_followup(
+        self, text: str, context_prompt: str, *, force_rule_only: bool
+    ) -> FollowupDecision:
+        cls = resolve_followup_for_pending(
+            text,
+            context_prompt,
+            self._gemma,
+            force_rule_only=force_rule_only,
+            use_llm=self._llm_approval_enabled(),
+        )
+        return cls.decision
+
+    def _automation_tool_is_critical(self, tool_name: str) -> bool:
+        from iris.automation.tool_types import RiskLevel
+
+        tool = self._executor.tool_registry.get(tool_name)
+        return tool is not None and tool.risk_level is RiskLevel.CRITICAL_RISK
 
     def monitoring_status_reply(self) -> str:
         """MonitorManager·DB와 연계된 요약 (오케스트레이터·UI 공용)."""
@@ -231,19 +294,20 @@ class IrisAssistant:
         """AutomationToolRegistry — LOW_RISK+설정 시 즉시 실행, 아니면 승인 대기."""
         from iris.automation.tool_types import AutomationToolContext
 
+        eff_settings = settings if settings is not None else self._settings
         ctx = AutomationToolContext(
             params=params,
             approved=False,
             auto_approve_low_risk=self._db.get_auto_approve_low_risk(),
             app_paths=self._app_paths,
-            settings=settings,
+            settings=eff_settings,
             summary=summary,
         )
         reg = self._executor.tool_registry
         preview = reg.preview(tool_name, ctx)
         if not reg.needs_approval(tool_name, ctx):
             msg = self._executor.run_automation_tool(
-                tool_name, params, approved=True, summary=summary, settings=settings
+                tool_name, params, approved=True, summary=summary, settings=eff_settings
             )
             self.memory.save_task_session(
                 summary[:200],
@@ -268,14 +332,18 @@ class IrisAssistant:
         if not pa:
             self.ctx.clear()
             return "Iris: 대기 중인 자동화 동작이 없습니다."
-        if _is_reject(text):
+        force_rule = self._automation_tool_is_critical(pa.tool_name)
+        decision = self._classify_approval_followup(
+            text, pa.preview or pa.summary, force_rule_only=force_rule
+        )
+        if decision is FollowupDecision.REJECT:
             self.ctx.clear()
             self._db.insert_log("automation_tool", "reject", pa.summary)
             self.memory.save_task_session(
                 pa.summary[:200], approvals=["rejected:" + pa.tool_name]
             )
             return "Iris: 자동화 실행을 취소했습니다."
-        if not _is_approval(text):
+        if decision is not FollowupDecision.APPROVE:
             return "Iris: 실행하려면 '응' 또는 '승인' 이라고 말씀해 주세요. 취소는 '취소' 입니다."
 
         self.ctx.clear()
@@ -284,6 +352,7 @@ class IrisAssistant:
             pa.params,
             approved=True,
             summary=pa.summary,
+            settings=self._settings,
         )
         self.memory.save_task_session(
             pa.summary[:200],
@@ -324,6 +393,11 @@ class IrisAssistant:
         plan = plan_from_preset(preset)
         msg = self._executor.execute_plan(plan, preset, approved=True)
         self._db.insert_log("execute", pending.title, msg)
+        self.memory.save_task_session(
+            pending.title[:200],
+            tools_run=[f"preset:{pending.preset_id}"],
+            observations=[msg[:200]],
+        )
         self.ctx.clear()
         return "Iris: 요청한 환경을 실행합니다.\n" + msg
 
@@ -438,10 +512,16 @@ class IrisAssistant:
         return ""
 
     def _handle_pending_approval(self, text: str) -> str:
-        if _is_reject(text):
+        ctx_prompt = ""
+        if self.ctx.pending_action:
+            ctx_prompt = self.ctx.pending_action.summary
+        elif self.ctx.pending:
+            ctx_prompt = self.ctx.pending.title
+        decision = self._classify_approval_followup(text, ctx_prompt, force_rule_only=False)
+        if decision is FollowupDecision.REJECT:
             self.ctx.clear()
             return "Iris: 실행을 취소했습니다."
-        if not _is_approval(text):
+        if decision is not FollowupDecision.APPROVE:
             return "Iris: 실행하려면 '응' 또는 '승인' 이라고 말씀해 주세요. 취소는 '취소' 입니다."
 
         if self.ctx.step == DialogueStep.ACTION_WAIT_APPROVAL and self.ctx.pending_action:
@@ -470,6 +550,11 @@ class IrisAssistant:
         plan = plan_from_preset(preset)
         msg = self._executor.execute_plan(plan, preset, approved=True)
         self._db.insert_log("execute", pending.title, msg)
+        self.memory.save_task_session(
+            pending.title[:200],
+            tools_run=[f"preset:{pending.preset_id}"],
+            observations=[msg[:200]],
+        )
         return "Iris: 승인 확인. 요청한 환경을 실행합니다.\n" + msg
 
     def _handle_monitor_approval(self, text: str) -> str:
@@ -479,12 +564,15 @@ class IrisAssistant:
             self.ctx.clear()
             return "Iris: 대기 중인 모니터링 동작이 없습니다."
 
-        if _is_reject(text):
+        decision = self._classify_approval_followup(
+            text, pm.natural_language or pm.suggested_input, force_rule_only=False
+        )
+        if decision is FollowupDecision.REJECT:
             self.ctx.clear()
             self._db.insert_log("monitor", "user_reject", f"event={pm.event_id}")
             return "Iris: 모니터링 제안 실행을 취소했습니다."
 
-        if not _is_approval(text):
+        if decision is not FollowupDecision.APPROVE:
             return "Iris: 실행하려면 '응' 또는 '승인' 이라고 말씀해 주세요. 취소는 '취소' 입니다."
 
         from iris.automation import keyboard_mouse_controller, window_controller

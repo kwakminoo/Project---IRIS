@@ -152,6 +152,14 @@ def format_speech(text: str, tone: AppState, *, max_sentences: int = 3) -> str:
     return "\n".join(sents[:cap])
 
 
+def format_system_info_spoken(text: str) -> str:
+    """get_system_info 요약 등 하드웨어 안내 → TTS용 짧은 구어체 (EXECUTING 톤)."""
+    raw = (text or "").strip()
+    if not raw:
+        return "네, 말씀해 주세요."
+    return format_speech(raw, AppState.EXECUTING, max_sentences=2)
+
+
 def infer_speech_tone(*, from_llm: bool, reply_text: str) -> AppState:
     """
     음성 말투 추론.

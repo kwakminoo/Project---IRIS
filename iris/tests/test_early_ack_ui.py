@@ -28,23 +28,39 @@ def test_merge_spoken_followup_strips_ack() -> None:
     assert "브라우저" in followup
 
 
-def test_legacy_worker_no_early_ack_emit(tmp_path: Path) -> None:
-    db = Database(path=tmp_path / "legacy.db")
+def test_worker_no_early_ack_when_coordinator_has_none(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "chat.db")
     assistant = IrisAssistant(db, ActionExecutor(db, {}), object(), {})  # type: ignore[arg-type]
-    worker = AgentWorker(assistant, "안녕", multi_agent=False)
+    worker = AgentWorker(assistant, "안녕")
     emitted: list[str] = []
     worker.early_ack.connect(lambda s: emitted.append(s))
 
-    with patch.object(assistant, "handle_user_text", return_value="Iris: hi"):
+    with patch.object(
+        TurnCoordinator,
+        "run_turn",
+        return_value=type(
+            "R",
+            (),
+            {
+                "user_visible": "Iris: hi",
+                "store_history": False,
+                "had_early_ack": False,
+                "early_ack": None,
+                "spoken_followup": None,
+                "delegate_search": False,
+                "search_intent_name": None,
+            },
+        )(),
+    ):
         worker.run()
 
     assert emitted == []
 
 
-def test_multi_agent_worker_uses_coordinator_callback(tmp_path: Path) -> None:
+def test_worker_uses_coordinator_callback(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "multi.db")
     assistant = IrisAssistant(db, ActionExecutor(db, {}), object(), {})  # type: ignore[arg-type]
-    worker = AgentWorker(assistant, "유튜브 틀어줘", multi_agent=True)
+    worker = AgentWorker(assistant, "유튜브 틀어줘")
     early: list[str] = []
     finished: list[tuple[str, bool, bool, str]] = []
     worker.early_ack.connect(early.append)

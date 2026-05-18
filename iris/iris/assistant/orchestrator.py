@@ -15,7 +15,8 @@ if TYPE_CHECKING:
     from iris.storage.database import Database
 
 PLANNER_SYSTEM = """당신은 Iris 실행 계획기입니다.
-사용자 요청에 대해 즉시 답변하지 말고, 아래 도구만 사용하는 JSON 실행 계획만 출력하세요.
+사용자 요청에 대해 즉시 답변하지 말고, 아래 메타 도구만 사용하는 JSON 실행 계획만 출력하세요.
+PC 조작·multi-step 작업은 ComputerUseAgent가 담당합니다. 이 계획기는 메타 파이프라인만 사용합니다.
 
 허용 도구:
 - safety_check: 입력 안전 검사
@@ -23,8 +24,6 @@ PLANNER_SYSTEM = """당신은 Iris 실행 계획기입니다.
 - assistant_dispatch: 모드·승인·앱 실행 등 기존 IrisAssistant 처리
 - monitoring_status: 모니터링 대상 요약 (모니터링 질문일 때만)
 - gemma_finalize: observation을 바탕으로 최종 한국어 답변 (마지막에 반드시 포함)
-
-금지: app_launch, keyboard_input, shell_run 등 컴퓨터 직접 조작 도구는 계획에 넣지 마세요.
 
 출력 형식 (JSON만, 다른 텍스트 없음):
 {

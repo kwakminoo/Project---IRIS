@@ -9,16 +9,38 @@ Iris
 
 ## Project Definition / 프로젝트 정의
 
-Iris is a local-first personal AI assistant for Windows.
+Iris is a local-first **execution assistant** for Windows — not a chat-only bot.
 
-- 한국어 설명: Iris는 Windows에서 동작하는 로컬 우선 개인 AI 비서입니다.
-- 핵심 방향: 챗봇이 아니라 Jarvis처럼 대화, 앱 실행, 창 정리, 웹 검색, 보고서 생성, 작업 모니터링을 도와주는 비서입니다.
+- 한국어 설명: Iris는 Windows에서 동작하는 로컬 우선 **실행형** AI 비서입니다.
+- 핵심 방향: 사용자 PC 상태를 **인식(Perception)**하고, 도구로 **조작(Action)**하며, 결과를 **검증(Verify)**하는 Jarvis형 비서입니다.
+- 기본 실행 경로: 단일 턴 답변이 아니라 **multi-step agent loop** (인식 → 행동 → 검증 → 재계획).
 
 Core concept:
 
-> Iris does not only execute what the user commands. Iris watches the user's workflow, detects missed or stalled tasks, and helps continue them.
+> Iris does not only execute what the user commands. Iris watches the user's workflow, detects missed or stalled tasks, and helps continue them — through a Perception → Action → Verify loop on the user's PC.
 
-- 한국어 설명: Iris는 사용자가 말한 것만 처리하는 도구가 아니라, 작업 흐름을 관찰하고 멈춘 작업이나 놓친 작업을 찾아 이어가도록 돕는 비서입니다.
+- 한국어 설명: Iris는 사용자가 말한 것만 처리하는 도구가 아니라, 작업 흐름을 관찰하고 멈춘 작업을 찾아 **Computer Use 루프**로 이어가도록 돕는 비서입니다.
+
+### Iris Differentiators / Iris만의 차별
+
+These capabilities always run alongside Computer Use:
+
+- Voice dialogue + barge-in / 음성 대화 + 말 끊기
+- Hybrid monitoring (terminal, IDE, Chrome extension, OCR) → proactive suggestions / 하이브리드 모니터링 → 선제 제안
+- SQLite logs and task session memory / SQLite 로그·작업 세션 기억
+- Work, game, creative multi-turn modes / 작업·게임·창작 멀티턴 모드
+
+### 4-Tier Execution Model / 4계층 실행 모델
+
+| Tier | Name | Role |
+|------|------|------|
+| **1** | Dedicated tools | Fast deterministic: `get_system_info`, `launch_app`, `open_url`, `focus_window`, … |
+| **2** | Universal GUI (Computer Use) | UIA/OCR/VLM + keyboard/mouse/window — app-agnostic, no per-app adapter required |
+| **3** | Verify loop | Re-perceive UI/screen after each step; judge success/failure; replan (prefer shortcuts) |
+| **4** | External agents (optional) | OpenClaw, Hermes — Iris orchestrator delegates only on **failure or long-tail** tasks |
+
+- OpenClaw and Hermes are **Tier 4 fallbacks**, not the Jarvis body. Iris remains the central orchestrator.
+- See `docs/architecture.md` and `docs/domain-design.md` for Perception / Action / Verify definitions.
 
 ## Core Principles / 핵심 원칙
 
@@ -50,8 +72,16 @@ Core concept:
     - 한국어: AI 비서 기능과 모니터링 기능은 모듈을 분리합니다.
 14. Build the system in phases. Do not implement everything in one file.
     - 한국어: 단계적으로 만들고, 한 파일에 모든 기능을 몰아넣지 않습니다.
+15. Default path is multi-step Computer Use (Perception → Action → Verify), not single-turn chat.
+    - 한국어: 기본 경로는 단일 턴 대화가 아니라 multi-step Computer Use 루프입니다.
+16. Orchestrator may call Tier 1–2 automation tools sequentially; legacy "block direct manipulation tools" policy is deprecated.
+    - 한국어: 오케스트레이터가 1~2계층 자동화 도구를 순차 호출합니다. 직접 조작 도구 금지 정책은 폐지 방향입니다.
+17. OpenClaw/Hermes are optional Tier 4 fallbacks only when Iris loop fails or task is long-tail.
+    - 한국어: OpenClaw/Hermes는 Iris 루프 실패·장기 꼬리 작업에만 선택 위임합니다.
 
 ## Permission Levels / 권한 단계
+
+Computer Use agent loops and CRITICAL_RISK approval **coexist**: LOW/MEDIUM/HIGH tools run inside the loop; CRITICAL tools pause for explicit approval.
 
 ### Auto-Allowed: LOW_RISK / 자동 허용 1단계
 
@@ -120,6 +150,16 @@ Core concept:
 - Risk-based computer control / 위험도 기반 컴퓨터 제어
 - Safety guard / 안전장치
 - SQLite logs / SQLite 로그
+
+### Phase 1.5: Computer Use Agent / 1.5단계: Computer Use 에이전트
+
+- Multi-step agent loop (Perception → Action → Verify) as default execution path / multi-step 루프 기본 경로
+- `ComputerUseAgent` or extended `AgentOrchestrator` / Computer Use 오케스트레이션
+- Tier 1 dedicated tools + Tier 2 universal GUI / 전용 도구 + 범용 GUI
+- Tier 3 verify loop with replan / 검증 루프·재계획
+- Tier 4 OpenClaw/Hermes fallback on failure / 실패 시 외부 에이전트 위임
+- Unblock `action_plan.BLOCKED_TOOLS`, expand `ALLOWED_TOOLS` (Phase A code) / 도구 허용 목록 확장
+- See `docs/implementation-plan.md#phase-15-computer-use-agent` for Phase A/B/C/D checklist
 
 ### Phase 2: Hybrid Monitoring / 2단계: 하이브리드 모니터링
 

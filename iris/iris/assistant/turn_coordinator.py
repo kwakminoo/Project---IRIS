@@ -8,10 +8,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from iris.assistant.dialogue_agent import DialogueAgent
+from iris.assistant.computer_use_agent import extract_user_question
+from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_pending
+from iris.assistant.llm_intent_router import route_with_llm
 from iris.assistant.orchestrator import AgentOrchestrator
-from iris.assistant.router_policy import RouteLane, RoutedTurn, resolve_route_lane
+from iris.assistant.router_policy import (
+    RouteLane,
+    RoutedTurn,
+    is_multi_turn_active,
+    resolve_route_lane,
+)
 from iris.assistant.safety_guard import quick_block_user_text
 from iris.core.command_router import CommandKind
+from iris.core.context_manager import PendingComputerUseGoal
 from iris.core.intent_router import route_user_intent
 
 if TYPE_CHECKING:
@@ -69,10 +78,47 @@ class TurnCoordinator:
                 logs=["safety_block"],
             )
 
+        ctx = self._assistant.ctx
+        pending_cu = ctx.pending_cu
+        if pending_cu is not None:
+            cu_result = self._handle_pending_cu_followup(
+                turn_id, user_text, pending_cu, logs
+            )
+            if cu_result is not None:
+                return cu_result
+
         kind = routed if routed is not None else route_user_intent(user_text)
-        routed_turn = resolve_route_lane(user_text, kind, self._assistant.ctx)
+        if is_multi_turn_active(ctx):
+            routed_turn = resolve_route_lane(user_text, kind, ctx)
+        elif _llm_intent_router_enabled(self._assistant):
+            routed_turn = route_with_llm(user_text, ctx, self._gemma, fallback_kind=kind)
+        else:
+            routed_turn = resolve_route_lane(user_text, kind, ctx)
         lane = routed_turn.lane
-        logs.append(f"lane={lane.value} kind={kind.name}")
+        logs.append(f"lane={lane.value} kind={routed_turn.kind.name}")
+
+        if routed_turn.needs_user_confirm:
+            confirm_msg = (
+                routed_turn.clarification
+                or "이 작업은 확인이 필요합니다. 진행할까요?"
+            )
+            cu_goal = (routed_turn.goal or user_text).strip()
+            ctx.pending_cu = PendingComputerUseGoal(
+                goal=cu_goal,
+                risk_hint=routed_turn.risk_hint,
+                prompt=confirm_msg,
+                require_rule_approval=_is_critical_risk(routed_turn.risk_hint),
+                slots=dict(routed_turn.slots),
+            )
+            return TurnResult(
+                turn_id=turn_id,
+                route=lane.value,
+                user_visible=f"Iris: {confirm_msg}",
+                early_ack=None,
+                executed=False,
+                logs=logs + ["needs_user_confirm", "pending_cu_set"],
+                store_history=True,
+            )
 
         self._assistant._db.insert_log(
             "turn_coordinator",
@@ -118,13 +164,151 @@ class TurnCoordinator:
                 logs=logs + ["multi_turn"],
             )
 
+        if lane is RouteLane.COMPUTER_USE:
+            return self._run_computer_use(
+                turn_id,
+                user_text,
+                routed_turn,
+                logs,
+                on_early_ack=on_early_ack,
+            )
+
+        if lane is RouteLane.FAST_TOOL:
+            return self._run_fast_tool(
+                turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
+            )
+
         if lane is RouteLane.DIRECT_ACTION:
             return self._run_direct_action(
                 turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
             )
 
         # ORCHESTRATED — 기존 AgentOrchestrator (Planner 포함)
-        return self._run_orchestrated(turn_id, user_text, kind, logs)
+        return self._run_orchestrated(turn_id, user_text, routed_turn.kind, logs)
+
+    def _handle_pending_cu_followup(
+        self,
+        turn_id: str,
+        user_text: str,
+        pending: PendingComputerUseGoal,
+        logs: list[str],
+    ) -> TurnResult | None:
+        """pending_cu 후속 — approve 시 CU 1회, unrelated면 pending 해제 후 일반 라우팅."""
+        force_rule = pending.require_rule_approval or _is_critical_risk(pending.risk_hint)
+        cls = resolve_followup_for_pending(
+            user_text,
+            pending.prompt or pending.goal,
+            self._gemma,
+            force_rule_only=force_rule,
+            use_llm=_llm_approval_enabled(self._assistant),
+        )
+        logs.append(f"pending_cu_followup={cls.decision.value}")
+
+        if cls.decision is FollowupDecision.REJECT:
+            self._assistant.ctx.clear_pending_cu()
+            return TurnResult(
+                turn_id=turn_id,
+                route=RouteLane.COMPUTER_USE.value,
+                user_visible="Iris: 작업을 취소했습니다.",
+                early_ack=None,
+                executed=False,
+                logs=logs + ["pending_cu_reject"],
+                store_history=True,
+            )
+
+        if cls.decision is FollowupDecision.CLARIFY:
+            hint = pending.prompt or "진행할까요? ('진행해줘' / '취소')"
+            return TurnResult(
+                turn_id=turn_id,
+                route=RouteLane.COMPUTER_USE.value,
+                user_visible=f"Iris: {hint}",
+                early_ack=None,
+                executed=False,
+                logs=logs + ["pending_cu_clarify"],
+                store_history=True,
+            )
+
+        if cls.decision is FollowupDecision.UNRELATED:
+            self._assistant.ctx.clear_pending_cu()
+            logs.append("pending_cu_cleared_unrelated")
+            return None
+
+        if cls.decision is not FollowupDecision.APPROVE:
+            return None
+
+        goal = pending.goal
+        slots = dict(pending.slots)
+        self._assistant.ctx.clear_pending_cu()
+        reply = self._assistant.run_computer_use_loop(
+            user_text, goal=goal, slots=slots or None
+        )
+        user_visible, executed, extra_logs = _finalize_cu_reply(
+            self._assistant.ctx,
+            goal=goal,
+            slots=slots,
+            reply=reply,
+            risk_hint=pending.risk_hint,
+        )
+        logs.extend(extra_logs)
+        if not user_visible.startswith("Iris:"):
+            user_visible = f"Iris: {user_visible}"
+        return TurnResult(
+            turn_id=turn_id,
+            route=RouteLane.COMPUTER_USE.value,
+            user_visible=user_visible,
+            early_ack=None,
+            executed=executed,
+            logs=logs + ["pending_cu_approved"],
+            store_history=True,
+        )
+
+    def _run_computer_use(
+        self,
+        turn_id: str,
+        user_text: str,
+        routed_turn: RoutedTurn,
+        logs: list[str],
+        *,
+        on_early_ack: Callable[[str], None] | None = None,
+    ) -> TurnResult:
+        """CU 레인 — early_ack 후 goal/slots로 PAV 루프."""
+        ctx = self._assistant.ctx
+        cu_goal = (routed_turn.goal or user_text).strip()
+        slots = dict(routed_turn.slots)
+        ack = self._dialogue.cu_early_ack(cu_goal, slots)
+        logs.append(f"cu_ack={ack[:40]}")
+
+        if on_early_ack is not None:
+            on_early_ack(ack)
+        logs.append("early_ack_callback")
+
+        raw_reply = self._assistant.run_computer_use_loop(
+            user_text,
+            goal=cu_goal,
+            slots=slots or None,
+            routed=routed_turn.kind,
+        )
+        user_visible, executed, extra_logs = _finalize_cu_reply(
+            ctx,
+            goal=cu_goal,
+            slots=slots,
+            reply=raw_reply,
+            risk_hint=routed_turn.risk_hint,
+        )
+        logs.extend(extra_logs)
+        user_visible = build_user_visible(ack, user_visible)
+        spoken_followup = build_spoken_followup(ack, user_visible)
+        logs.append("computer_use")
+        return TurnResult(
+            turn_id=turn_id,
+            route=RouteLane.COMPUTER_USE.value,
+            user_visible=user_visible,
+            early_ack=ack,
+            spoken_followup=spoken_followup,
+            executed=executed,
+            logs=logs,
+            store_history=True,
+        )
 
     def _run_direct_action(
         self,
@@ -174,6 +358,53 @@ class TurnCoordinator:
             store_history=False,
         )
 
+    def _run_fast_tool(
+        self,
+        turn_id: str,
+        user_text: str,
+        routed: RoutedTurn,
+        logs: list[str],
+        *,
+        on_early_ack: Callable[[str], None] | None = None,
+    ) -> TurnResult:
+        """Tier 1 전용 도구 1스텝 (Computer Use 루프 생략)."""
+        kind = routed.kind
+        ack = self._dialogue.ack(user_text, kind)
+        logs.append(f"fast_ack={ack[:40]}")
+
+        if on_early_ack is not None:
+            on_early_ack(ack)
+        logs.append("early_ack_callback")
+
+        exec_reply = ""
+        executed = False
+
+        if kind is CommandKind.GET_SYSTEM_INFO:
+            exec_reply = self._assistant.request_automation_tool(
+                "get_system_info",
+                {},
+                "시스템 사양·리소스 요약",
+                settings=self._assistant._settings,
+            )
+            executed = True
+            logs.append("get_system_info")
+        else:
+            logs.append(f"fast_tool_unhandled:{kind.name}")
+
+        user_visible = build_user_visible(ack, exec_reply)
+        spoken_followup = build_spoken_followup(ack, exec_reply)
+
+        return TurnResult(
+            turn_id=turn_id,
+            route=RouteLane.FAST_TOOL.value,
+            user_visible=user_visible,
+            early_ack=ack,
+            spoken_followup=spoken_followup,
+            executed=executed,
+            logs=logs,
+            store_history=True,
+        )
+
     def _run_orchestrated(
         self,
         turn_id: str,
@@ -203,6 +434,79 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
+
+
+def _llm_intent_router_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "llm_intent_router_enabled", True))
+
+
+def _llm_approval_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "llm_approval_enabled", True))
+
+
+def _is_critical_risk(risk_hint: str) -> bool:
+    return (risk_hint or "").strip().lower() == "critical"
+
+
+def _looks_like_cu_approval_wait(reply: str) -> bool:
+    """CU 루프가 CRITICAL 도구 승인으로 멈춘 경우."""
+    body = reply.strip()
+    if body.startswith("Iris:"):
+        body = body[5:].strip()
+    low = body.lower()
+    return ("승인" in body and ("응" in body or "실행" in body)) or "approval_required" in low
+
+
+def _finalize_cu_reply(
+    ctx: object,
+    *,
+    goal: str,
+    slots: dict,
+    reply: str,
+    risk_hint: str,
+) -> tuple[str, bool, list[str]]:
+    """CU 응답 → user_visible, executed, logs. ask_user·승인 대기 시 pending_cu 설정."""
+    from iris.core.context_manager import DialogueContext
+
+    logs: list[str] = []
+    dialogue_ctx = ctx if isinstance(ctx, DialogueContext) else None
+
+    question = extract_user_question(reply)
+    if question:
+        if dialogue_ctx is not None:
+            dialogue_ctx.pending_cu = PendingComputerUseGoal(
+                goal=goal,
+                risk_hint=risk_hint,
+                prompt=question,
+                slots=dict(slots),
+            )
+        logs.append("pending_cu_ask_user")
+        return f"Iris: {question}", False, logs
+
+    body = reply.strip()
+    if not body.startswith("Iris:"):
+        body = f"Iris: {body}"
+
+    if _looks_like_cu_approval_wait(body):
+        if dialogue_ctx is not None:
+            dialogue_ctx.pending_cu = PendingComputerUseGoal(
+                goal=goal,
+                risk_hint="critical",
+                prompt=body,
+                require_rule_approval=True,
+                slots=dict(slots),
+            )
+        logs.append("pending_cu_set")
+        return body, False, logs
+
+    return body, True, logs
+
 
 def build_user_visible(ack: str, exec_reply: str) -> str:
     """채팅·메모리용 — ack + 실행 결과 전체."""

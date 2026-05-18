@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from iris.assistant.tool_layer import is_search_intent
 from iris.core.command_router import CommandKind
@@ -17,12 +19,7 @@ _CHAT_ONLY_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# 공개 URL 열기 (로그인·폼 자동 입력 없음)
-_YOUTUBE_MEDIA = re.compile(
-    r"(유튜브|youtube|yt).*(틀|재생|열|켜|보|들)|"
-    r"(틀|재생|열|켜).*(유튜브|youtube)",
-    re.IGNORECASE,
-)
+# 명시 https URL만 DIRECT_ACTION open_url 힌트 (유튜브 홈 등 암시 URL은 CU 위임)
 _OPEN_URL_MEDIA = re.compile(
     r"(https?://|www\.)[^\s]+|(틀어|재생해|들려).*(url|링크|주소)",
     re.IGNORECASE,
@@ -52,14 +49,27 @@ _MODE_KINDS = frozenset(
     }
 )
 
+_COMPUTER_USE_KINDS = frozenset(
+    {
+        CommandKind.COMPUTER_USE,
+        CommandKind.COMPLEX_AUTOMATION,
+    }
+)
+
 _DIRECT_ACTION_KINDS = frozenset(
     {
         CommandKind.APP_LAUNCH,
+        CommandKind.OPEN_URL,
         CommandKind.WINDOW_CONTROL,
         CommandKind.FILE_TASK,
-        CommandKind.COMPLEX_AUTOMATION,
         CommandKind.MONITORING_STATUS,
         CommandKind.COMPUTER_ACTION,
+    }
+)
+
+_FAST_TOOL_KINDS = frozenset(
+    {
+        CommandKind.GET_SYSTEM_INFO,
     }
 )
 
@@ -69,6 +79,8 @@ class RouteLane(str, Enum):
 
     CHAT_ONLY = "CHAT_ONLY"
     DIRECT_ACTION = "DIRECT_ACTION"
+    FAST_TOOL = "FAST_TOOL"
+    COMPUTER_USE = "COMPUTER_USE"
     ORCHESTRATED = "ORCHESTRATED"
     MULTI_TURN = "MULTI_TURN"
     SEARCH = "SEARCH"
@@ -76,11 +88,17 @@ class RouteLane(str, Enum):
 
 @dataclass(frozen=True)
 class RoutedTurn:
-    """Router 출력 — Intent + 레인 + 선택적 직접 실행 힌트."""
+    """Router 출력 — Intent + 레인 + 선택적 직접 실행·CU 목표 힌트."""
 
     kind: CommandKind
     lane: RouteLane
-    open_url: str | None = None  # DIRECT_ACTION 시 open_url 도구용
+    open_url: str | None = None  # DIRECT_ACTION 시 open_url 도구용 (명시 https만)
+    goal: str | None = None  # COMPUTER_USE 시 CU에 전달할 목표 문장
+    slots: Mapping[str, Any] = field(default_factory=dict)
+    task_type: str | None = None
+    risk_hint: str = "low"
+    needs_user_confirm: bool = False
+    clarification: str | None = None
 
 
 def is_chat_only(text: str, kind: CommandKind) -> bool:
@@ -98,9 +116,7 @@ def is_chat_only(text: str, kind: CommandKind) -> bool:
 
 
 def detect_open_url(text: str) -> str | None:
-    """공개 URL 열기 힌트 (유튜브 등). 로그인·폼 조작 없음."""
-    if _YOUTUBE_MEDIA.search(text):
-        return "https://www.youtube.com"
+    """명시 https URL만 반환. 앱·미디어 암시 발화는 CU(lane=computer_use)로 위임."""
     m = re.search(r"(https?://[^\s]+)", text)
     if m:
         return m.group(1).rstrip(".,)")
@@ -129,11 +145,29 @@ def resolve_route_lane(
     if is_chat_only(text, kind):
         return RoutedTurn(kind=kind, lane=RouteLane.CHAT_ONLY)
 
+    if kind in _FAST_TOOL_KINDS:
+        return RoutedTurn(kind=kind, lane=RouteLane.FAST_TOOL)
+
     url = detect_open_url(text)
     if url:
         return RoutedTurn(kind=kind, lane=RouteLane.DIRECT_ACTION, open_url=url)
 
+    if kind in _COMPUTER_USE_KINDS:
+        return RoutedTurn(kind=kind, lane=RouteLane.COMPUTER_USE, goal=text.strip() or None)
+
+    if kind is CommandKind.OPEN_URL and not url:
+        return RoutedTurn(
+            kind=CommandKind.COMPUTER_USE,
+            lane=RouteLane.COMPUTER_USE,
+            goal=text.strip() or None,
+        )
+
     if kind in _DIRECT_ACTION_KINDS:
         return RoutedTurn(kind=kind, lane=RouteLane.DIRECT_ACTION)
 
-    return RoutedTurn(kind=kind, lane=RouteLane.ORCHESTRATED)
+    # GENERAL_CHAT 등 — Orchestrator 기본 경로 대신 Computer Use
+    return RoutedTurn(
+        kind=kind if kind is not CommandKind.GENERAL_CHAT else CommandKind.COMPUTER_USE,
+        lane=RouteLane.COMPUTER_USE,
+        goal=text.strip() or None,
+    )

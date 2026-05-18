@@ -23,6 +23,8 @@ from pathlib import Path
 from iris.audio.input_device import list_physical_input_devices, resolve_input_device
 from iris.audio.mic_preview import MicLevelPreview
 from iris.audio.xtts_engine import is_xtts_installed, resolve_reference_wav
+from iris.automation.web_browser import list_installed_browser_options, normalize_browser_key
+from iris.config.app_paths import detect_app_paths
 from iris.config.settings import Settings
 from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
@@ -41,6 +43,7 @@ class IrisSettingsSelection:
     model_names: tuple[str, ...]
     input_device: int | None
     speech_rms: float
+    default_web_browser: str
 
 
 def list_microphone_options() -> list[MicrophoneOption]:
@@ -66,6 +69,7 @@ class SettingsDialog(QDialog):
         self._settings = settings
         self._models = self._initial_models(settings)
         self._microphones = list_microphone_options()
+        self._app_paths = detect_app_paths()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
@@ -93,6 +97,10 @@ class SettingsDialog(QDialog):
         model_tools.addWidget(btn_add)
         model_tools.addWidget(btn_del)
         form.addRow("모델 관리", model_tools)
+
+        self._browser_combo = QComboBox()
+        self._populate_web_browsers(settings.default_web_browser)
+        form.addRow("웹 기본 브라우저", self._browser_combo)
 
         self._mic_combo = QComboBox()
         self._populate_microphones(settings.always_listen_input_device)
@@ -147,11 +155,16 @@ class SettingsDialog(QDialog):
         device_data = self._mic_combo.currentData()
         device = int(device_data) if device_data is not None else None
         models = tuple(dict.fromkeys([*self._models, model]))
+        browser_data = self._browser_combo.currentData()
+        browser = normalize_browser_key(
+            str(browser_data) if browser_data is not None else self._settings.default_web_browser
+        )
         return IrisSettingsSelection(
             model_name=model,
             model_names=models,
             input_device=device,
             speech_rms=self._mic_gauge.threshold_rms(),
+            default_web_browser=browser,
         )
 
     def _initial_models(self, settings: Settings) -> list[str]:
@@ -188,6 +201,18 @@ class SettingsDialog(QDialog):
         selected = self._models[0]
         self._refresh_model_combo(selected)
         self._refresh_model_list()
+
+    def _populate_web_browsers(self, selected: str) -> None:
+        self._browser_combo.clear()
+        options = list_installed_browser_options(self._app_paths)
+        selected_key = normalize_browser_key(selected)
+        for key, label in options:
+            self._browser_combo.addItem(label, key)
+        idx = self._browser_combo.findData(selected_key)
+        if idx < 0 and options:
+            # 저장값이 미설치 브라우저면 첫 항목(보통 Chrome)
+            idx = 0
+        self._browser_combo.setCurrentIndex(max(0, idx))
 
     def _populate_microphones(self, selected_device: int | None) -> None:
         self._mic_combo.clear()

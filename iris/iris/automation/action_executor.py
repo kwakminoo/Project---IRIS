@@ -8,13 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from iris.assistant.openclaw_adapter import OpenClawActionBackend
+from iris.assistant.external_agent_adapter import (
+    build_external_backend,
+    log_external_delegate,
+    run_external_delegate,
+    tier4_delegate_active,
+    user_facing_tier4_line,
+)
 from iris.assistant.safety_guard import ActionRequest, evaluate
 from iris.assistant.task_planner import TaskPlan
 from iris.automation import layout_engine, process_launcher, window_controller
 from iris.automation.tool_registry import AutomationToolRegistry
 from iris.automation.tool_types import AutomationToolContext
 from iris.config.preset_modes import LayoutHint, PresetMode
+from iris.config.settings import Settings
 from iris.core.command_router import CommandKind
 from iris.storage.database import Database
 
@@ -44,24 +51,20 @@ class IrisExecutionRequest:
 
 
 class ActionExecutor:
-    """순차 실행. OpenClaw는 내부 백엔드로만 사용."""
+    """순차 실행. Tier 4 외부 에이전트는 로컬 실패 시에만(external_agent_adapter)."""
 
     def __init__(
         self,
         db: Database,
         app_paths: Dict[str, str],
         register_target: Optional[Callable[[str, str], None]] = None,
-        openclaw: OpenClawActionBackend | None = None,
+        *,
+        settings: Settings | None = None,
     ) -> None:
         self._db = db
         self._app_paths = app_paths
         self._register_target = register_target
-        self._openclaw = openclaw or OpenClawActionBackend(
-            enabled=False,
-            cli_path="openclaw",
-            session_id="na",
-            timeout_seconds=1,
-        )
+        self._settings = settings
         self._tool_registry = AutomationToolRegistry(db)
 
     @property
@@ -135,6 +138,30 @@ class ActionExecutor:
         self._db.insert_action("iris_execution", req.summary, True, detail)
         return detail
 
+    def _tier4_delegate(
+        self,
+        *,
+        goal: str,
+        context: str,
+    ) -> tuple[bool, str] | None:
+        """Tier4 활성 시 (성공여부, 사용자용 한국어) 반환. 비활성 시 None."""
+        if not isinstance(self._settings, Settings) or not tier4_delegate_active(self._settings):
+            return None
+        backend = build_external_backend(self._settings)
+        if backend is None or not backend.is_available():
+            return None
+        res, duration_ms = run_external_delegate(backend, goal=goal, context=context)
+        user_line = user_facing_tier4_line(res.success)
+        log_external_delegate(
+            self._db,
+            goal=goal,
+            backend=res.backend_id,
+            success=res.success,
+            duration_ms=duration_ms,
+            summary_ko=user_line,
+        )
+        return res.success, user_line
+
     def _run_app_launch(self, req: IrisExecutionRequest) -> tuple[str, str]:
         assert req.app_key
         ok, reason = process_launcher.launch_by_key(self._app_paths, req.app_key)
@@ -146,12 +173,14 @@ class ActionExecutor:
                 self._register_target(req.app_key, hint)
             return f"{name}: 시작 ({reason})", "iris_automation"
 
-        if self._openclaw.enabled_flag() and self._openclaw.is_available():
-            oc = self._openclaw.launch_app(name)
-            self._db.insert_log("openclaw_fallback", f"launch {name}", oc.message)
-            if oc.success:
-                return f"{name}: 로컬 실패 후 보조 백엔드 시도 — {oc.message}", "openclaw"
-            return f"{name}: 로컬 실패({reason}), 보조 백엔드도 실패 — {oc.message}", "openclaw"
+        tier4 = self._tier4_delegate(
+            goal=f"애플리케이션 실행: {name}",
+            context=f"로컬 실행 실패 사유: {reason}",
+        )
+        if tier4 is not None:
+            ok_t4, msg = tier4
+            tag = "tier4" if ok_t4 else "tier4_failed"
+            return f"{name}: {msg}", tag
 
         return f"{name}: 실행 실패 ({reason})", "iris_automation_failed"
 
@@ -168,20 +197,26 @@ class ActionExecutor:
         local = self._local_file_search(user_text)
         if local:
             return f"로컬 검색 결과:\n{local}", "local_search"
-        if self._openclaw.enabled_flag() and self._openclaw.is_available():
-            oc = self._openclaw.handle_file_task(user_text)
-            self._db.insert_log("openclaw", "file_task", oc.message)
-            tag = "openclaw" if oc.success else "openclaw_failed"
-            return f"파일 작업: {'성공' if oc.success else '실패'} — {oc.message}", tag
-        return "파일을 찾지 못했고 보조 백엔드를 사용할 수 없습니다.", "none"
+        tier4 = self._tier4_delegate(
+            goal="파일 검색·열기",
+            context=f"사용자 요청: {user_text[:800]}",
+        )
+        if tier4 is not None:
+            ok_t4, msg = tier4
+            tag = "tier4" if ok_t4 else "tier4_failed"
+            return f"파일 작업: {msg}", tag
+        return "파일을 찾지 못했고 보조 경로를 사용할 수 없습니다.", "none"
 
     def _run_complex_automation(self, user_text: str) -> tuple[str, str]:
-        if self._openclaw.enabled_flag() and self._openclaw.is_available():
-            oc = self._openclaw.handle_complex_automation(user_text)
-            self._db.insert_log("openclaw", "complex_auto", oc.message)
-            tag = "openclaw" if oc.success else "openclaw_failed"
-            return f"자동화: {'성공' if oc.success else '실패'} — {oc.message}", tag
-        return "자동화: 보조 백엔드를 사용할 수 없어 실행하지 못했습니다.", "none"
+        tier4 = self._tier4_delegate(
+            goal="복잡한 PC 자동화",
+            context=f"사용자 요청: {user_text[:800]}",
+        )
+        if tier4 is not None:
+            ok_t4, msg = tier4
+            tag = "tier4" if ok_t4 else "tier4_failed"
+            return f"자동화: {msg}", tag
+        return "자동화: 보조 경로를 사용할 수 없어 실행하지 못했습니다.", "none"
 
     def _local_file_search(self, user_text: str) -> str | None:
         """제한된 범위에서 파일명 부분 일치 검색."""

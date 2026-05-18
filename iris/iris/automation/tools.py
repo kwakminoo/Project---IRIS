@@ -9,14 +9,97 @@ from typing import Any, Dict, List
 from urllib.parse import quote_plus
 
 from iris.assistant.safety_guard import ActionRequest, evaluate
-from iris.automation import keyboard_mouse_controller, process_launcher, window_controller
+from iris.automation import keyboard_mouse_controller, process_launcher, uia_reader, window_controller
+from iris.automation.system_info import (
+    collect_system_info,
+    system_info_brief_korean,
+    system_info_to_json,
+    verify_system_info_nonempty,
+)
+from iris.automation.perception_types import PerceptionObservation
 from iris.automation.tool_types import (
     AutomationToolContext,
     AutomationToolResult,
     RiskLevel,
     requires_approval_for,
 )
+from iris.config.settings import Settings
 from iris.monitoring import ocr_engine, screen_capture
+from iris.monitoring.target_hints import list_monitor_target_hints, match_monitor_hint
+from iris.monitoring.vlm_adapter import StubVlmAdapter
+
+
+def read_screen_summary_text(settings: Settings) -> tuple[bool, str, str]:
+    """전체 화면 OCR 요약 (성공, message, summary)."""
+    cap = screen_capture.capture_full_screen(settings)
+    if not cap:
+        return False, "화면 캡처 실패", ""
+    raw = ocr_engine.ocr_image(settings, cap)
+    summary, _ = ocr_engine.ocr_for_storage(settings, raw)
+    if not summary.strip():
+        return False, "화면에서 텍스트를 읽지 못했습니다.", ""
+    return True, "화면 요약", summary
+
+
+def build_perception_observation(ctx: AutomationToolContext) -> PerceptionObservation:
+    """perceive_desktop 파이프라인: UIA → OCR → (선택) VLM."""
+    settings = ctx.settings
+    if settings is None:
+        return PerceptionObservation(summary="설정 없음", perception_source="unknown")
+
+    focus_hint = str(ctx.params.get("focus_hint") or "").strip()
+    title_sub = str(ctx.params.get("window_title_sub") or "").strip()
+    active = window_controller.get_active_window_title()
+    if not title_sub:
+        title_sub = active or focus_hint
+
+    if focus_hint:
+        window_controller.focus_and_place(focus_hint, 40, 40, 1100, 720)
+
+    obs = PerceptionObservation(active_window=active or title_sub)
+    uia_enabled = bool(getattr(settings, "computer_use_uia_enabled", True))
+    vlm_enabled = bool(getattr(settings, "computer_use_vlm_enabled", False))
+
+    uia_json = ""
+    if uia_enabled and title_sub:
+        _, uia_json, matched = uia_reader.snapshot_window_uia(title_sub)
+        if matched:
+            obs.active_window = matched
+
+    if uia_json and not uia_reader.is_uia_summary_sparse(uia_json):
+        obs.summary = uia_json
+        obs.perception_source = "uia"
+    else:
+        ok, msg, ocr_summary = read_screen_summary_text(settings)
+        if ok:
+            obs.summary = ocr_summary
+            obs.perception_source = "ocr" if not uia_json else "hybrid"
+        else:
+            obs.summary = uia_json or msg
+            obs.perception_source = "ocr" if not uia_json else "hybrid"
+
+    if vlm_enabled and obs.perception_source in ("ocr", "hybrid", "uia"):
+        cap = screen_capture.capture_full_screen(settings)
+        if cap:
+            try:
+                vlm = StubVlmAdapter()
+                scene = vlm.describe_scene(cap.rgb_bytes, cap.width, cap.height)
+                if scene.strip():
+                    obs.summary = (obs.summary[:1200] + " | VLM: " + scene.strip()[:300]).strip()
+                    obs.perception_source = "vlm"
+            except Exception:
+                pass
+
+    hints = list_monitor_target_hints(ctx.database)
+    obs.monitor_hint = match_monitor_hint(hints, title_sub or active)
+    if obs.monitor_hint:
+        obs.summary = f"{obs.monitor_hint}\n{obs.summary}"[:2000]
+
+    titles = window_controller.list_window_titles()
+    if titles:
+        obs.open_windows_summary = ", ".join(titles[:12])
+
+    return obs
 
 
 class AutomationTool(ABC):
@@ -102,7 +185,7 @@ class FocusWindowTool(AutomationTool):
 
 class OpenUrlTool(AutomationTool):
     name = "open_url"
-    description = "URL을 기본 브라우저에서 열기"
+    description = "URL을 Iris 설정의 기본 웹 브라우저에서 열기"
     risk_level = RiskLevel.MEDIUM_RISK
 
     def preview(self, ctx: AutomationToolContext) -> str:
@@ -118,13 +201,34 @@ class OpenUrlTool(AutomationTool):
         guard = evaluate(ActionRequest(summary=f"open url {url}", approved=ctx.approved))
         if not guard.allowed:
             return AutomationToolResult(False, guard.reason)
-        try:
-            import webbrowser
+        from iris.automation.web_browser import open_url as open_in_browser
+        from iris.automation.web_browser import resolve_browser_key
 
-            webbrowser.open(url)
-            return AutomationToolResult(True, "브라우저에서 URL을 열었습니다.", url)
-        except Exception as e:
-            return AutomationToolResult(False, str(e))
+        browser = resolve_browser_key(ctx.settings)
+        ok, msg = open_in_browser(url, browser, ctx.app_paths)
+        if ok:
+            return AutomationToolResult(True, msg, url)
+        return AutomationToolResult(False, msg)
+
+
+class GetSystemInfoTool(AutomationTool):
+    name = "get_system_info"
+    description = "CPU/RAM/GPU/디스크/OS 요약 (로컬 조회)"
+    risk_level = RiskLevel.LOW_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        return "시스템 사양·리소스를 요약 조회합니다."
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        info = collect_system_info()
+        if not verify_system_info_nonempty(info):
+            return AutomationToolResult(
+                False,
+                "시스템 정보를 충분히 읽지 못했습니다.",
+                system_info_to_json(info),
+            )
+        brief = system_info_brief_korean(info)
+        return AutomationToolResult(True, brief, system_info_to_json(info))
 
 
 class SearchWebTool(AutomationTool):
@@ -161,14 +265,10 @@ class ReadScreenSummaryTool(AutomationTool):
         settings = ctx.settings
         if settings is None:
             return AutomationToolResult(False, "설정이 없어 화면 요약을 할 수 없습니다.")
-        cap = screen_capture.capture_full_screen(settings)
-        if not cap:
-            return AutomationToolResult(False, "화면 캡처 실패")
-        raw = ocr_engine.ocr_image(settings, cap)
-        summary, _ = ocr_engine.ocr_for_storage(settings, raw)
-        if not summary.strip():
-            return AutomationToolResult(False, "화면에서 텍스트를 읽지 못했습니다.")
-        return AutomationToolResult(True, "화면 요약", summary)
+        ok, msg, summary = read_screen_summary_text(settings)
+        if not ok:
+            return AutomationToolResult(False, msg)
+        return AutomationToolResult(True, msg, summary)
 
 
 class TypeTextTool(AutomationTool):
@@ -258,15 +358,132 @@ class RunShellTool(AutomationTool):
             return AutomationToolResult(False, str(e))
 
 
+class UiaSnapshotTool(AutomationTool):
+    name = "uia_snapshot"
+    description = "창 UIA 트리 요약 JSON (2KB 이하)"
+    risk_level = RiskLevel.LOW_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        sub = str(ctx.params.get("window_title_sub") or "")
+        return f"UIA 스냅샷: '{sub}'"
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        settings = ctx.settings
+        if settings is None:
+            return AutomationToolResult(False, "설정이 없습니다.")
+        if not getattr(settings, "computer_use_uia_enabled", True):
+            return AutomationToolResult(False, "UIA가 비활성화되어 있습니다.")
+        sub = str(ctx.params.get("window_title_sub") or "").strip()
+        if not sub:
+            sub = window_controller.get_active_window_title()
+        if not sub:
+            return AutomationToolResult(False, "window_title_sub가 필요합니다.")
+        _, json_text, matched = uia_reader.snapshot_window_uia(sub)
+        if not json_text:
+            return AutomationToolResult(
+                False,
+                "UIA 스냅샷 실패 (pywinauto 없음 또는 창 없음). perceive_desktop 또는 read_screen_summary를 사용하세요.",
+            )
+        return AutomationToolResult(True, f"UIA: {matched or sub}", json_text)
+
+
+class PerceiveDesktopTool(AutomationTool):
+    name = "perceive_desktop"
+    description = "하이브리드 데스크톱 인식 (UIA 우선, OCR/VLM 보조)"
+    risk_level = RiskLevel.LOW_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        return "활성 창·UIA·OCR로 데스크톱 상태를 요약합니다."
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        if ctx.settings is None:
+            return AutomationToolResult(False, "설정이 없습니다.")
+        obs = build_perception_observation(ctx)
+        return AutomationToolResult(
+            True,
+            obs.to_observation_string(max_summary=400),
+            obs.to_detail_json(),
+        )
+
+
+class UiaClickTool(AutomationTool):
+    name = "uia_click"
+    description = "UIA 요소 name/automation_id로 클릭"
+    risk_level = RiskLevel.HIGH_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        sub = str(ctx.params.get("window_title_sub") or "")
+        name = str(ctx.params.get("name") or "")
+        return f"UIA 클릭: '{sub}' / '{name}'"
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        settings = ctx.settings
+        if settings is None:
+            return AutomationToolResult(False, "설정이 없습니다.")
+        if not getattr(settings, "computer_use_uia_enabled", True):
+            return AutomationToolResult(
+                False,
+                "UIA 비활성. send_hotkey 또는 click(x,y)를 사용하세요.",
+            )
+        guard = evaluate(
+            ActionRequest(
+                summary=f"uia_click {ctx.params}",
+                approved=ctx.approved,
+            )
+        )
+        if not guard.allowed:
+            return AutomationToolResult(False, guard.reason)
+        sub = str(ctx.params.get("window_title_sub") or "").strip()
+        if not sub:
+            sub = window_controller.get_active_window_title()
+        ok, reason = uia_reader.click_uia_element(
+            sub,
+            name=str(ctx.params.get("name") or ""),
+            automation_id=str(ctx.params.get("automation_id") or ""),
+        )
+        return AutomationToolResult(ok, "UIA 클릭" if ok else "UIA 클릭 실패", reason)
+
+
+class SendHotkeyTool(AutomationTool):
+    name = "send_hotkey"
+    description = "단축키 조합 (예: ctrl+f)"
+    risk_level = RiskLevel.HIGH_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        keys = ctx.params.get("keys") or []
+        return f"단축키: {'+'.join(str(k) for k in keys)}"
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        raw = ctx.params.get("keys")
+        if isinstance(raw, str):
+            keys = [k.strip() for k in raw.replace("+", ",").split(",") if k.strip()]
+        elif isinstance(raw, list):
+            keys = [str(k).strip() for k in raw if str(k).strip()]
+        else:
+            keys = []
+        guard = evaluate(
+            ActionRequest(summary=f"hotkey {'+'.join(keys)}", approved=ctx.approved)
+        )
+        if not guard.allowed:
+            return AutomationToolResult(False, guard.reason)
+        ok, reason = keyboard_mouse_controller.send_hotkey_approved(keys, approved=True)
+        return AutomationToolResult(ok, "단축키" if ok else "단축키 실패", reason)
+
+
 def all_automation_tools() -> List[AutomationTool]:
     return [
+        GetSystemInfoTool(),
         ListOpenWindowsTool(),
         LaunchAppTool(),
         FocusWindowTool(),
         OpenUrlTool(),
         SearchWebTool(),
         ReadScreenSummaryTool(),
+        UiaSnapshotTool(),
+        PerceiveDesktopTool(),
         TypeTextTool(),
         ClickTool(),
+        UiaClickTool(),
+        SendHotkeyTool(),
         RunShellTool(),
     ]

@@ -2,14 +2,73 @@
 
 ## 1. System Overview / 시스템 개요
 
-Iris is a local-first AI assistant with two major capabilities.
+Iris is a local-first **execution assistant** — not a chat-only bot.
 
-- 한국어 설명: Iris는 로컬 우선 AI 비서이며, 크게 두 가지 능력을 가집니다.
+- 한국어 설명: Iris는 로컬 우선 **실행형** AI 비서입니다. 대화만 하는 챗봇이 아니라 PC 상태를 인식하고, 도구로 조작하고, 결과를 검증합니다.
 
-1. Jarvis-like personal AI assistant.
-   - 한국어: 자비스형 개인 AI 비서.
-2. Hybrid multi-target workflow monitoring.
-   - 한국어: 여러 앱/창/탭/로그를 함께 보는 하이브리드 작업 모니터링.
+Three major capabilities:
+
+1. **Computer Use agent** — multi-step Perception → Action → Verify loop (default execution path).
+   - 한국어: Computer Use 에이전트 — 인식·행동·검증 multi-step 루프(기본 실행 경로).
+2. **Jarvis-like personal assistant** — voice, modes, web search, reports.
+   - 한국어: 자비스형 개인 비서 — 음성, 모드, 웹 검색, 보고서.
+3. **Hybrid multi-target workflow monitoring** — proactive suggestions from terminal, IDE, Chrome, OCR.
+   - 한국어: 하이브리드 작업 모니터링 — 선제 제안.
+
+### Iris-only differentiators (always parallel)
+
+- Voice dialogue + barge-in
+- Hybrid monitoring → proactive alerts
+- SQLite logs and `task_sessions` memory
+- Work / game / creative multi-turn modes
+
+---
+
+## 1.1 Four-Tier Execution Model / 4계층 실행 모델
+
+```text
+User goal
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Iris Orchestrator (ComputerUseAgent / AgentOrchestrator)   │
+│                                                             │
+│  Tier 1 — Dedicated tools     launch_app, open_url, …       │
+│  Tier 2 — Universal GUI       UIA / OCR / VLM + input       │
+│  Tier 3 — Verify loop         re-perceive → pass/fail       │
+│  Tier 4 — External (optional) OpenClaw, Hermes on failure   │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+Safety Guard (CRITICAL_RISK approval inside loop)
+```
+
+| Tier | Layer | Responsibility |
+|------|-------|----------------|
+| **1** | `automation/` tool registry | Deterministic tools: `get_system_info`, `launch_app`, `open_url`, `focus_window`, … |
+| **2** | Computer Use (UIA/OCR/VLM) | App-agnostic GUI: keyboard, mouse, window — no per-app adapter required |
+| **3** | Verify loop | After each step: UI/screen re-perception; success/failure; replan (shortcuts preferred) |
+| **4** | `assistant/` adapters | OpenClaw, Hermes — delegate only on Iris loop **failure** or **long-tail** tasks |
+
+- **OpenClaw** and **Hermes** are optional Tier 4 fallbacks, not the Jarvis body.
+- Legacy policy: `assistant/orchestrator.py` blocking direct manipulation tools in JSON plans → **deprecated**. Target: orchestrator **sequentially invokes** Tier 1–2 tools inside the agent loop. Code: unblock `action_plan.BLOCKED_TOOLS`, expand `ALLOWED_TOOLS` (see implementation plan Phase A).
+
+### Perception / Action / Verify (PAV)
+
+| Phase | Module paths | Output |
+|-------|--------------|--------|
+| **Perception** | `monitoring/`, `automation/` window readers | Active window, `list_open_windows`, UIA snapshot summary, OCR/VLM scene summary (no raw screenshot/full OCR storage by default) |
+| **Action** | `automation/tool_registry.py` | `AutomationToolRegistry`: `launch_app`, `focus_window`, `type_text`, `click`, `run_shell`, `open_url`, … |
+| **Verify** | Same as Perception + planner | Compare observation to goal; retry or alternate path in-loop |
+
+---
+
+## 1.2 Safety Guard + Computer Use Loop / 안전장치와 Computer Use 공존
+
+- LOW_RISK, MEDIUM_RISK, HIGH_RISK actions may execute **inside** the agent loop without extra approval.
+- CRITICAL_RISK actions (`run_shell`, file deletion, payment, password, system settings, sensitive browser) **pause the loop** until explicit user approval.
+- Dangerous patterns may be blocked even when approved.
+- 한국어: Computer Use 루프와 CRITICAL 승인은 공존합니다. 1~3단계는 루프 내 자동 실행, 4단계는 승인 후 재개합니다.
 
 ---
 
@@ -73,11 +132,20 @@ Path: `iris/assistant/`
 
 Responsibilities:
 
-- Agent adapter / 에이전트 어댑터
-- Agent orchestrator / 에이전트 실행 루프
-- Tool planning / 도구 계획
-- Safety guard connection / 안전장치 연결
+- **ComputerUseAgent** (`iris/assistant/computer_use_agent.py`) — Tier 1–2 + Verify(A) 기본 경로: Gemma 한 스텝 JSON → `AutomationToolRegistry.run()` → observation → `step_complete` / `step_failed`
+- **AgentOrchestrator** — 메타 도구만 (`safety_check`, `intent_route`, `assistant_dispatch`, `gemma_finalize`); PC 조작은 Computer Use로 위임
+- `IrisAssistant.run_computer_use_loop()` — 텍스트·음성 공용 진입 API
+- **TurnCoordinator** `RouteLane.COMPUTER_USE` — `CommandKind.COMPUTER_USE`, `COMPLEX_AUTOMATION` 전용 ( `APP_LAUNCH`는 `DIRECT_ACTION` 유지)
+- Tool planning and sequential Tier 1–2 tool invocation / 도구 계획·순차 호출
+- **Tier 4 adapters**: OpenClaw, Hermes (failure / long-tail delegation only)
+- Safety guard connection / 안전장치 연결 (CRITICAL pause inside loop)
 - Memory manager connection / 기억 시스템 연결
+
+Orchestrator policy (target state):
+
+- Deprecated: forbid direct manipulation tools in `action_plan` JSON.
+- Target: `ComputerUseAgent` / `AgentOrchestrator` calls `AutomationToolRegistry` tools step-by-step with Verify between steps.
+- Implementation: Phase A in `docs/implementation-plan.md` — `BLOCKED_TOOLS` removal, `ALLOWED_TOOLS` expansion.
 
 ---
 
@@ -205,21 +273,38 @@ Tables:
 
 ## 11. Main Flow / 메인 흐름
 
+### 11.1 Computer Use Agent Loop (default) / Computer Use 루프 (기본)
+
+```text
+User input (text / voice)
+→ Command Router → Intent classification
+→ ComputerUseAgent / AgentOrchestrator
+    loop until goal met or max steps:
+        Perception  (active window, UIA, OCR/VLM summary)
+        Plan        (Tier 1 tool vs Tier 2 GUI)
+        Risk check  (CRITICAL → pause for approval)
+        Action      (AutomationToolRegistry.execute)
+        Verify      (re-perceive → success | fail)
+        on fail     → replan (shortcut-first) or Tier 4 delegate
+→ Safety Guard (always)
+→ Log (SQLite)
+→ Respond / speak to user
+```
+
+한국어 설명: 기본 경로는 multi-step 루프입니다. 매 스텝마다 인식·실행·검증을 반복하고, 4단계 위험 작업만 루프를 멈추고 승인을 받습니다.
+
+### 11.2 Simple / rule-based fallback / 단순·규칙 기반 폴백
+
 ```text
 User input
 → Command Router
 → Intent classification
-→ Agent Orchestrator or rule-based handler
+→ Rule-based handler (modes, one-shot commands)
 → Risk classification
-→ If CRITICAL_RISK: ask confirmation
-→ If LOW/MEDIUM/HIGH: execute directly
-→ Safety Guard
-→ Action Executor
-→ Log result
-→ Respond to user
+→ Safety Guard → Action Executor → Log → Respond
 ```
 
-한국어 설명: 사용자 입력은 의도 분류 후 에이전트 또는 규칙 처리로 이동하고, 위험도에 따라 승인 또는 즉시 실행으로 나뉩니다.
+Used when a full agent loop is unnecessary (e.g. pure chat, mode entry prompts).
 
 ---
 

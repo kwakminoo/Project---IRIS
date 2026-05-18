@@ -61,11 +61,15 @@ class OpenClawActionBackend:
         """환경에서 기능 켜짐 여부."""
         return self._enabled
 
+    def cli_available(self) -> bool:
+        """CLI 실행 파일 경로 해석 가능 여부(Tier 4 등에서 OPENCLAW_ENABLED와 무관하게 사용)."""
+        return self._resolve_cli_executable() is not None
+
     def is_available(self) -> bool:
         """설정이 켜져 있고 실행 파일을 찾을 수 있으면 True."""
         if not self._enabled:
             return False
-        return self._resolve_cli_executable() is not None
+        return self.cli_available()
 
     def _resolve_cli_executable(self) -> str | None:
         p = Path(self._cli)

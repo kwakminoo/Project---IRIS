@@ -17,7 +17,7 @@ def test_all_tools_registered() -> None:
     names = reg.list_tools()
     expected = {t.name for t in all_automation_tools()}
     assert set(names) == expected
-    assert len(names) == 9
+    assert len(names) == len(expected)
 
 
 def test_risk_approval_rules() -> None:

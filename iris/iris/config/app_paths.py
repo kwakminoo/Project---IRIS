@@ -67,6 +67,8 @@ def detect_app_paths() -> Dict[str, str]:
     candidates: List[tuple[str, Path]] = [
         ("chrome", Path(pf) / "Google" / "Chrome" / "Application" / "chrome.exe"),
         ("edge", Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+        ("firefox", Path(pf) / "Mozilla Firefox" / "firefox.exe"),
+        ("firefox", Path(local) / "Mozilla Firefox" / "firefox.exe"),
         ("discord", Path(local) / "Discord" / "Update.exe"),
         ("steam", Path(pfx86) / "Steam" / "steam.exe"),
         ("league", Path(pfx86) / "Riot Games" / "Riot Client" / "RiotClientServices.exe"),
@@ -81,5 +83,11 @@ def detect_app_paths() -> Dict[str, str]:
     reg_chrome = _reg_exe(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
     if reg_chrome and "chrome" not in out:
         out["chrome"] = reg_chrome
+    reg_edge = _reg_exe(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe")
+    if reg_edge and "edge" not in out:
+        out["edge"] = reg_edge
+    reg_firefox = _reg_exe(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe")
+    if reg_firefox and "firefox" not in out:
+        out["firefox"] = reg_firefox
 
     return out
