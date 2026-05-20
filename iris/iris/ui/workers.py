@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from iris.agent.needs_agent import format_hits_for_gemma_context, research_hits_with_intent
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.assistant.turn_coordinator import TurnCoordinator
+from iris.config.app_index import run_background_scan
 from iris.core.command_router import CommandKind
+from iris.storage.database import Database
 
 if TYPE_CHECKING:
     from iris.assistant.agent_adapter import IrisAssistant
@@ -39,6 +41,20 @@ class SearchWorker(QThread):
     def run(self) -> None:
         q, hits = research_hits_with_intent(self._query_text, self._intent)
         self.finished_hits.emit(q, hits, self._intent.name)
+
+
+class AppLauncherScanWorker(QThread):
+    """앱 런처 백그라운드 스캔 — UI 메인 스레드 블로킹 방지."""
+
+    finished_scan = pyqtSignal(int, list)
+
+    def __init__(self, db: Database, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._db = db
+
+    def run(self) -> None:
+        new_count, names = run_background_scan(self._db)
+        self.finished_scan.emit(new_count, names)
 
 
 class AgentWorker(QThread):

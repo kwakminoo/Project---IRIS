@@ -16,7 +16,16 @@ Iris is a local-first personal AI assistant for Windows.
 - Web search through Playwright / Playwright 웹 검색
 - Monitoring dashboard / 모니터링 대시보드
 - Settings dialog / 설정 창
+- App launcher index / 앱 런처 (시작 메뉴·App Paths 스캔, 설치 완료 감지, 설정에서 수동 감지)
 - Risk-based automation / 위험도 기반 자동화
+
+## 앱 런처
+
+설정 창의 **앱 런처** 섹션에서 PC에 등록된 실행 파일 목록을 확인·수동 추가할 수 있습니다.
+
+- **앱 런처 감지**: 시작 메뉴 shortcut과 Windows App Paths 레지스트리를 스캔해 신규 앱만 DB에 추가합니다.
+- **자동 등록**: 새 앱 설치 후 시작 메뉴에 shortcut이 생기면 백그라운드에서 인덱스에 반영합니다 (24시간 주기 전체 스캔 없음).
+- `메모장 켜줘` 같은 요청은 인덱스의 `launch_app` 경로로 실행됩니다 (`run_shell` 폴백 최소화).
 
 ## 권한 정책
 

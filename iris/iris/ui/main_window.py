@@ -23,7 +23,8 @@ from iris.audio.stt_engine import SttEngine
 from iris.audio.tts_engine import TtsEngine
 from iris.audio.tts_manager import TtsStatus
 from iris.audio.voice_gate import VoiceCommandGate
-from iris.config.app_paths import detect_app_paths
+from iris.config.app_index import build_merged_app_paths
+from iris.config.app_install_watcher import AppInstallWatcher
 from iris.config.env_store import update_env_values
 from iris.config.settings import load_settings
 from iris.core.command_router import CommandKind
@@ -42,7 +43,7 @@ from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
 from iris.ui.bridge_signals import UiBridge
 from iris.ui.visualizer import Visualizer
-from iris.ui.workers import AgentWorker, LlmWorker, SearchWorker
+from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
 
 
 def _apply_dark_theme(w: QWidget) -> None:
@@ -84,7 +85,7 @@ class MainWindow(QMainWindow):
         self._targets = TargetRegistry(self._db)
         self._term_log = TerminalLogRegistry()
         self._browser = BrowserTabMonitor()
-        self._app_paths = detect_app_paths()
+        self._app_paths = build_merged_app_paths(self._db)
         self._executor = ActionExecutor(
             self._db,
             self._app_paths,
@@ -95,6 +96,9 @@ class MainWindow(QMainWindow):
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
+        self._install_watcher = AppInstallWatcher(self)
+        self._install_watcher.install_complete.connect(self._on_install_complete)
+        self._maybe_run_initial_app_scan()
         self._stt = SttEngine(self._settings)
         self._tts = TtsEngine(self._settings, parent=self)
         self._tts.status_changed.connect(self._on_tts_status_changed)
@@ -271,10 +275,42 @@ class MainWindow(QMainWindow):
     def _refresh_model_label(self) -> None:
         self._model_label.setText(self._model_status_line())
 
+    def _refresh_app_paths(self) -> None:
+        """DB 인덱스 + detect 병합 후 executor·assistant에 반영."""
+        merged = build_merged_app_paths(self._db)
+        self._app_paths.clear()
+        self._app_paths.update(merged)
+        self._executor.update_app_paths(self._app_paths)
+        self._assistant.update_app_paths(self._app_paths)
+
+    def _maybe_run_initial_app_scan(self) -> None:
+        """첫 실행 1회만 백그라운드 스캔 (24h 주기 타이머 없음)."""
+        if self._db.get_preference("app_launcher_initial_scan_done", "0") in ("1", "true", "True"):
+            return
+        worker = AppLauncherScanWorker(self._db, parent=self)
+        worker.finished_scan.connect(self._on_initial_app_scan_done)
+        worker.start()
+        self._initial_scan_worker = worker
+
+    @pyqtSlot(int, list)
+    def _on_initial_app_scan_done(self, _new_count: int, _names: list) -> None:
+        self._db.set_preference("app_launcher_initial_scan_done", "1")
+        self._refresh_app_paths()
+
+    @pyqtSlot(str, str, str)
+    def _on_install_complete(self, app_key: str, display_name: str, exe_path: str) -> None:
+        row = self._db.get_app_launcher_entry(app_key)
+        if row and str(row["exe_path"]) == exe_path:
+            return
+        self._db.upsert_app_launcher_entry(app_key, display_name, exe_path, "install_watch")
+        self._refresh_app_paths()
+        self._notes.add_note(f"앱 런처: {display_name} 자동 등록")
+
     def _apply_runtime_settings(self) -> None:
         """저장된 설정을 현재 세션에 반영한다."""
         self._settings = load_settings(self._env_path)
         self._gemma = GemmaClient(self._settings)
+        self._refresh_app_paths()
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
@@ -290,7 +326,12 @@ class MainWindow(QMainWindow):
         # 설정창 마이크 미리보기와 상시 듣기가 동시에 같은 장치를 잡지 않도록
         resume_listen = self._settings.always_listen_enabled
         self._continuous_listen.stop()
-        dlg = SettingsDialog(self._settings, self)
+        dlg = SettingsDialog(
+            self._settings,
+            self,
+            db=self._db,
+            on_app_paths_changed=self._refresh_app_paths,
+        )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             if resume_listen:
                 self._continuous_listen.start()

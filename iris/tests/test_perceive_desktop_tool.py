@@ -72,6 +72,7 @@ def _settings(uia: bool = True, vlm: bool = False) -> Settings:
         voice_wake_words=("iris",),
         voice_followup_seconds=8.0,
         multi_agent_enabled=False,
+        unified_llm_router_enabled=True,
         llm_intent_router_enabled=True,
         llm_approval_enabled=True,
         default_web_browser="chrome",

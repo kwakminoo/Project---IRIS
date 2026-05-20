@@ -12,14 +12,23 @@ if TYPE_CHECKING:
     from iris.assistant.agent_adapter import IrisAssistant
     from iris.ai.gemma_client import GemmaClient
 
-# 실행 전 짧은 확인 — 계획·실행 내용을 invent 하지 않음
+# 실행 전 짧은 확인 — 계획·실행 내용을 invent 하지 않음 (goal 원문 echo 금지)
 _ACK_TEMPLATES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"유튜브|youtube", re.I), "유튜브를 열게요."),
     (re.compile(r"크롬|chrome", re.I), "Chrome을 열게요."),
     (re.compile(r"커서|cursor", re.I), "Cursor를 열게요."),
     (re.compile(r"디스코드|discord", re.I), "Discord를 열게요."),
+    (re.compile(r"메모장|notepad", re.I), "메모장을 실행할게요."),
     (re.compile(r"창", re.I), "창을 조정할게요."),
 ]
+
+
+def match_action_ack(text: str) -> str | None:
+    """goal·user_text에서 행동 설명형 ack 문장 매칭 (없으면 None)."""
+    for pat, msg in _ACK_TEMPLATES:
+        if pat.search(text):
+            return msg
+    return None
 
 _DIALOGUE_SYSTEM = (
     "당신은 Iris, 사용자의 로컬 AI 비서입니다. "
@@ -45,30 +54,49 @@ class DialogueAgent:
         return self._with_iris_prefix(raw)
 
     def cu_early_ack(self, goal: str, slots: dict | None = None) -> str:
-        """Computer Use 실행 전 짧은 확인 — 완료 주장 없이 진행만 알림."""
+        """Computer Use 실행 전 짧은 확인 — 사용자 goal 원문을 반복하지 않음."""
         g = (goal or "").strip()
         slot = slots or {}
+        hint = " ".join(
+            str(slot.get(k) or "")
+            for k in ("app_hint", "app_key", "display_name", "query", "search_query", "title")
+        )
+        combined = f"{g} {hint}".strip()
+        task_type = str(slot.get("task_type") or "").strip().lower()
+
         query = slot.get("query") or slot.get("search_query") or slot.get("title")
         if isinstance(query, str) and query.strip():
             q = query.strip()[:40]
-            if re.search(r"유튜브|youtube", g, re.I):
+            if re.search(r"유튜브|youtube", combined, re.I):
                 return f"유튜브에서 '{q}' 검색·재생을 진행할게요."
-            return f"'{q}' 관련 요청을 진행할게요."
-        if re.search(r"유튜브|youtube", g, re.I):
+        if re.search(r"유튜브|youtube", combined, re.I):
             return "유튜브에서 요청하신 재생을 진행할게요."
-        if re.search(r"카톡|카카오", g, re.I):
+        if re.search(r"카톡|카카오", combined, re.I):
             return "카카오톡에서 요청을 진행할게요."
-        if len(g) > 36:
-            return f"{g[:36]}… 작업을 진행할게요."
-        if g:
-            return f"{g} — 진행할게요."
-        return "요청을 진행할게요."
 
-    def ack(self, user_text: str, kind: CommandKind) -> str:
-        """실행 전 짧은 확인 문장 (템플릿, LLM 미사용)."""
-        for pat, msg in _ACK_TEMPLATES:
-            if pat.search(user_text):
-                return msg
+        if task_type == "open_app" or re.search(r"메모장|notepad", combined, re.I):
+            if re.search(r"메모장|notepad", combined, re.I):
+                return "메모장을 실행할게요."
+        matched = match_action_ack(combined)
+        if matched:
+            return matched
+        return "요청하신 작업을 진행할게요."
+
+    def ack(
+        self,
+        user_text: str,
+        kind: CommandKind,
+        *,
+        slots: dict | None = None,
+    ) -> str:
+        """실행 전 짧은 확인 문장 (display_name 슬롯 우선, 템플릿 폴백)."""
+        slot = slots or {}
+        disp = slot.get("display_name")
+        if isinstance(disp, str) and disp.strip() and kind is CommandKind.APP_LAUNCH:
+            return f"{disp.strip()}을(를) 실행할게요."
+        matched = match_action_ack(user_text)
+        if matched:
+            return matched
         if kind is CommandKind.GET_SYSTEM_INFO:
             return "사양을 잠깐 확인할게요."
         if kind is CommandKind.OPEN_URL:

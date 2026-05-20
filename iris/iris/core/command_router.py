@@ -72,7 +72,10 @@ _DANGER_COMPUTER = re.compile(
     r"(마우스\s*클릭|키보드|쉘\s*실행|rm\s+-rf|포맷|레지스트리\s*삭제)",
     re.IGNORECASE,
 )
-_LAUNCH = re.compile(r"(실행해줘|켜줘|열어줘|launch|open\s+app)", re.IGNORECASE)
+_LAUNCH = re.compile(
+    r"(실행해줘|실행해달라|켜줘|열어줘|해달라|해\s*줘|해\s*주|부탁|launch|open\s+app)",
+    re.IGNORECASE,
+)
 _FILE_TASK = re.compile(
     r"(파일\s*찾아|문서\s*찾아|파일\s*검색|제안서|\.pptx|\.docx|\.pdf).*(찾아|검색|열어)|"
     r"(찾아줘|검색해).*(파일|문서|제안서)",
@@ -104,6 +107,11 @@ _YOUTUBE_OPEN_HINT = re.compile(
     r"(틀|재생|열|켜).*(유튜브|youtube)",
     re.IGNORECASE,
 )
+
+
+def legacy_classify_command(text: str) -> CommandKind:
+    """LLM·오프라인 폴백 전용 휴리스틱 — 1차 라우터로 쓰지 않음."""
+    return classify_command(text)
 
 
 def classify_command(text: str) -> CommandKind:

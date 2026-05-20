@@ -71,13 +71,21 @@ class PendingUserAction:
 
 @dataclass
 class PendingComputerUseGoal:
-    """Computer Use 승인 대기 — 후속 '진행해줘'·CU 중간 CRITICAL 도구 확인."""
+    """Computer Use 승인 대기 — 후속 발화·CU 중간 CRITICAL 도구 1스텝 실행 대기."""
 
     goal: str
     risk_hint: str = "low"  # low | medium | high | critical
     prompt: str = ""  # 사용자에게 제시한 확인 문구
-    require_rule_approval: bool = False  # CRITICAL 도구 등 — LLM approve 무시
+    require_rule_approval: bool = False  # 레거시 — LLM 승인 차단에 사용하지 않음
     slots: Dict[str, Any] = field(default_factory=dict)
+    # CRITICAL 도구 승인 후 1스텝만 실행 (CU 루프 재시작 방지)
+    pending_tool_name: str = ""
+    pending_tool_params: Dict[str, Any] = field(default_factory=dict)
+    pending_tool_preview: str = ""
+
+    @property
+    def has_pending_tool(self) -> bool:
+        return bool(self.pending_tool_name.strip())
 
 
 @dataclass
