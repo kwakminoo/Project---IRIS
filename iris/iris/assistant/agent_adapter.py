@@ -11,6 +11,7 @@ from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_p
 from iris.assistant.safety_guard import quick_block_user_text
 from iris.assistant.task_planner import plan_from_preset
 from iris.automation.action_executor import ActionExecutor, IrisExecutionRequest
+from iris.config.app_index import display_name_for_key, resolve_app_for_goal
 from iris.config.preset_modes import find_preset
 from iris.core.command_router import CommandKind, classify_command
 from iris.core.context_manager import (
@@ -28,22 +29,31 @@ from iris.storage.database import Database
 
 
 _LAUNCH_SPECS: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"메모장|notepad", re.IGNORECASE), "notepad", "메모장"),
     (re.compile(r"커서|\bCursor\b", re.IGNORECASE), "code", "Cursor"),
     (re.compile(r"크롬|\bChrome\b", re.IGNORECASE), "chrome", "Chrome"),
     (re.compile(r"엣지|\bEdge\b", re.IGNORECASE), "edge", "Edge"),
     (re.compile(r"디스코드|\bDiscord\b", re.IGNORECASE), "discord", "Discord"),
     (re.compile(r"파이썬|\bPython\b", re.IGNORECASE), "python", "Python"),
-    (re.compile(r"\bSteam\b", re.IGNORECASE), "steam", "Steam"),
+    (re.compile(r"스팀|\bSteam\b", re.IGNORECASE), "steam", "Steam"),
     (re.compile(r"롤|리그|\bLeague\b", re.IGNORECASE), "league", "League of Legends"),
     (re.compile(r"\bOBS\b|옵스", re.IGNORECASE), "obs", "OBS"),
 ]
 
 
-def _resolve_launch_target(text: str) -> tuple[str | None, str | None]:
+def _resolve_launch_target(
+    text: str,
+    app_paths: Dict[str, str] | None = None,
+    db: Database | None = None,
+) -> tuple[str | None, str | None]:
     """(app_key, 표시 이름). 경로 유무와 무관하게 의도 키를 추출."""
     for pat, key, disp in _LAUNCH_SPECS:
         if pat.search(text):
             return key, disp
+    if app_paths:
+        key, _ = resolve_app_for_goal(text, app_paths, db=db)
+        if key:
+            return key, display_name_for_key(key, db)
     return None, None
 
 
@@ -66,6 +76,11 @@ class IrisAssistant:
         self.ctx = DialogueContext()
         self.memory = MemoryManager(db)
         seed_demo_recent_work(db)
+
+    def update_app_paths(self, app_paths: Dict[str, str]) -> None:
+        """앱 인덱스 병합 후 경로 dict 갱신."""
+        self._app_paths.clear()
+        self._app_paths.update(app_paths)
 
     @property
     def gemma_client(self) -> GemmaClient:
@@ -96,6 +111,39 @@ class IrisAssistant:
         if not hasattr(self, "_agent_orchestrator"):
             self._agent_orchestrator = AgentOrchestrator(self._db, self, self._gemma)
         return self._agent_orchestrator.run(text, intent=routed)
+
+    def run_pending_cu_tool(
+        self,
+        tool_name: str,
+        params: dict,
+        *,
+        summary: str = "",
+    ) -> str:
+        """승인된 CRITICAL 도구 1스텝 실행 (CU 루프 재시작 없음)."""
+        from iris.assistant.computer_use_agent import (
+            ComputerUseAgent,
+            format_pending_tool_user_message,
+        )
+        from iris.config.app_index import display_name_for_key
+
+        if not hasattr(self, "_computer_use_agent"):
+            self._computer_use_agent = ComputerUseAgent(
+                self,
+                self._gemma,
+                self._executor.tool_registry,
+                max_steps=20,
+            )
+        disp = ""
+        if tool_name == "launch_app":
+            key = str(params.get("app_key") or "")
+            disp = str(params.get("display_name") or display_name_for_key(key, self._db))
+        result = self._computer_use_agent.run_pending_tool(
+            tool_name,
+            params,
+            summary=summary,
+            approved=True,
+        )
+        return format_pending_tool_user_message(tool_name, result, disp)
 
     def run_computer_use_loop(
         self,
@@ -401,24 +449,35 @@ class IrisAssistant:
         self.ctx.clear()
         return "Iris: 요청한 환경을 실행합니다.\n" + msg
 
-    def _start_app_launch_flow(self, text: str) -> str:
-        app_key, display = _resolve_launch_target(text)
-        if not app_key:
-            return "Iris: 어떤 앱을 실행할지 파악하지 못했습니다. 예: Cursor, Chrome, Edge."
-
-        if app_key not in self._app_paths:
-            # 경로 없어도 보조 백엔드로 시도 가능 — 승인 후 실행 단계에서 처리
-            pass
-
-        summary = f"앱 실행 요청: {display} ({app_key})"
+    def launch_app_by_key(
+        self,
+        app_key: str,
+        *,
+        display_name: str = "",
+        user_text: str = "",
+    ) -> str:
+        """Unified Router slots.app_key — LLM 우선, 휴리스틱 재해석 생략."""
+        key = app_key.strip()
+        if not key:
+            return self._start_app_launch_flow(user_text or app_key)
+        disp = display_name.strip() or display_name_for_key(key, self._db)
+        summary = f"앱 실행 요청: {disp} ({key})"
         pa = PendingUserAction(
             command_kind=CommandKind.APP_LAUNCH,
             summary=summary,
-            user_original_text=text,
-            app_key=app_key,
-            display_name=display,
+            user_original_text=user_text or summary,
+            app_key=key,
+            display_name=disp,
         )
         return self._execute_user_action_now(pa)
+
+    def _start_app_launch_flow(self, text: str) -> str:
+        app_key, display = _resolve_launch_target(text, self._app_paths, self._db)
+        if not app_key:
+            return "Iris: 어떤 앱을 실행할지 파악하지 못했습니다. 예: Cursor, Chrome, Edge, 메모장."
+        return self.launch_app_by_key(
+            app_key, display_name=display or "", user_text=text
+        )
 
     def _start_window_control_flow(self, text: str) -> str:
         summary = f"창 제어 요청: {text.strip()[:200]}"

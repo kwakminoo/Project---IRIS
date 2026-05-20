@@ -12,10 +12,14 @@ APPROVAL_CLASSIFIER_SYSTEM = """이전에 Iris가 실행 확인을 요청한 맥
 
 스키마: { "decision": "approve | reject | clarify | unrelated", "confidence": 0.0-1.0 }
 
-approve: 진행해줘, 그래, 해줘, 보내, 응, 승인, ok, yes 등 실행 동의
-reject: 취소, 아니, 하지마, no 등 거절
+approve: 실행·진행에 동의하는 모든 구어 표현
+  예: 응, 어, 그래, 좋아, 해줘, 해 줘, 진행, 진행해, 진행해줘, 그럼 해, 보내, 승인, 확인, ok, okay, yes, ㅇㅇ, 알겠어, 부탁해
+reject: 취소·거절
+  예: 아니, 안 해, 하지마, 하지 마, 취소, no, 싫어, 됐어, 그만
 clarify: 승인/거절이 아닌 짧은 되묻기·애매한 답
 unrelated: 완전히 다른 주제·새 작업 요청
+
+특정 단어와 정확히 일치할 필요 없음. 맥락상 Iris 확인에 대한 동의면 approve.
 
 다른 텍스트 없이 JSON만.
 """
@@ -136,7 +140,7 @@ def resolve_followup_for_pending(
     force_rule_only: bool,
     use_llm: bool,
 ) -> FollowupClassification:
-    """critical·CRITICAL 도구는 규칙 승인만 허용 (LLM approve 무시)."""
-    if force_rule_only:
+    """승인 대기 후속 분류. force_rule_only는 LLM 불가·설정 off 시에만 사용."""
+    if force_rule_only or not use_llm:
         return classify_user_followup_rule(user_text)
     return classify_user_followup(user_text, context_prompt, gemma, use_llm=use_llm)

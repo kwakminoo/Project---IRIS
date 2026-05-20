@@ -11,6 +11,7 @@ from iris.assistant.dialogue_agent import DialogueAgent
 from iris.assistant.computer_use_agent import extract_user_question
 from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_pending
 from iris.assistant.llm_intent_router import route_with_llm
+from iris.assistant.unified_router import route_user_turn
 from iris.assistant.orchestrator import AgentOrchestrator
 from iris.assistant.router_policy import (
     RouteLane,
@@ -87,15 +88,25 @@ class TurnCoordinator:
             if cu_result is not None:
                 return cu_result
 
-        kind = routed if routed is not None else route_user_intent(user_text)
+        # 1차: Unified LLM Router (실패 시 legacy_classify + resolve_route_lane 폴백)
         if is_multi_turn_active(ctx):
+            kind = routed if routed is not None else route_user_intent(user_text)
             routed_turn = resolve_route_lane(user_text, kind, ctx)
+        elif _unified_llm_router_enabled(self._assistant):
+            routed_turn = route_user_turn(
+                user_text, ctx, self._gemma, assistant=self._assistant
+            )
         elif _llm_intent_router_enabled(self._assistant):
-            routed_turn = route_with_llm(user_text, ctx, self._gemma, fallback_kind=kind)
+            kind = routed if routed is not None else route_user_intent(user_text)
+            routed_turn = route_with_llm(
+                user_text, ctx, self._gemma, fallback_kind=kind
+            )
         else:
+            kind = routed if routed is not None else route_user_intent(user_text)
             routed_turn = resolve_route_lane(user_text, kind, ctx)
         lane = routed_turn.lane
-        logs.append(f"lane={lane.value} kind={routed_turn.kind.name}")
+        kind = routed_turn.kind
+        logs.append(f"lane={lane.value} kind={kind.name}")
 
         if routed_turn.needs_user_confirm:
             confirm_msg = (
@@ -107,7 +118,6 @@ class TurnCoordinator:
                 goal=cu_goal,
                 risk_hint=routed_turn.risk_hint,
                 prompt=confirm_msg,
-                require_rule_approval=_is_critical_risk(routed_turn.risk_hint),
                 slots=dict(routed_turn.slots),
             )
             return TurnResult(
@@ -193,14 +203,14 @@ class TurnCoordinator:
         pending: PendingComputerUseGoal,
         logs: list[str],
     ) -> TurnResult | None:
-        """pending_cu 후속 — approve 시 CU 1회, unrelated면 pending 해제 후 일반 라우팅."""
-        force_rule = pending.require_rule_approval or _is_critical_risk(pending.risk_hint)
+        """pending_cu 후속 — approve 시 대기 스텝 1회 또는 CU 재호출, unrelated면 pending 해제."""
+        llm_on = _llm_approval_enabled(self._assistant)
         cls = resolve_followup_for_pending(
             user_text,
             pending.prompt or pending.goal,
             self._gemma,
-            force_rule_only=force_rule,
-            use_llm=_llm_approval_enabled(self._assistant),
+            force_rule_only=not llm_on,
+            use_llm=llm_on,
         )
         logs.append(f"pending_cu_followup={cls.decision.value}")
 
@@ -235,6 +245,29 @@ class TurnCoordinator:
 
         if cls.decision is not FollowupDecision.APPROVE:
             return None
+
+        # CRITICAL 대기 스텝: 승인 후 1스텝만 실행 (CU 루프 재시작 금지)
+        if pending.has_pending_tool:
+            tool_name = pending.pending_tool_name
+            params = dict(pending.pending_tool_params)
+            preview = pending.pending_tool_preview
+            self._assistant.ctx.clear_pending_cu()
+            body = self._assistant.run_pending_cu_tool(
+                tool_name,
+                params,
+                summary=preview or pending.goal,
+            )
+            logs.append("pending_cu_tool_executed")
+            user_visible = body if body.startswith("Iris:") else f"Iris: {body}"
+            return TurnResult(
+                turn_id=turn_id,
+                route=RouteLane.COMPUTER_USE.value,
+                user_visible=user_visible,
+                early_ack=None,
+                executed=True,
+                logs=logs + ["pending_cu_approved"],
+                store_history=True,
+            )
 
         goal = pending.goal
         slots = dict(pending.slots)
@@ -275,7 +308,10 @@ class TurnCoordinator:
         ctx = self._assistant.ctx
         cu_goal = (routed_turn.goal or user_text).strip()
         slots = dict(routed_turn.slots)
+        if routed_turn.task_type:
+            slots.setdefault("task_type", routed_turn.task_type)
         ack = self._dialogue.cu_early_ack(cu_goal, slots)
+        had_early = on_early_ack is not None
         logs.append(f"cu_ack={ack[:40]}")
 
         if on_early_ack is not None:
@@ -296,8 +332,9 @@ class TurnCoordinator:
             risk_hint=routed_turn.risk_hint,
         )
         logs.extend(extra_logs)
-        user_visible = build_user_visible(ack, user_visible)
-        spoken_followup = build_spoken_followup(ack, user_visible)
+        exec_reply = user_visible
+        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
         logs.append("computer_use")
         return TurnResult(
             turn_id=turn_id,
@@ -321,8 +358,10 @@ class TurnCoordinator:
     ) -> TurnResult:
         """ack → (콜백) → 실행(handle_user_text / open_url) → 병합 메시지."""
         kind = routed.kind
-        ack = self._dialogue.ack(user_text, kind)
+        slots = dict(routed.slots)
+        ack = self._dialogue.ack(user_text, kind, slots=slots or None)
         logs.append(f"ack={ack[:40]}")
+        had_early = on_early_ack is not None
 
         if on_early_ack is not None:
             on_early_ack(ack)
@@ -331,7 +370,16 @@ class TurnCoordinator:
         exec_reply = ""
         executed = False
 
-        if routed.open_url:
+        app_key = str(slots.get("app_key") or "").strip()
+        if kind is CommandKind.APP_LAUNCH and app_key:
+            exec_reply = self._assistant.launch_app_by_key(
+                app_key,
+                display_name=str(slots.get("display_name") or ""),
+                user_text=user_text,
+            )
+            executed = bool(exec_reply)
+            logs.append("launch_app_slots")
+        elif routed.open_url:
             exec_reply = self._assistant.request_automation_tool(
                 "open_url",
                 {"url": routed.open_url},
@@ -345,8 +393,8 @@ class TurnCoordinator:
                 executed = True
                 logs.append("handle_user_text")
 
-        user_visible = build_user_visible(ack, exec_reply)
-        spoken_followup = build_spoken_followup(ack, exec_reply)
+        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
         return TurnResult(
             turn_id=turn_id,
             route=RouteLane.DIRECT_ACTION.value,
@@ -371,6 +419,7 @@ class TurnCoordinator:
         kind = routed.kind
         ack = self._dialogue.ack(user_text, kind)
         logs.append(f"fast_ack={ack[:40]}")
+        had_early = on_early_ack is not None
 
         if on_early_ack is not None:
             on_early_ack(ack)
@@ -391,8 +440,8 @@ class TurnCoordinator:
         else:
             logs.append(f"fast_tool_unhandled:{kind.name}")
 
-        user_visible = build_user_visible(ack, exec_reply)
-        spoken_followup = build_spoken_followup(ack, exec_reply)
+        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
 
         return TurnResult(
             turn_id=turn_id,
@@ -434,6 +483,13 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
+
+
+def _unified_llm_router_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "unified_llm_router_enabled", True))
 
 
 def _llm_intent_router_enabled(assistant: IrisAssistant) -> bool:
@@ -493,13 +549,17 @@ def _finalize_cu_reply(
     if not body.startswith("Iris:"):
         body = f"Iris: {body}"
 
+    if dialogue_ctx is not None and dialogue_ctx.pending_cu is not None:
+        if dialogue_ctx.pending_cu.has_pending_tool:
+            logs.append("pending_cu_tool_already_set")
+            return body, False, logs
+
     if _looks_like_cu_approval_wait(body):
-        if dialogue_ctx is not None:
+        if dialogue_ctx is not None and dialogue_ctx.pending_cu is None:
             dialogue_ctx.pending_cu = PendingComputerUseGoal(
                 goal=goal,
                 risk_hint="critical",
-                prompt=body,
-                require_rule_approval=True,
+                prompt=body.replace("Iris:", "").strip(),
                 slots=dict(slots),
             )
         logs.append("pending_cu_set")
@@ -508,8 +568,20 @@ def _finalize_cu_reply(
     return body, True, logs
 
 
-def build_user_visible(ack: str, exec_reply: str) -> str:
-    """채팅·메모리용 — ack + 실행 결과 전체."""
+def build_user_visible(
+    ack: str,
+    exec_reply: str,
+    *,
+    had_early_ack: bool = False,
+) -> str:
+    """채팅·메모리용 — ack + 실행 결과 (early_ack 턴은 ack 생략)."""
+    if had_early_ack:
+        if not exec_reply:
+            return f"Iris: {ack}" if ack else ""
+        body = exec_reply.strip()
+        if not body.startswith("Iris:"):
+            body = f"Iris: {body}"
+        return body
     if not exec_reply:
         body = ack
     elif not ack:
@@ -524,14 +596,21 @@ def build_user_visible(ack: str, exec_reply: str) -> str:
     return body
 
 
-def build_spoken_followup(ack: str, exec_reply: str) -> str:
+def build_spoken_followup(
+    ack: str,
+    exec_reply: str,
+    *,
+    had_early_ack: bool = False,
+) -> str:
     """TTS follow-up — ack 문장은 제외하고 실행 결과만."""
-    if not exec_reply:
+    if had_early_ack:
+        if not exec_reply:
+            return ""
+    elif not exec_reply:
         return ""
     body = exec_reply.strip()
     if body.startswith("Iris:"):
         body = body[5:].strip()
-    # exec만 있는 경우 ack 템플릿이 본문에 섞이지 않도록 ack 단독 중복 방지
     ack_plain = ack.strip()
     if ack_plain and body == ack_plain:
         return ""

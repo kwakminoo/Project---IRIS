@@ -71,6 +71,11 @@ class ActionExecutor:
     def tool_registry(self) -> AutomationToolRegistry:
         return self._tool_registry
 
+    def update_app_paths(self, app_paths: Dict[str, str]) -> None:
+        """런타임 앱 인덱스 갱신 (동일 dict 참조 유지)."""
+        self._app_paths.clear()
+        self._app_paths.update(app_paths)
+
     def run_automation_tool(
         self,
         tool_name: str,

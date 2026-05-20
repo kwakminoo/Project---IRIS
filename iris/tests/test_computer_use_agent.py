@@ -237,6 +237,50 @@ def test_run_includes_goal_slots_in_first_observation(tmp_path: Path) -> None:
     assert "hello" in user_msg
 
 
+def test_simple_notepad_launch_skips_planner(tmp_path: Path) -> None:
+    """메모장 켜줘 — launch_app 1스텝, 플래너·run_shell 미사용."""
+    gemma = _RepeatGemma('{"tool": "run_shell", "params": {"command": "notepad"}}')
+    assistant = _make_assistant(tmp_path, gemma)
+    assistant._app_paths = {"notepad": r"C:\Windows\System32\notepad.exe"}
+    registry = assistant._executor.tool_registry
+    mock_run = MagicMock(
+        return_value=AutomationToolResult(True, "메모장 실행 시작", "ok"),
+    )
+    registry.run = mock_run  # type: ignore[method-assign]
+
+    agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+    msg = agent.run("메모장 켜줘")
+
+    assert "실행" in msg
+    mock_run.assert_called_once()
+    assert mock_run.call_args[0][0] == "launch_app"
+    assert mock_run.call_args[0][1].approved is True
+    planner = [c for c in gemma.calls if c and "Computer Use 플래너" in c[0].content]
+    assert len(planner) == 0
+
+
+def test_approval_required_sets_pending_tool(tmp_path: Path) -> None:
+    gemma = _StepQueueGemma(
+        ['{"tool": "run_shell", "params": {"command": "echo hi"}, "reason": "테스트"}']
+    )
+    assistant = _make_assistant(tmp_path, gemma)
+    registry = assistant._executor.tool_registry
+    registry.run = MagicMock(  # type: ignore[method-assign]
+        side_effect=[
+            AutomationToolResult(True, "창", "w"),
+            _perceive_ok(),
+        ]
+    )
+    agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+    msg = agent.run("셸로 테스트")
+
+    assert "진행할까요" in msg
+    pending = assistant.ctx.pending_cu
+    assert pending is not None
+    assert pending.pending_tool_name == "run_shell"
+    assert pending.pending_tool_params.get("command") == "echo hi"
+
+
 def test_llm_unavailable_fallback(tmp_path: Path) -> None:
     gemma = _RepeatGemma(FALLBACK_KO)
     assistant = _make_assistant(tmp_path, gemma)

@@ -128,7 +128,9 @@ class Settings:
     voice_followup_seconds: float
     # TurnCoordinator 기본 경로 (Computer Use PAV). UI는 IRIS_MULTI_AGENT와 무관하게 Coordinator 사용
     multi_agent_enabled: bool
-    # LLM Intent Router (Gemma 1회 JSON → lane/goal). false면 classify_command + resolve_route_lane만
+    # Unified LLM Router (자연어 전체 → intent/lane/slots). false면 llm_intent_router 또는 규칙만
+    unified_llm_router_enabled: bool
+    # LLM Intent Router (Gemma 1회 JSON → lane/goal). unified 비활성 시 사용
     llm_intent_router_enabled: bool
     # LLM 승인 분류 (pending_cu·자동화 후속). false면 규칙 is_rule_approval만
     llm_approval_enabled: bool
@@ -235,6 +237,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         ),
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
         multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
+        unified_llm_router_enabled=_env_bool("IRIS_UNIFIED_LLM_ROUTER", True),
         llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
         llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),
         default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtWidgets import (
@@ -24,8 +25,10 @@ from iris.audio.input_device import list_physical_input_devices, resolve_input_d
 from iris.audio.mic_preview import MicLevelPreview
 from iris.audio.xtts_engine import is_xtts_installed, resolve_reference_wav
 from iris.automation.web_browser import list_installed_browser_options, normalize_browser_key
-from iris.config.app_paths import detect_app_paths
+from iris.config.app_index import build_merged_app_paths
 from iris.config.settings import Settings
+from iris.storage.database import Database
+from iris.ui.app_launcher_panel import AppLauncherPanel
 from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -62,14 +65,24 @@ def list_microphone_options() -> list[MicrophoneOption]:
 class SettingsDialog(QDialog):
     """AI 모델과 입력 마이크를 선택하는 설정 창."""
 
-    def __init__(self, settings: Settings, parent=None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        parent=None,
+        *,
+        db: Database | None = None,
+        on_app_paths_changed: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Iris 설정")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(640)
         self._settings = settings
+        self._db = db
+        self._on_app_paths_changed = on_app_paths_changed
         self._models = self._initial_models(settings)
         self._microphones = list_microphone_options()
-        self._app_paths = detect_app_paths()
+        self._app_paths = build_merged_app_paths(db)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
@@ -125,6 +138,14 @@ class SettingsDialog(QDialog):
         form.addRow("음성(TTS)", self._tts_info)
 
         root.addLayout(form)
+
+        if self._db is not None:
+            self._app_launcher = AppLauncherPanel(
+                self._db,
+                on_paths_changed=self._notify_app_paths_changed,
+                parent=self,
+            )
+            root.addWidget(self._app_launcher)
 
         self._device_help = QLabel(self._microphone_help_text())
         self._device_help.setWordWrap(True)
@@ -256,6 +277,11 @@ class SettingsDialog(QDialog):
     @pyqtSlot(str)
     def _on_mic_preview_failed(self, message: str) -> None:
         self._mic_gauge_help.setText(f"마이크 미리보기 불가: {message}")
+
+    def _notify_app_paths_changed(self) -> None:
+        self._app_paths = build_merged_app_paths(self._db)
+        if self._on_app_paths_changed:
+            self._on_app_paths_changed()
 
     def _microphone_help_text(self) -> str:
         try:

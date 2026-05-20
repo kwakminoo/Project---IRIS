@@ -12,8 +12,10 @@ from iris.assistant.agent_adapter import IrisAssistant
 from iris.assistant.llm_approval import (
     FollowupClassification,
     FollowupDecision,
+    classify_user_followup,
     classify_user_followup_rule,
     is_rule_approval,
+    resolve_followup_for_pending,
 )
 from iris.assistant.router_policy import RouteLane, RoutedTurn
 from iris.assistant.turn_coordinator import TurnCoordinator
@@ -47,6 +49,71 @@ def test_rule_approval_progress_phrase() -> None:
     assert is_rule_approval("진행해줘")
     cls = classify_user_followup_rule("진행해줘")
     assert cls.decision is FollowupDecision.APPROVE
+
+
+class _ApprovalGemma:
+    """승인 분류용 mock — 구어 approve JSON 반환."""
+
+    def __init__(self, decision: str = "approve") -> None:
+        self._decision = decision
+        self.calls: list[Sequence[ChatMessage]] = []
+
+    def chat(self, messages: Sequence[ChatMessage]) -> str:
+        self.calls.append(list(messages))
+        return f'{{"decision": "{self._decision}", "confidence": 0.92}}'
+
+
+def test_llm_approval_colloquial_approve() -> None:
+    gemma = _ApprovalGemma("approve")
+    for phrase in ("어 해줘", "그럼 해"):
+        cls = classify_user_followup(
+            phrase,
+            "이 작업을 진행하려면 확인이 필요합니다. 진행할까요?",
+            gemma,  # type: ignore[arg-type]
+            use_llm=True,
+        )
+        assert cls.decision is FollowupDecision.APPROVE, phrase
+
+
+def test_critical_pending_uses_llm_not_rule_only(tmp_path: Path) -> None:
+    gemma = _ApprovalGemma("approve")
+    cls = resolve_followup_for_pending(
+        "어",
+        "셸 명령을 실행하려면 확인이 필요합니다.",
+        gemma,  # type: ignore[arg-type]
+        force_rule_only=False,
+        use_llm=True,
+    )
+    assert cls.decision is FollowupDecision.APPROVE
+    assert len(gemma.calls) == 1
+
+
+def test_pending_cu_tool_approve_runs_one_step_not_cu_loop(tmp_path: Path) -> None:
+    gemma = _FakeGemma()
+    assistant = _make_assistant(tmp_path, gemma)
+    assistant.ctx.pending_cu = PendingComputerUseGoal(
+        goal="메모장 켜줘",
+        risk_hint="critical",
+        prompt="이 작업을 진행하려면 확인이 필요합니다. 진행할까요?\n- 셸 명령 실행",
+        pending_tool_name="run_shell",
+        pending_tool_params={"command": "notepad"},
+        pending_tool_preview="쉘 실행: notepad",
+    )
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+
+    with patch.object(
+        assistant,
+        "run_pending_cu_tool",
+        return_value="요청하신 작업을 실행했습니다. (메모장)",
+    ) as mock_tool:
+        with patch.object(assistant, "run_computer_use_loop") as mock_cu:
+            result = coord.run_turn("어 해줘")
+
+    mock_tool.assert_called_once()
+    mock_cu.assert_not_called()
+    assert assistant.ctx.pending_cu is None
+    assert result.executed is True
+    assert "실행했습니다" in result.user_visible
 
 
 def test_pending_cu_approve_runs_cu_once(tmp_path: Path) -> None:
@@ -90,7 +157,7 @@ def test_unrelated_followup_clears_pending_no_cu(tmp_path: Path) -> None:
     ):
         with patch.object(assistant, "run_computer_use_loop") as mock_cu:
             with patch(
-                "iris.assistant.turn_coordinator.resolve_route_lane",
+                "iris.assistant.turn_coordinator.route_user_turn",
                 return_value=RoutedTurn(
                     kind=CommandKind.GENERAL_CHAT,
                     lane=RouteLane.CHAT_ONLY,

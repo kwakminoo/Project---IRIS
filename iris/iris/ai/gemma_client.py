@@ -39,10 +39,29 @@ _THINK_BLOCK = re.compile(
     r"|<{3}[\s\S]*?>{3})"
 )
 
+# LLM이 넣은 이모지·픽토그램 제거 (시스템 프롬프트와 이중 방어)
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F1E0-\U0001F1FF"
+    "\U0001F300-\U0001FAFF"
+    "\U0001F600-\U0001F64F"
+    "\U00002600-\U000026FF"
+    "\U00002700-\U000027BF"
+    "\U000023CF-\U000023FF"
+    "\U000024C2-\U0001F251"
+    "\u200d"
+    "\ufe0f"
+    "]+",
+    flags=re.UNICODE,
+)
+
 
 def _sanitize_visible_reply(text: str) -> str:
-    """Thinking / 내부 리즈닝 태그 제거 후 사용자에게 보일 본문만 남김."""
+    """Thinking / 내부 리즈닝 태그·이모지 제거 후 사용자에게 보일 본문만 남김."""
     t = _THINK_BLOCK.sub("", text)
+    t = _EMOJI_PATTERN.sub("", t)
+    t = re.sub(r" +([,.!?;:])", r"\1", t)
+    t = re.sub(r"  +", " ", t)
     # 모델이 태그 없이 "Thought:" 블록만 쓰는 경우 일부 제거
     t = re.sub(
         r"(?im)^\s*(?:thought|thinking|reasoning|내부\s*사고|사고\s*과정)\s*[:：]\s*.+$",
