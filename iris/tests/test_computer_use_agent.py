@@ -24,7 +24,7 @@ class _StepQueueGemma:
         self._steps = list(steps)
         self.calls: list[Sequence[ChatMessage]] = []
 
-    def chat(self, messages: Sequence[ChatMessage]) -> str:
+    def chat(self, messages: Sequence[ChatMessage], **kwargs: object) -> str:
         self.calls.append(list(messages))
         if messages and "Computer Use 플래너" in messages[0].content:
             if self._steps:
@@ -38,7 +38,7 @@ class _RepeatGemma:
         self._reply = reply
         self.calls: list[Sequence[ChatMessage]] = []
 
-    def chat(self, messages: Sequence[ChatMessage]) -> str:
+    def chat(self, messages: Sequence[ChatMessage], **kwargs: object) -> str:
         self.calls.append(list(messages))
         return self._reply
 
@@ -155,8 +155,8 @@ def test_unknown_tool_parse_retries_then_stops(tmp_path: Path) -> None:
     assert "이해하지 못했습니다" in msg or "단계 제한" in msg
 
 
-def test_youtube_open_url_perceive_complete_sequence(tmp_path: Path) -> None:
-    """레시피: open_url → perceive 검증 → step_complete."""
+def test_youtube_cu_planner_without_media_slots_still_uses_planner(tmp_path: Path) -> None:
+    """media_action 슬롯 없으면 범용 CU 플래너 경로 유지."""
     import json
 
     from iris.automation.media_urls import build_youtube_search_url
@@ -172,7 +172,7 @@ def test_youtube_open_url_perceive_complete_sequence(tmp_path: Path) -> None:
                 },
                 ensure_ascii=False,
             ),
-            '{"tool": "step_complete", "params": {}, "reason": "재생을 시작했습니다."}',
+            '{"tool": "step_failed", "params": {}, "reason": "재생 미완료"}',
         ]
     )
     assistant = _make_assistant(tmp_path, gemma)
@@ -191,11 +191,9 @@ def test_youtube_open_url_perceive_complete_sequence(tmp_path: Path) -> None:
     agent = ComputerUseAgent(assistant, gemma, registry, max_steps=10)  # type: ignore[arg-type]
     msg = agent.run("유튜브에서 아이유 틀어줘", slots={"query": "아이유", "app_hint": "youtube"})
 
-    assert "재생" in msg or "완료" in msg
-    open_calls = [c for c in mock_run.call_args_list if c[0][0] == "open_url"]
-    assert len(open_calls) == 1
-    opened_url = open_calls[0][0][1].params.get("url", "")
-    assert "search_query=" in str(opened_url)
+    planner = [c for c in gemma.calls if c and "Computer Use 플래너" in c[0].content]
+    assert len(planner) >= 1
+    assert "재생 미완료" in msg or "완료하지 못했습니다" in msg
 
 
 def test_ask_user_returns_question_prefix(tmp_path: Path) -> None:

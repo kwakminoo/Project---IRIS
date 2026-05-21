@@ -47,3 +47,4 @@ def test_build_messages_memory_injection(tmp_path: Path) -> None:
     msgs = build_messages("안녕", memory_context=mem.build_extra_context())
     assert msgs[0].role == "system"
     assert "빌드 수정" in msgs[0].content
+    assert sum(1 for m in msgs if m.role == "user") == 1

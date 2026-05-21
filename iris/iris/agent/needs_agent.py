@@ -21,9 +21,18 @@ def research_hits(user_text: str, *, max_pages: int = 5) -> tuple[str, List[Sear
     return q, fetch_research_hits(q, max_pages=max_pages)
 
 
-def _query_hint_for_intent(user_text: str, intent: CommandKind) -> str:
+def _query_hint_for_intent(
+    user_text: str,
+    intent: CommandKind,
+    *,
+    slot_query: str | None = None,
+) -> str:
     """의도별로 검색어에 맥락 키워드를 덧붙여 검색 품질을 높인다."""
-    base = extract_query_from_text(user_text).strip() or user_text.strip()
+    # Phase 3: Unified/LLM 라우터가 준 slots.query 우선 (regex 추출 폴백)
+    if slot_query and str(slot_query).strip():
+        base = str(slot_query).strip()
+    else:
+        base = extract_query_from_text(user_text).strip() or user_text.strip()
     if intent is CommandKind.MOVIE_SEARCH:
         return f"{base} 영화 개봉 상영 2026"
     if intent is CommandKind.NEWS_SEARCH:
@@ -40,9 +49,10 @@ def research_hits_with_intent(
     intent: CommandKind,
     *,
     max_pages: int = 5,
+    slot_query: str | None = None,
 ) -> tuple[str, List[SearchHit]]:
     """Intent Router 검색 의도 → SERP + 상위 페이지 본문 리서치."""
-    q = _query_hint_for_intent(user_text, intent)
+    q = _query_hint_for_intent(user_text, intent, slot_query=slot_query)
     return q, fetch_research_hits(q, max_pages=max_pages)
 
 

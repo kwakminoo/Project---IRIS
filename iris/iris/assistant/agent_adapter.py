@@ -12,7 +12,7 @@ from iris.assistant.safety_guard import quick_block_user_text
 from iris.assistant.task_planner import plan_from_preset
 from iris.automation.action_executor import ActionExecutor, IrisExecutionRequest
 from iris.config.app_index import display_name_for_key, resolve_app_for_goal
-from iris.config.preset_modes import find_preset
+from iris.config.preset_modes import PresetCategory, find_preset
 from iris.core.command_router import CommandKind, classify_command
 from iris.core.context_manager import (
     DialogueContext,
@@ -186,11 +186,19 @@ class IrisAssistant:
         self.ctx.step = DialogueStep.MONITOR_WAIT_APPROVAL
         return True
 
-    def handle_user_text(self, text: str, *, routed: CommandKind | None = None) -> str:
+    def handle_user_text(
+        self,
+        text: str,
+        *,
+        routed: CommandKind | None = None,
+        llm_preset_id: str | None = None,
+    ) -> str:
         """사용자 입력 한 턴 처리.
 
         routed:
             Intent Router에서 이미 분류한 경우 전달해 중복 휴리스틱을 피한다.
+        llm_preset_id:
+            Phase 3 — 멀티턴 질문에 대한 답에서 Gemma가 고른 preset_id (검증 후 사용).
         """
         block = quick_block_user_text(text)
         if block:
@@ -205,11 +213,11 @@ class IrisAssistant:
 
         # 멀티턴: 질문 단계 후속 입력
         if self.ctx.step == DialogueStep.WORK_ASK_TASK:
-            return self._continue_work_flow(text)
+            return self._continue_work_flow(text, llm_preset_id=llm_preset_id)
         if self.ctx.step == DialogueStep.GAME_ASK_TITLE:
-            return self._continue_game_flow(text)
+            return self._continue_game_flow(text, llm_preset_id=llm_preset_id)
         if self.ctx.step == DialogueStep.CREATIVE_ASK_TYPE:
-            return self._continue_creative_flow(text)
+            return self._continue_creative_flow(text, llm_preset_id=llm_preset_id)
 
         # 승인 대기 중 (모드 플랜 + 단일 액션 공통)
         if self.ctx.step in (
@@ -512,9 +520,18 @@ class IrisAssistant:
         recent = format_recent_work_suggestion(self._db)
         return work_mode.work_entry_message(recent)
 
-    def _continue_work_flow(self, text: str) -> str:
+    def _continue_work_flow(
+        self, text: str, *, llm_preset_id: str | None = None
+    ) -> str:
         if self.ctx.step == DialogueStep.WORK_ASK_TASK:
-            preset = work_mode.match_work_preset(text)
+            # Phase 3: TurnCoordinator가 넘긴 preset_id 우선, 없으면 regex 매칭
+            preset = None
+            if llm_preset_id:
+                cand = find_preset(llm_preset_id)
+                if cand is not None and cand.category == PresetCategory.WORK:
+                    preset = cand
+            if preset is None:
+                preset = work_mode.match_work_preset(text)
             self.ctx.pending_action = None
             self.ctx.pending = PendingPlan(
                 title=preset.title,
@@ -539,9 +556,17 @@ class IrisAssistant:
         )
         return self._execute_preset_now(self.ctx.pending)
 
-    def _continue_game_flow(self, text: str) -> str:
+    def _continue_game_flow(
+        self, text: str, *, llm_preset_id: str | None = None
+    ) -> str:
         if self.ctx.step == DialogueStep.GAME_ASK_TITLE:
-            preset = game_mode.match_game_preset(text)
+            preset = None
+            if llm_preset_id:
+                cand = find_preset(llm_preset_id)
+                if cand is not None and cand.category == PresetCategory.GAME:
+                    preset = cand
+            if preset is None:
+                preset = game_mode.match_game_preset(text)
             self.ctx.pending_action = None
             self.ctx.pending = PendingPlan(
                 title=preset.title,
@@ -557,9 +582,17 @@ class IrisAssistant:
         self.ctx.step = DialogueStep.CREATIVE_ASK_TYPE
         return creative_mode.creative_entry_message()
 
-    def _continue_creative_flow(self, text: str) -> str:
+    def _continue_creative_flow(
+        self, text: str, *, llm_preset_id: str | None = None
+    ) -> str:
         if self.ctx.step == DialogueStep.CREATIVE_ASK_TYPE:
-            preset = creative_mode.match_creative_preset(text)
+            preset = None
+            if llm_preset_id:
+                cand = find_preset(llm_preset_id)
+                if cand is not None and cand.category == PresetCategory.CREATIVE:
+                    preset = cand
+            if preset is None:
+                preset = creative_mode.match_creative_preset(text)
             self.ctx.pending_action = None
             self.ctx.pending = PendingPlan(
                 title=preset.title,

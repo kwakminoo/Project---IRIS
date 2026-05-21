@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from iris.ai.thinking_policy import LlmPurpose
 from iris.assistant.action_plan import PlanStep
 from iris.assistant.safety_guard import quick_block_user_text
 from iris.assistant.tool_layer import is_search_intent
@@ -135,7 +136,7 @@ class ToolRegistry:
             )
 
         messages = self._build_finalize_messages(ctx.user_text, ctx.observations)
-        text = self._gemma.chat(messages)
+        text = self._gemma.chat(messages, purpose=LlmPurpose.GENERIC)
         return ToolResult(
             observation="gemma_finalize 완료",
             stop=True,

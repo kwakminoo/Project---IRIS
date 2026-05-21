@@ -26,6 +26,7 @@ from iris.audio.mic_preview import MicLevelPreview
 from iris.audio.xtts_engine import is_xtts_installed, resolve_reference_wav
 from iris.automation.web_browser import list_installed_browser_options, normalize_browser_key
 from iris.config.app_index import build_merged_app_paths
+from iris.ai.thinking_policy import normalize_thinking_mode
 from iris.config.settings import Settings
 from iris.storage.database import Database
 from iris.ui.app_launcher_panel import AppLauncherPanel
@@ -47,6 +48,7 @@ class IrisSettingsSelection:
     input_device: int | None
     speech_rms: float
     default_web_browser: str
+    thinking_mode: str  # off | default | on
 
 
 def list_microphone_options() -> list[MicrophoneOption]:
@@ -115,6 +117,10 @@ class SettingsDialog(QDialog):
         self._populate_web_browsers(settings.default_web_browser)
         form.addRow("웹 기본 브라우저", self._browser_combo)
 
+        self._thinking_combo = QComboBox()
+        self._populate_thinking_mode(settings.thinking_mode)
+        form.addRow("LLM 추론 (Thinking)", self._thinking_combo)
+
         self._mic_combo = QComboBox()
         self._populate_microphones(settings.always_listen_input_device)
         form.addRow("입력 마이크", self._mic_combo)
@@ -168,6 +174,15 @@ class SettingsDialog(QDialog):
         self._restart_mic_preview()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # 시그널·스트림을 먼저 끊어 닫힌 뒤 sounddevice 콜백이 emit 하지 않게 함
+        try:
+            self._mic_preview.level.disconnect(self._mic_gauge.set_level)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._mic_preview.failed.disconnect(self._on_mic_preview_failed)
+        except (TypeError, RuntimeError):
+            pass
         self._mic_preview.stop()
         super().closeEvent(event)
 
@@ -180,12 +195,17 @@ class SettingsDialog(QDialog):
         browser = normalize_browser_key(
             str(browser_data) if browser_data is not None else self._settings.default_web_browser
         )
+        think_data = self._thinking_combo.currentData()
+        thinking_mode = normalize_thinking_mode(
+            str(think_data) if think_data is not None else self._settings.thinking_mode
+        )
         return IrisSettingsSelection(
             model_name=model,
             model_names=models,
             input_device=device,
             speech_rms=self._mic_gauge.threshold_rms(),
             default_web_browser=browser,
+            thinking_mode=thinking_mode,
         )
 
     def _initial_models(self, settings: Settings) -> list[str]:
@@ -222,6 +242,20 @@ class SettingsDialog(QDialog):
         selected = self._models[0]
         self._refresh_model_combo(selected)
         self._refresh_model_list()
+
+    def _populate_thinking_mode(self, selected: str) -> None:
+        """Ollama think 전역 정책 — off / default / on."""
+        self._thinking_combo.clear()
+        options = (
+            ("off", "사용 안 함 (All Off)"),
+            ("default", "기본 (필요한 실행만)"),
+            ("on", "항상 사용 (All On)"),
+        )
+        for key, label in options:
+            self._thinking_combo.addItem(label, key)
+        key = normalize_thinking_mode(selected)
+        idx = self._thinking_combo.findData(key)
+        self._thinking_combo.setCurrentIndex(max(0, idx))
 
     def _populate_web_browsers(self, selected: str) -> None:
         self._browser_combo.clear()

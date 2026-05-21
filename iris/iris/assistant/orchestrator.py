@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from iris.ai.gemma_client import ChatMessage
+from iris.ai.thinking_policy import LlmPurpose
 from iris.assistant.action_plan import ActionPlan, PlanStep, default_plan, parse_action_plan, plan_to_json
 from iris.assistant.tool_registry import ToolRegistry, ToolRunContext
 from iris.core.command_router import CommandKind
@@ -91,7 +92,7 @@ class AgentOrchestrator:
             ChatMessage("system", PLANNER_SYSTEM),
             ChatMessage("user", user_text),
         ]
-        raw = self._gemma.chat(messages)
+        raw = self._gemma.chat(messages, purpose=LlmPurpose.ORCHESTRATOR_PLAN)
         parsed = parse_action_plan(raw)
         if parsed is not None:
             return parsed

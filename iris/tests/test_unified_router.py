@@ -23,7 +23,7 @@ class _FakeGemma:
         self.reply = reply
         self.calls: list[Sequence[ChatMessage]] = []
 
-    def chat(self, messages: Sequence[ChatMessage]) -> str:
+    def chat(self, messages: Sequence[ChatMessage], **kwargs: object) -> str:
         self.calls.append(list(messages))
         return self.reply
 
@@ -141,3 +141,105 @@ def test_unified_router_system_prompt() -> None:
     )
     route_user_turn("안녕", DialogueContext(), gemma)  # type: ignore[arg-type]
     assert gemma.calls[0][0].content == UNIFIED_ROUTER_SYSTEM
+
+
+def test_unified_router_system_includes_media_slots_rules() -> None:
+    assert "media_action" in UNIFIED_ROUTER_SYSTEM
+    assert "platform_hint" in UNIFIED_ROUTER_SYSTEM
+    assert "search_query" in UNIFIED_ROUTER_SYSTEM
+
+
+def test_parse_media_play_youtube() -> None:
+    raw = {
+        "intent": "computer_use",
+        "lane": "computer_use",
+        "goal": "유튜브에서 치챗 영상을 재생한다",
+        "task_type": "media_play",
+        "slots": {
+            "platform_hint": "youtube",
+            "media_action": "play",
+            "search_query": "치챗",
+            "user_request_summary": "유튜브에서 치챗 틀어줘",
+        },
+        "risk_hint": "low",
+        "needs_user_confirm": False,
+        "confidence": 0.92,
+    }
+    payload = parse_unified_route_json(raw, "유튜브에서 치챗 틀어줘")
+    assert payload is not None
+    assert payload.task_type == "media_play"
+    assert payload.slots["platform_hint"] == "youtube"
+    assert payload.slots["media_action"] == "play"
+    assert payload.slots["search_query"] == "치챗"
+
+
+def test_parse_media_search_only() -> None:
+    raw = {
+        "intent": "computer_use",
+        "lane": "computer_use",
+        "goal": "유튜브에서 아이유 검색 결과를 연다",
+        "task_type": "media_play",
+        "slots": {
+            "platform_hint": "youtube",
+            "media_action": "search",
+            "search_query": "아이유",
+        },
+        "risk_hint": "low",
+        "needs_user_confirm": False,
+        "confidence": 0.88,
+    }
+    payload = parse_unified_route_json(raw, "유튜브에서 아이유 검색해줘")
+    assert payload is not None
+    assert payload.slots["media_action"] == "search"
+    assert payload.slots["search_query"] == "아이유"
+
+
+def test_route_media_play_passes_slots_to_cu() -> None:
+    gemma = _FakeGemma(
+        '{"intent":"computer_use","lane":"computer_use",'
+        '"goal":"유튜브에서 치챗 영상을 재생한다","task_type":"media_play",'
+        '"slots":{"platform_hint":"youtube","media_action":"play",'
+        '"search_query":"치챗","user_request_summary":"유튜브에서 치챗 틀어줘"},'
+        '"risk_hint":"low","needs_user_confirm":false,"confidence":0.9}'
+    )
+    routed = route_user_turn("유튜브에서 치챗 틀어줘", DialogueContext(), gemma)  # type: ignore[arg-type]
+    assert routed.lane is RouteLane.COMPUTER_USE
+    assert routed.task_type == "media_play"
+    assert routed.slots.get("media_action") == "play"
+    assert routed.slots.get("search_query") == "치챗"
+    assert routed.slots.get("platform_hint") == "youtube"
+
+
+def test_route_media_search_spotify() -> None:
+    gemma = _FakeGemma(
+        '{"intent":"computer_use","lane":"computer_use",'
+        '"goal":"스포티파이에서 뉴진스 검색 결과를 연다","task_type":"media_play",'
+        '"slots":{"platform_hint":"spotify","media_action":"search",'
+        '"search_query":"뉴진스"},'
+        '"risk_hint":"low","needs_user_confirm":false,"confidence":0.85}'
+    )
+    routed = route_user_turn("스포티파이에서 뉴진스 찾아줘", DialogueContext(), gemma)  # type: ignore[arg-type]
+    assert routed.lane is RouteLane.COMPUTER_USE
+    assert routed.slots.get("platform_hint") == "spotify"
+    assert routed.slots.get("media_action") == "search"
+    assert routed.slots.get("search_query") == "뉴진스"
+
+
+def test_parse_invalid_platform_hint_becomes_unknown() -> None:
+    raw = {
+        "intent": "computer_use",
+        "lane": "computer_use",
+        "goal": "브라우저에서 재생",
+        "task_type": "media_play",
+        "slots": {
+            "platform_hint": "tidal",
+            "media_action": "play",
+            "search_query": "jazz",
+        },
+        "risk_hint": "low",
+        "needs_user_confirm": False,
+        "confidence": 0.7,
+    }
+    payload = parse_unified_route_json(raw, "재생해줘")
+    assert payload is not None
+    assert payload.slots["platform_hint"] == "unknown"

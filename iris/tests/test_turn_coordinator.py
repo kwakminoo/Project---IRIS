@@ -11,7 +11,12 @@ import pytest
 
 from iris.ai.gemma_client import ChatMessage
 from iris.assistant.agent_adapter import IrisAssistant
-from iris.assistant.router_policy import RouteLane, is_chat_only, resolve_route_lane
+from iris.assistant.router_policy import (
+    RouteLane,
+    is_ambiguous_for_fast_path,
+    is_chat_only,
+    resolve_route_lane,
+)
 from iris.assistant.turn_coordinator import (
     TurnCoordinator,
     build_spoken_followup,
@@ -47,6 +52,8 @@ def _make_assistant(tmp_path: Path, gemma: _FakeGemma) -> IrisAssistant:
     executor = ActionExecutor(db, {})
     settings = SimpleNamespace(
         llm_intent_router_enabled=False,
+        unified_llm_router_enabled=True,
+        chat_fast_path_enabled=True,
         tts_enable_speech_formatter=False,
     )
     return IrisAssistant(db, executor, gemma, {}, settings)  # type: ignore[arg-type]
@@ -55,7 +62,59 @@ def _make_assistant(tmp_path: Path, gemma: _FakeGemma) -> IrisAssistant:
 def test_is_chat_only_greeting() -> None:
     assert is_chat_only("안녕", CommandKind.GENERAL_CHAT)
     assert is_chat_only("고마워", CommandKind.GENERAL_CHAT)
+    assert is_chat_only("아이리스 넌 뭘 할 수 있어?", CommandKind.GENERAL_CHAT)
     assert not is_chat_only("Cursor 열어줘", CommandKind.APP_LAUNCH)
+
+
+def test_is_ambiguous_for_fast_path() -> None:
+    assert not is_ambiguous_for_fast_path("안녕")
+    assert not is_ambiguous_for_fast_path("아이리스 넌 뭘 할 수 있어?")
+    assert is_ambiguous_for_fast_path("메모장 켜줘")
+    assert is_ambiguous_for_fast_path("https://example.com 열어")
+
+
+def test_chat_fast_path_skips_unified_router(tmp_path: Path) -> None:
+    gemma = _FakeGemma(chat_reply="반가워요!")
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+
+    with patch(
+        "iris.assistant.turn_coordinator.route_user_turn",
+    ) as mock_route:
+        result = coord.run_turn("안녕")
+
+    mock_route.assert_not_called()
+    assert result.route == RouteLane.CHAT_ONLY.value
+    assert "반가워요" in result.user_visible
+    assert "chat_fast_path" in result.logs
+    router_calls = [
+        c
+        for c in gemma.calls
+        if c and "Unified Router" in c[0].content
+    ]
+    assert len(router_calls) == 0
+    assert len(gemma.calls) == 1
+
+
+def test_ambiguous_uses_unified_router(tmp_path: Path) -> None:
+    gemma = _FakeGemma(
+        chat_reply="ok",
+    )
+    assistant = _make_assistant(tmp_path, gemma)
+    coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
+    routed = resolve_route_lane(
+        "메모장 켜줘",
+        CommandKind.APP_LAUNCH,
+        DialogueContext(),
+    )
+
+    with patch(
+        "iris.assistant.turn_coordinator.route_user_turn",
+        return_value=routed,
+    ) as mock_route:
+        coord.run_turn("메모장 켜줘")
+
+    mock_route.assert_called_once()
 
 
 def test_resolve_route_search() -> None:

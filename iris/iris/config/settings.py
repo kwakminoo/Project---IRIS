@@ -128,6 +128,8 @@ class Settings:
     voice_followup_seconds: float
     # TurnCoordinator 기본 경로 (Computer Use PAV). UI는 IRIS_MULTI_AGENT와 무관하게 Coordinator 사용
     multi_agent_enabled: bool
+    # 대화 fast path — 명확한 인사·잡담은 Unified Router LLM 스킵 (기본 on)
+    chat_fast_path_enabled: bool
     # Unified LLM Router (자연어 전체 → intent/lane/slots). false면 llm_intent_router 또는 규칙만
     unified_llm_router_enabled: bool
     # LLM Intent Router (Gemma 1회 JSON → lane/goal). unified 비활성 시 사용
@@ -139,6 +141,10 @@ class Settings:
     # Computer Use Phase B: UIA / VLM 하이브리드 인식
     computer_use_uia_enabled: bool
     computer_use_vlm_enabled: bool
+    # Phase 3: 멀티턴 프리셋 매칭에 Gemma 1회 (실패 시 modes/* regex 폴백)
+    phase3_mode_preset_llm: bool
+    # Ollama think: off | default | on (IRIS_THINKING_MODE)
+    thinking_mode: str
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -237,10 +243,22 @@ def load_settings(env_path: Path | None = None) -> Settings:
         ),
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
         multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
+        chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", True),
         unified_llm_router_enabled=_env_bool("IRIS_UNIFIED_LLM_ROUTER", True),
         llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
         llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),
         default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),
         computer_use_uia_enabled=_env_bool("COMPUTER_USE_UIA_ENABLED", True),
         computer_use_vlm_enabled=_env_bool("COMPUTER_USE_VLM_ENABLED", False),
+        phase3_mode_preset_llm=_env_bool("IRIS_PHASE3_MODE_PRESET_LLM", True),
+        thinking_mode=_normalize_thinking_mode_env(
+            os.getenv("IRIS_THINKING_MODE", "default")
+        ),
     )
+
+
+def _normalize_thinking_mode_env(raw: str) -> str:
+    """환경 변수 → off | default | on."""
+    from iris.ai.thinking_policy import normalize_thinking_mode
+
+    return normalize_thinking_mode(raw)

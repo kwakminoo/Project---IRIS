@@ -16,17 +16,28 @@ from iris.assistant.orchestrator import AgentOrchestrator
 from iris.assistant.router_policy import (
     RouteLane,
     RoutedTurn,
+    is_ambiguous_for_fast_path,
+    is_chat_only,
     is_multi_turn_active,
     resolve_route_lane,
 )
 from iris.assistant.safety_guard import quick_block_user_text
+from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind
-from iris.core.context_manager import PendingComputerUseGoal
+from iris.core.context_manager import DialogueStep, PendingComputerUseGoal
 from iris.core.intent_router import route_user_intent
 
 if TYPE_CHECKING:
     from iris.assistant.agent_adapter import IrisAssistant
     from iris.ai.gemma_client import GemmaClient
+
+
+def _search_slot_query(routed: RoutedTurn) -> str | None:
+    """Phase 3 — 라우터가 넣은 웹 검색 질의(slots.query)."""
+    raw = routed.slots.get("query")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
 
 
 @dataclass
@@ -42,11 +53,21 @@ class TurnResult:
     logs: list[str] = field(default_factory=list)
     delegate_search: bool = False
     search_intent_name: str | None = None
+    # Phase 3: 라우터 slots.query → 웹 리서치 기본 검색어 (비어 있으면 기존 추출 로직)
+    search_query: str | None = None
     store_history: bool = False
 
     @property
     def had_early_ack(self) -> bool:
         return self.early_ack is not None
+
+
+def _phase3_preset_llm_enabled(assistant: IrisAssistant) -> bool:
+    """멀티턴 프리셋 후보를 LLM이 고를지 (.env IRIS_PHASE3_MODE_PRESET_LLM)."""
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "phase3_mode_preset_llm", True))
 
 
 class TurnCoordinator:
@@ -67,8 +88,11 @@ class TurnCoordinator:
         turn_id = uuid.uuid4().hex[:12]
         logs: list[str] = []
 
+        push_activity_line(f"TurnCoordinator: pipeline started turn_id={turn_id}.")
+
         block = quick_block_user_text(user_text)
         if block:
+            push_activity_line("TurnCoordinator: safety guard blocked input.")
             self._assistant._db.insert_log("safety", "blocked", block)
             return TurnResult(
                 turn_id=turn_id,
@@ -88,10 +112,27 @@ class TurnCoordinator:
             if cu_result is not None:
                 return cu_result
 
-        # 1차: Unified LLM Router (실패 시 legacy_classify + resolve_route_lane 폴백)
+        # --- Fast / Slow path (하이브리드 라우팅, 장기 PAV 기본 유지) ---
+        # Slow path: 앱 실행·CU·검색·멀티턴·CRITICAL — Unified LLM Router 또는 규칙/Intent 폴백
+        # Fast path: 명확한 인사·잡담·능력 질문 — Unified Router LLM 스킵, DialogueAgent.chat 1회
+        # 애매한 발화(is_ambiguous_for_fast_path)는 항상 Slow path (false negative 방지)
+        routed_turn: RoutedTurn
         if is_multi_turn_active(ctx):
             kind = routed if routed is not None else route_user_intent(user_text)
             routed_turn = resolve_route_lane(user_text, kind, ctx)
+        elif (
+            _chat_fast_path_enabled(self._assistant)
+            and not is_ambiguous_for_fast_path(user_text)
+            and is_chat_only(user_text, CommandKind.GENERAL_CHAT)
+        ):
+            push_activity_line(
+                "Router: chat fast path (rule) — skipping unified LLM."
+            )
+            logs.append("chat_fast_path")
+            routed_turn = RoutedTurn(
+                kind=CommandKind.GENERAL_CHAT,
+                lane=RouteLane.CHAT_ONLY,
+            )
         elif _unified_llm_router_enabled(self._assistant):
             routed_turn = route_user_turn(
                 user_text, ctx, self._gemma, assistant=self._assistant
@@ -107,6 +148,7 @@ class TurnCoordinator:
         lane = routed_turn.lane
         kind = routed_turn.kind
         logs.append(f"lane={lane.value} kind={kind.name}")
+        push_activity_line(f"Router: lane={lane.value} intent={kind.name}.")
 
         if routed_turn.needs_user_confirm:
             confirm_msg = (
@@ -120,6 +162,7 @@ class TurnCoordinator:
                 prompt=confirm_msg,
                 slots=dict(routed_turn.slots),
             )
+            push_activity_line("Router: computer-use confirmation required — pending_cu set.")
             return TurnResult(
                 turn_id=turn_id,
                 route=lane.value,
@@ -135,8 +178,11 @@ class TurnCoordinator:
             lane.value,
             f"{turn_id} {kind.name}",
         )
+        push_activity_line(f"DB: turn_coordinator log lane={lane.value}.")
 
         if lane is RouteLane.SEARCH:
+            slot_q = _search_slot_query(routed_turn)
+            push_activity_line("Lane SEARCH: delegating to web research worker.")
             return TurnResult(
                 turn_id=turn_id,
                 route=lane.value,
@@ -146,9 +192,11 @@ class TurnCoordinator:
                 logs=logs,
                 delegate_search=True,
                 search_intent_name=kind.name,
+                search_query=slot_q,
             )
 
         if lane is RouteLane.CHAT_ONLY:
+            push_activity_line("Lane CHAT_ONLY: dialogue agent (LLM).")
             reply = self._dialogue.chat(user_text)
             logs.append("dialogue_chat")
             return TurnResult(
@@ -162,7 +210,27 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.MULTI_TURN:
-            reply = self._assistant.handle_user_text(user_text, routed=kind)
+            push_activity_line("Lane MULTI_TURN: mode / preset flow.")
+            preset_id_hint: str | None = None
+            if _phase3_preset_llm_enabled(self._assistant) and ctx.step in (
+                DialogueStep.WORK_ASK_TASK,
+                DialogueStep.GAME_ASK_TITLE,
+                DialogueStep.CREATIVE_ASK_TYPE,
+            ):
+                from iris.assistant.mode_preset_resolver import resolve_mode_preset_id_llm
+
+                mode_key = {
+                    DialogueStep.WORK_ASK_TASK: "work",
+                    DialogueStep.GAME_ASK_TITLE: "game",
+                    DialogueStep.CREATIVE_ASK_TYPE: "creative",
+                }.get(ctx.step)
+                if mode_key is not None:
+                    preset_id_hint = resolve_mode_preset_id_llm(
+                        user_text, mode_key, self._gemma  # type: ignore[arg-type]
+                    )
+            reply = self._assistant.handle_user_text(
+                user_text, routed=kind, llm_preset_id=preset_id_hint
+            )
             if not reply:
                 reply = "Iris: 이어서 말씀해 주세요."
             return TurnResult(
@@ -175,6 +243,7 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.COMPUTER_USE:
+            push_activity_line("Lane COMPUTER_USE: starting PAV loop path.")
             return self._run_computer_use(
                 turn_id,
                 user_text,
@@ -184,16 +253,19 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.FAST_TOOL:
+            push_activity_line("Lane FAST_TOOL: single Tier-1 tool.")
             return self._run_fast_tool(
                 turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
             )
 
         if lane is RouteLane.DIRECT_ACTION:
+            push_activity_line("Lane DIRECT_ACTION: fast execute with early ack.")
             return self._run_direct_action(
                 turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
             )
 
         # ORCHESTRATED — 기존 AgentOrchestrator (Planner 포함)
+        push_activity_line("Lane ORCHESTRATED: planner + agent loop.")
         return self._run_orchestrated(turn_id, user_text, routed_turn.kind, logs)
 
     def _handle_pending_cu_followup(
@@ -215,6 +287,7 @@ class TurnCoordinator:
         logs.append(f"pending_cu_followup={cls.decision.value}")
 
         if cls.decision is FollowupDecision.REJECT:
+            push_activity_line("CU follow-up: user rejected pending action.")
             self._assistant.ctx.clear_pending_cu()
             return TurnResult(
                 turn_id=turn_id,
@@ -227,6 +300,7 @@ class TurnCoordinator:
             )
 
         if cls.decision is FollowupDecision.CLARIFY:
+            push_activity_line("CU follow-up: clarification requested.")
             hint = pending.prompt or "진행할까요? ('진행해줘' / '취소')"
             return TurnResult(
                 turn_id=turn_id,
@@ -239,6 +313,7 @@ class TurnCoordinator:
             )
 
         if cls.decision is FollowupDecision.UNRELATED:
+            push_activity_line("CU follow-up: unrelated input — clearing pending_cu.")
             self._assistant.ctx.clear_pending_cu()
             logs.append("pending_cu_cleared_unrelated")
             return None
@@ -248,6 +323,9 @@ class TurnCoordinator:
 
         # CRITICAL 대기 스텝: 승인 후 1스텝만 실행 (CU 루프 재시작 금지)
         if pending.has_pending_tool:
+            push_activity_line(
+                f"CU follow-up: approved pending tool={pending.pending_tool_name!r}."
+            )
             tool_name = pending.pending_tool_name
             params = dict(pending.pending_tool_params)
             preview = pending.pending_tool_preview
@@ -272,6 +350,7 @@ class TurnCoordinator:
         goal = pending.goal
         slots = dict(pending.slots)
         self._assistant.ctx.clear_pending_cu()
+        push_activity_line("CU follow-up: approved — resuming PAV loop.")
         reply = self._assistant.run_computer_use_loop(
             user_text, goal=goal, slots=slots or None
         )
@@ -473,6 +552,7 @@ class TurnCoordinator:
                 logs=logs,
                 delegate_search=True,
                 search_intent_name=kind.name,
+                search_query=None,
             )
         return TurnResult(
             turn_id=turn_id,
@@ -483,6 +563,13 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
+
+
+def _chat_fast_path_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "chat_fast_path_enabled", True))
 
 
 def _unified_llm_router_enabled(assistant: IrisAssistant) -> bool:

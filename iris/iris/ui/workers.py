@@ -6,10 +6,12 @@ from typing import TYPE_CHECKING, Sequence
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from iris.agent.needs_agent import format_hits_for_gemma_context, research_hits_with_intent
+from iris.agent.needs_agent import research_hits_with_intent
 from iris.ai.gemma_client import ChatMessage, GemmaClient
+from iris.ai.thinking_policy import LlmPurpose
 from iris.assistant.turn_coordinator import TurnCoordinator
 from iris.config.app_index import run_background_scan
+from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind
 from iris.storage.database import Database
 
@@ -26,20 +28,35 @@ class LlmWorker(QThread):
         self._messages = list(messages)
 
     def run(self) -> None:
-        text = self._client.chat(self._messages)
+        push_activity_line("Worker: LlmWorker started.")
+        text = self._client.chat(self._messages, purpose=LlmPurpose.DIALOGUE_CHAT)
+        push_activity_line("Worker: LlmWorker emitting reply.")
         self.finished_text.emit(text)
 
 
 class SearchWorker(QThread):
     finished_hits = pyqtSignal(str, list, str)
 
-    def __init__(self, query_text: str, intent: CommandKind = CommandKind.WEB_SEARCH) -> None:
+    def __init__(
+        self,
+        query_text: str,
+        intent: CommandKind = CommandKind.WEB_SEARCH,
+        *,
+        slot_query: str | None = None,
+    ) -> None:
         super().__init__()
         self._query_text = query_text
         self._intent = intent
+        self._slot_query = slot_query
 
     def run(self) -> None:
-        q, hits = research_hits_with_intent(self._query_text, self._intent)
+        push_activity_line(
+            f"Worker: SearchWorker started intent={self._intent.name}."
+        )
+        q, hits = research_hits_with_intent(
+            self._query_text, self._intent, slot_query=self._slot_query
+        )
+        push_activity_line(f"Worker: SearchWorker done hits_count={len(hits)}.")
         self.finished_hits.emit(q, hits, self._intent.name)
 
 
@@ -53,7 +70,11 @@ class AppLauncherScanWorker(QThread):
         self._db = db
 
     def run(self) -> None:
+        push_activity_line("Worker: AppLauncherScanWorker scanning installed apps.")
         new_count, names = run_background_scan(self._db)
+        push_activity_line(
+            f"Worker: AppLauncherScanWorker done new_or_updated={new_count}."
+        )
         self.finished_scan.emit(new_count, names)
 
 
@@ -62,7 +83,7 @@ class AgentWorker(QThread):
 
     # text, store_history, had_early_ack, spoken_followup(TTS용, ack 제외)
     finished_reply = pyqtSignal(str, bool, bool, str)
-    delegate_search = pyqtSignal(str, str)  # user_text, intent.name
+    delegate_search = pyqtSignal(str, str, str)  # user_text, intent.name, slot_query(빈칸=미사용)
     early_ack = pyqtSignal(str)  # DIRECT_ACTION 실행 전 (메인 스레드 QueuedConnection)
 
     def __init__(self, assistant: IrisAssistant, user_text: str) -> None:
@@ -71,6 +92,7 @@ class AgentWorker(QThread):
         self._user_text = user_text
 
     def run(self) -> None:
+        push_activity_line("Worker: AgentWorker pipeline started.")
         coordinator = TurnCoordinator(self._assistant, self._assistant.gemma_client)
 
         def _emit_early_ack(ack: str) -> None:
@@ -78,13 +100,23 @@ class AgentWorker(QThread):
 
         result = coordinator.run_turn(self._user_text, on_early_ack=_emit_early_ack)
         if result.delegate_search:
+            push_activity_line("Worker: AgentWorker delegating to search path.")
             intent_name = result.search_intent_name or CommandKind.WEB_SEARCH.name
-            self.delegate_search.emit(self._user_text, intent_name)
+            slot_q = (result.search_query or "").strip()
+            self.delegate_search.emit(self._user_text, intent_name, slot_q)
             return
         if result.user_visible:
+            push_activity_line(
+                f"Worker: AgentWorker finished route={getattr(result, 'route', 'unknown')!r} "
+                f"early_ack={getattr(result, 'had_early_ack', False)}."
+            )
             self.finished_reply.emit(
                 result.user_visible,
                 result.store_history,
                 result.had_early_ack,
                 result.spoken_followup or "",
+            )
+        else:
+            push_activity_line(
+                "Worker: AgentWorker ended with empty user_visible (no emit)."
             )

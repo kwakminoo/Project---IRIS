@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
+from iris.ai.thinking_policy import LlmPurpose
 from iris.ai.prompt_builder import IRIS_SYSTEM_PROMPT
 from iris.monitoring.models import DetectionResult, StatusCategory
 
@@ -50,7 +51,8 @@ def build_alert_text(
             [
                 ChatMessage("system", sys),
                 ChatMessage("user", base),
-            ]
+            ],
+            purpose=LlmPurpose.GENERIC,
         )
         if refined and len(refined) < 400:
             return refined.strip()

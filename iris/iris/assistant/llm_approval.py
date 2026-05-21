@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient, FALLBACK_KO
+from iris.ai.thinking_policy import LlmPurpose
 from iris.ai.response_parser import extract_json_object
 
 APPROVAL_CLASSIFIER_SYSTEM = """이전에 Iris가 실행 확인을 요청한 맥락에서 사용자 답만 분석하세요. JSON만 출력.
@@ -111,7 +112,7 @@ def classify_user_followup(
         ChatMessage(role="system", content=APPROVAL_CLASSIFIER_SYSTEM),
         ChatMessage(role="user", content=user_block),
     ]
-    raw_reply = gemma.chat(messages)
+    raw_reply = gemma.chat(messages, purpose=LlmPurpose.LLM_APPROVAL)
     if raw_reply.strip() == FALLBACK_KO or raw_reply.strip().startswith("로컬 언어 모델"):
         return classify_user_followup_rule(user_text)
 

@@ -22,6 +22,34 @@ def test_cu_early_ack_unknown_no_goal_echo() -> None:
     assert ack == "요청하신 작업을 진행할게요."
 
 
+def test_cu_early_ack_media_search() -> None:
+    agent = DialogueAgent(object(), object())  # type: ignore[arg-type]
+    ack = agent.cu_early_ack(
+        "유튜브에서 아이유 검색 결과를 연다",
+        {
+            "task_type": "media_play",
+            "platform_hint": "youtube",
+            "media_action": "search",
+            "search_query": "아이유",
+        },
+    )
+    assert "'아이유' 검색 결과를 열게요." == ack
+
+
+def test_cu_early_ack_media_play() -> None:
+    agent = DialogueAgent(object(), object())  # type: ignore[arg-type]
+    ack = agent.cu_early_ack(
+        "유튜브에서 치챗 영상을 재생한다",
+        {
+            "task_type": "media_play",
+            "platform_hint": "youtube",
+            "media_action": "play",
+            "search_query": "치챗",
+        },
+    )
+    assert "'치챗' 검색 후 재생까지 진행할게요." == ack
+
+
 def test_build_user_visible_skips_ack_when_early_ack_shown() -> None:
     ack = "메모장을 실행할게요."
     exec_reply = "Iris: 메모장을 열었습니다."

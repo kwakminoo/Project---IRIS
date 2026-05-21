@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from iris.ai.gemma_client import ChatMessage
+from iris.ai.thinking_policy import LlmPurpose
 from iris.core.command_router import CommandKind
 
 if TYPE_CHECKING:
@@ -33,7 +34,6 @@ def match_action_ack(text: str) -> str | None:
 _DIALOGUE_SYSTEM = (
     "당신은 Iris, 사용자의 로컬 AI 비서입니다. "
     "짧고 친절한 한국어로만 답하세요. 마크다운 없이 일반 문장만 쓰세요. "
-    "컴퓨터 조작·앱 실행·계획은 말하지 마세요."
 )
 
 
@@ -50,13 +50,29 @@ class DialogueAgent:
         # 시스템 프롬프트를 대화 전용으로 덮어씀 (첫 메시지만)
         if messages and messages[0].role == "system":
             messages[0] = ChatMessage("system", _DIALOGUE_SYSTEM)
-        raw = self._gemma.chat(messages)
+        raw = self._gemma.chat(messages, purpose=LlmPurpose.DIALOGUE_CHAT)
         return self._with_iris_prefix(raw)
 
     def cu_early_ack(self, goal: str, slots: dict | None = None) -> str:
         """Computer Use 실행 전 짧은 확인 — 사용자 goal 원문을 반복하지 않음."""
-        g = (goal or "").strip()
         slot = slots or {}
+        # Phase 3 — 라우터가 준 display_name이 있으면 템플릿 1줄로 통일
+        disp_raw = slot.get("display_name")
+        if isinstance(disp_raw, str) and disp_raw.strip():
+            return f"{disp_raw.strip()} 관련 작업을 진행할게요."
+        # Unified Router 미디어 슬롯 — media_action은 LLM 분류 결과만 사용
+        media_action = str(slot.get("media_action") or "").strip().lower()
+        if media_action in {"search", "play"}:
+            sq_raw = slot.get("search_query") or slot.get("query") or slot.get("title")
+            q = sq_raw.strip()[:40] if isinstance(sq_raw, str) and sq_raw.strip() else None
+            if media_action == "search":
+                if q:
+                    return f"'{q}' 검색 결과를 열게요."
+                return "검색 결과를 열게요."
+            if q:
+                return f"'{q}' 검색 후 재생까지 진행할게요."
+            return "검색 후 재생까지 진행할게요."
+        g = (goal or "").strip()
         hint = " ".join(
             str(slot.get(k) or "")
             for k in ("app_hint", "app_key", "display_name", "query", "search_query", "title")
