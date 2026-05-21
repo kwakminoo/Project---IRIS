@@ -41,11 +41,12 @@ from iris.storage.database import Database
 from iris.ui.chat_panel import ChatPanel
 from iris.ui.drag_tab import DragTab
 from iris.ui.live_activity_panel import LiveActivityPanel, UiActivityRelay
-from iris.ui.monitor_dashboard import MonitorDashboard
 from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
 from iris.ui.bridge_signals import UiBridge
 from iris.ui.visualizer import Visualizer
+from iris.ui.unified_monitor_panel import UnifiedMonitorPanel
+from iris.ui.window_list_panel import WindowListPanel
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
 
 
@@ -162,6 +163,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self._backend_status)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 좌측 통합 사이드바 — 실행 중인 창 목록
+        self._window_sidebar = WindowListPanel()
+        splitter.addWidget(self._window_sidebar)
+
         left = QWidget()
         left_lay = QVBoxLayout(left)
         self._viz = Visualizer()
@@ -199,15 +205,21 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         rl = QVBoxLayout(right)
-        self._monitor = MonitorDashboard()
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+
+        # 실행 화면 + 모니터링 통합 (세로 1열)
+        self._monitor = UnifiedMonitorPanel()
         self._monitor.set_database(self._db)
-        self._monitor.refresh_cards()
+
         self._notif_policy = NotificationPolicy(self._db)
         self._notes = NotificationPanel(policy=self._notif_policy)
-        rl.addWidget(self._monitor, 1)
+        rl.addWidget(self._monitor, 2)
         rl.addWidget(self._notes, 1)
         splitter.addWidget(right)
-        splitter.setSizes([720, 360])
+        # [사이드바 | 메인 좌측 | 우측 모니터]
+        splitter.setSizes([220, 720, 360])
+        splitter.setCollapsible(0, False)  # 사이드바는 접히지 않도록
 
         root.addWidget(splitter, 1)
 
@@ -236,6 +248,9 @@ class MainWindow(QMainWindow):
         act_quit = QAction("종료", self)
         act_quit.triggered.connect(self.close)
         self.addAction(act_quit)
+
+        # 전체화면(최대화)으로 시작
+        self.showMaximized()
 
     def _warmup_stt_async(self) -> None:
         """Whisper 모델 선로딩 — 첫 음성 인식 지연 완화."""
@@ -387,7 +402,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_targets_changed(self) -> None:
-        self._monitor.refresh_cards()
+        self._monitor.refresh_now()
 
     @pyqtSlot(str, str, str, int, str, str, int)
     def _on_monitor_alert(
