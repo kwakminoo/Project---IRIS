@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from iris.assistant.tool_param_normalize import normalize_computer_use_params
+
 _JSON_BLOCK = re.compile(r"\{[\s\S]*\}")
 
 # 오케스트레이터가 허용하는 도구 이름
@@ -170,7 +172,8 @@ def parse_computer_use_step(text: str) -> ComputerUseStep | None:
     reason = data.get("reason")
     if not isinstance(reason, str):
         reason = ""
-    return ComputerUseStep(name, dict(params), reason.strip())
+    normalized = normalize_computer_use_params(name, dict(params))
+    return ComputerUseStep(name, normalized, reason.strip())
 
 
 def plan_to_json(plan: ActionPlan) -> str:

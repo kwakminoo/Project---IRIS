@@ -34,5 +34,10 @@ def build_messages(
     out: list[ChatMessage] = [ChatMessage("system", sys)]
     if history:
         out.extend(history)
-    out.append(ChatMessage("user", user_text))
+    # 이중 방어: 진행 중 턴의 user가 히스토리에 남아 있으면 현재 발화 append 생략
+    cur = (user_text or "").strip()
+    if history and history[-1].role == "user" and history[-1].content.strip() == cur:
+        pass
+    elif cur:
+        out.append(ChatMessage("user", cur))
     return out

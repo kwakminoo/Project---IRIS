@@ -3,12 +3,43 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional
 
 from iris.ai.gemma_client import ChatMessage
 from iris.storage.database import Database
+
+# UI·LLM 응답에 붙는 접두어 — memory·프롬프트 히스토리에는 저장하지 않음
+_IRIS_PREFIX_RE = re.compile(r"^iris:\s*", re.IGNORECASE)
+_MEANINGLESS_REPLY = re.compile(r"^[\s.,;:!?…·\-]+$")
+
+
+def strip_iris_prefix(text: str) -> str:
+    """'Iris:' 접두어 제거 — memory·LLM 히스토리용 본문만 반환."""
+    return _IRIS_PREFIX_RE.sub("", (text or "").strip()).strip()
+
+
+def is_worth_memory_commit(assistant_body: str, *, min_len: int = 8) -> bool:
+    """CHAT_ONLY 등에서 무의미·너무 짧은 assistant는 memory 커밋 생략."""
+    body = strip_iris_prefix(assistant_body).strip()
+    if len(body) < min_len:
+        return False
+    if _MEANINGLESS_REPLY.match(body):
+        return False
+    return True
+
+
+def commit_turn_pair(mem: MemoryManager, user: str, assistant: str) -> bool:
+    """완료된 턴 — user 후 assistant 순서로 단기 memory에 기록."""
+    u = (user or "").strip()
+    a = strip_iris_prefix(assistant).strip()
+    if not u or not a or not is_worth_memory_commit(a):
+        return False
+    mem.add_turn("user", u)
+    mem.add_turn("assistant", a)
+    return True
 
 # 단기: 최근 턴 수·문자 제한
 _MAX_SHORT_TURNS = 12

@@ -9,13 +9,33 @@ from enum import Enum
 from typing import Any
 
 from iris.assistant.tool_layer import is_search_intent
+from iris.config.app_index import _alias_key
 from iris.core.command_router import CommandKind
 from iris.core.context_manager import DialogueContext, DialogueStep
+from iris.core.intent_router import route_user_intent
 
 # 인사·잡담 — CHAT_ONLY (Gemma 대화 1회, Planner 생략)
 _CHAT_ONLY_PATTERNS = re.compile(
     r"^(안녕|하이|헬로|반가워|고마워|감사|수고|뭐해|잘\s*자|굿밤|ㅎㅇ|"
     r"도움\s*줘|뭐\s*할\s*수\s*있|소개\s*해줘|이름\s*뭐)[\s!?。~]*$",
+    re.IGNORECASE,
+)
+
+# 능력·소개 질문 (호출어 접두 허용)
+_CAPABILITY_CHAT = re.compile(
+    r"(뭐?|뭘)\s*할\s*수\s*있|할\s*수\s*있어|무엇을\s*할\s*수|능력이|도와줄\s*수|도움\s*줄\s*수",
+    re.IGNORECASE,
+)
+
+# Fast path 제외 — 실행·검색·모드 의도 힌트
+_FAST_PATH_EXEC_VERB = re.compile(
+    r"(켜|열어|열\s|실행|검색|찾아|틀어|재생|보내|클릭|입력|삭제|설치|닫|종료|"
+    r"실행해|켜줘|열어줘|해달라|부탁)",
+    re.IGNORECASE,
+)
+
+_FAST_PATH_MODE_HINT = re.compile(
+    r"(작업\s*시작|일해야|개발\s*시작|게임할|게임\s*시작|롤\s|창작\s*모드|작업\s*모드)",
     re.IGNORECASE,
 )
 
@@ -102,16 +122,39 @@ class RoutedTurn:
 
 
 def is_chat_only(text: str, kind: CommandKind) -> bool:
-    """규칙 기반 잡담·인사 판별 (액션·검색·모드 의도 제외)."""
+    """규칙 기반 잡담·인사·능력 질문 판별 (액션·검색·모드 의도 제외)."""
     t = text.strip()
     if not t or kind is not CommandKind.GENERAL_CHAT:
         return False
     if _CHAT_ONLY_PATTERNS.search(t):
         return True
+    if _CAPABILITY_CHAT.search(t) and not _FAST_PATH_EXEC_VERB.search(t):
+        return True
     # 짧은 인사 (3~12자, 물음표/느낌표만)
     if len(t) <= 12 and re.match(r"^[가-힣a-zA-Z\s!?。~]+$", t):
         if any(w in t for w in ("안녕", "하이", "고마", "뭐해", "반가")):
             return True
+    return False
+
+
+def is_ambiguous_for_fast_path(text: str) -> bool:
+    """
+    대화 fast path를 쓰면 안 되는 발화 — 반드시 Unified/규칙 라우터로 보냄.
+    실행 동사, URL, 모드 키워드, catalog 앱 힌트, GENERAL_CHAT 이외 intent.
+    """
+    t = text.strip()
+    if not t:
+        return True
+    if detect_open_url(t):
+        return True
+    if _FAST_PATH_EXEC_VERB.search(t):
+        return True
+    if _FAST_PATH_MODE_HINT.search(t):
+        return True
+    if _alias_key(t) is not None:
+        return True
+    if route_user_intent(t) is not CommandKind.GENERAL_CHAT:
+        return True
     return False
 
 

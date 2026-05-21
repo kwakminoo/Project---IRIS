@@ -72,12 +72,15 @@ def _settings(uia: bool = True, vlm: bool = False) -> Settings:
         voice_wake_words=("iris",),
         voice_followup_seconds=8.0,
         multi_agent_enabled=False,
+        chat_fast_path_enabled=True,
         unified_llm_router_enabled=True,
         llm_intent_router_enabled=True,
         llm_approval_enabled=True,
         default_web_browser="chrome",
         computer_use_uia_enabled=uia,
         computer_use_vlm_enabled=vlm,
+        phase3_mode_preset_llm=True,
+        thinking_mode="default",
     )
 
 

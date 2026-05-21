@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient, FALLBACK_KO
+from iris.ai.thinking_policy import LlmPurpose
 from iris.ai.response_parser import extract_json_object
 from iris.assistant.router_policy import RouteLane, RoutedTurn, is_multi_turn_active, resolve_route_lane
 from iris.assistant.tool_layer import is_search_intent
@@ -21,12 +22,12 @@ Unity, Discord, Excel, 유튜브, 카톡, 메모장 등 임의의 앱·작업도
 실행 방법(버튼/경로)은 쓰지 마세요. Computer Use가 perceive 후 결정합니다.
 slots는 선택 힌트(dict). 비어도 됨. 필수 필드 없음.
 순수 인사·잡담 → chat_only
-날씨·뉴스·영화·최신 이슈 등 웹 검색 요약 → search
+날씨·뉴스·영화·최신 이슈 등 웹 검색 요약 → search, slots에 query 키로 검색 엔진용 짧은 질의 한 줄 가능
 PC 사양만 → fast_tool
 작업/게임/창작 모드 진입(바로 실행 금지) → multi_turn
 lane 기본값: computer_use (PC에서 뭔가 열·조작·보내·재생)
 
-JSON 스키마: { "lane": "computer_use | chat_only | search | fast_tool | multi_turn", "goal": "실행 가능한 한국어 목표 한 문장 (사용자 원문 반영)", "task_type": "open_app | media_play | send_message | call | file | window | multi_step | unknown", "slots": {}, "risk_hint": "low | medium | high | critical", "needs_user_confirm": false, "clarification": null }
+JSON 스키마: { "lane": "computer_use | chat_only | search | fast_tool | multi_turn", "goal": "실행 가능한 한국어 목표 한 문장 (사용자 원문 반영)", "task_type": "open_app | media_play | send_message | call | file | window | multi_step | unknown", "slots": {}, "risk_hint": "low | medium | high | critical", "needs_user_confirm": false, "clarification": null }  (lane=search일 때 slots.query 권장)
 
 critical(셸·삭제·결제·비밀번호·시스템 설정) → needs_user_confirm=true 다른 텍스트 없이 JSON만.
 """
@@ -154,7 +155,7 @@ def route_with_llm(
         ChatMessage(role="system", content=INTENT_ROUTER_SYSTEM),
         ChatMessage(role="user", content=user_text.strip()),
     ]
-    raw_reply = gemma.chat(messages)
+    raw_reply = gemma.chat(messages, purpose=LlmPurpose.INTENT_ROUTER)
     if _is_llm_unavailable(raw_reply):
         return resolve_route_lane(user_text, kind, ctx)
 

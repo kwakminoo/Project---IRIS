@@ -27,6 +27,7 @@ from iris.config.app_index import build_merged_app_paths
 from iris.config.app_install_watcher import AppInstallWatcher
 from iris.config.env_store import update_env_values
 from iris.config.settings import load_settings
+from iris.core.activity_sink import push_activity_line, register_activity_sink
 from iris.core.command_router import CommandKind
 from iris.core.intent_router import route_user_intent
 from iris.core.context_manager import PendingMonitoringAction
@@ -35,9 +36,11 @@ from iris.monitoring import BrowserTabMonitor, MonitorManager, TerminalLogRegist
 from iris.monitoring.dialogue_bridge import monitoring_proposal_message
 from iris.monitoring.notification_policy import NotificationPolicy
 from iris.monitoring.target_registry import TargetRegistry
+from iris.memory.memory_manager import commit_turn_pair, strip_iris_prefix
 from iris.storage.database import Database
 from iris.ui.chat_panel import ChatPanel
 from iris.ui.drag_tab import DragTab
+from iris.ui.live_activity_panel import LiveActivityPanel, UiActivityRelay
 from iris.ui.monitor_dashboard import MonitorDashboard
 from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
@@ -165,6 +168,13 @@ class MainWindow(QMainWindow):
         self._viz.setMinimumHeight(300)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
         left_lay.addWidget(self._viz, 1)
+
+        self._activity_relay = UiActivityRelay(self)
+        self._live_activity = LiveActivityPanel(self)
+        self._activity_relay.line.connect(self._live_activity.enqueue_typed_line)
+        register_activity_sink(self._activity_relay.push)
+        left_lay.addWidget(self._live_activity)
+
         if os.environ.get("IRIS_DEBUG_PARTICLE") == "1":
             dbg = QWidget()
             dbg_row = QHBoxLayout(dbg)
@@ -317,9 +327,15 @@ class MainWindow(QMainWindow):
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._rebuild_voice_input()
         self._refresh_model_label()
+        think_label = {
+            "off": "사용 안 함",
+            "default": "기본",
+            "on": "항상 사용",
+        }.get(self._settings.thinking_mode, self._settings.thinking_mode)
         self._notes.add_note(
             f"설정 적용: 모델={self._settings.gemma_model_name}, "
-            f"마이크={self._settings.always_listen_input_device}"
+            f"마이크={self._settings.always_listen_input_device}, "
+            f"LLM 추론={think_label}"
         )
 
     def _open_settings_dialog(self) -> None:
@@ -347,6 +363,7 @@ class MainWindow(QMainWindow):
                 ),
                 "ALWAYS_LISTEN_SPEECH_RMS": f"{selection.speech_rms:.4f}",
                 "DEFAULT_WEB_BROWSER": selection.default_web_browser,
+                "IRIS_THINKING_MODE": selection.thinking_mode,
             },
         )
         self._apply_runtime_settings()
@@ -422,6 +439,7 @@ class MainWindow(QMainWindow):
         if isinstance(s, AppState):
             self._viz.set_state(s)
             self._status_label.setText(f"상태: {s.name}")
+            push_activity_line(f"UI: app state → {s.name}.")
             self._backend_status.setText(external_backend_status_line(self._settings))
 
     def _pause_voice_input(self) -> None:
@@ -440,16 +458,19 @@ class MainWindow(QMainWindow):
     def _on_speech_started(self) -> None:
         if self._state.state in (AppState.PROCESSING, AppState.EXECUTING, AppState.RESPONDING):
             return
+        push_activity_line("Mic: speech segment started (listening).")
         self._chat.begin_user_listening()
         if self._state.state == AppState.IDLE:
             self._state.set_state(AppState.LISTENING)
 
     @pyqtSlot()
     def _on_stt_started(self) -> None:
+        push_activity_line("STT: stream decode started (silence-boundary).")
         self._chat.set_user_listening_status("인식 중…")
 
     @pyqtSlot()
     def _on_utterance_failed(self) -> None:
+        push_activity_line("STT: utterance empty — no usable transcript.")
         self._chat.cancel_user_listening()
         self._chat.append_message(
             "Iris",
@@ -467,6 +488,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_voice_utterance(self, text: str) -> None:
+        push_activity_line("STT: utterance ready (accepted for gating pipeline).")
         if self._state.state in (AppState.PROCESSING, AppState.EXECUTING, AppState.RESPONDING):
             self._chat.cancel_user_listening()
             return
@@ -543,8 +565,11 @@ class MainWindow(QMainWindow):
                 self._chat.complete_user_message_typed(text)
             else:
                 self._chat.append_message("나", text)
-        self._assistant.memory.add_turn("user", text)
+        # 진행 중 턴은 memory에 넣지 않음 — 턴 완료 시 user+assistant 한꺼번에 커밋
         self._db.insert_log("user", text, None)
+        push_activity_line(
+            f"UI: user turn submitted ({'voice' if from_voice else 'text'}), log row written."
+        )
         self._state.set_state(AppState.PROCESSING)
         self._last_user_text = text
         self._pending_final = None
@@ -602,11 +627,8 @@ class MainWindow(QMainWindow):
         self._final_reply_received = False
 
         if self._skip_followup_tts:
-            self._assistant.memory.add_turn("assistant", user_visible)
             self._db.insert_log("assistant", user_visible, None)
-            if store_history:
-                self._history.append(ChatMessage("user", self._last_user_text))
-                self._history.append(ChatMessage("assistant", user_visible))
+            self._commit_completed_turn(user_visible, store_history=store_history)
             self._state.reset_to_idle()
             self._resume_voice_input()
             return
@@ -614,11 +636,8 @@ class MainWindow(QMainWindow):
         if spoken_followup.strip():
             self._chat.append_message_typed("Iris", spoken_followup)
 
-        self._assistant.memory.add_turn("assistant", user_visible)
         self._db.insert_log("assistant", user_visible, None)
-        if store_history:
-            self._history.append(ChatMessage("user", self._last_user_text))
-            self._history.append(ChatMessage("assistant", user_visible))
+        self._commit_completed_turn(user_visible, store_history=store_history)
 
         if spoken_followup.strip():
             tone = infer_speech_tone(from_llm=False, reply_text=spoken_followup)
@@ -649,20 +668,32 @@ class MainWindow(QMainWindow):
             return
         self._finish_assistant_reply(reply, store_history=store_history)
 
-    @pyqtSlot(str, str)
-    def _on_agent_delegate_search(self, text: str, intent_name: str) -> None:
+    @pyqtSlot(str, str, str)
+    def _on_agent_delegate_search(
+        self, text: str, intent_name: str, slot_query: str = ""
+    ) -> None:
         try:
             intent = CommandKind[intent_name]
         except KeyError:
             intent = CommandKind.WEB_SEARCH
-        self._start_search_worker(text, intent)
+        sq = slot_query.strip() or None
+        self._start_search_worker(text, intent, slot_query=sq)
 
-    def _start_search_worker(self, text: str, intent: CommandKind) -> None:
-        self._search_worker = SearchWorker(text, intent=intent)
+    def _start_search_worker(
+        self,
+        text: str,
+        intent: CommandKind,
+        *,
+        slot_query: str | None = None,
+    ) -> None:
+        self._search_worker = SearchWorker(text, intent=intent, slot_query=slot_query)
         self._search_worker.finished_hits.connect(self._on_search_done)
         self._search_worker.start()
 
     def _on_search_done(self, query: str, hits: object, intent_name: str) -> None:
+        push_activity_line(
+            f"UI: search worker returned intent={intent_name!r} hit_count={len(hits)}."
+        )
         self._report.set_hits(query, hits)  # type: ignore[arg-type]
         self._report.show()
         try:
@@ -681,19 +712,29 @@ class MainWindow(QMainWindow):
             extra_context=ctx,
         )
         self._llm_worker = LlmWorker(self._assistant.gemma_client, messages)
+        push_activity_line("UI: summarization LlmWorker starting with search context.")
         self._llm_worker.finished_text.connect(self._on_llm_done)
         self._llm_worker.start()
 
     def _on_llm_done(self, text: str) -> None:
         self._finish_assistant_reply(text, store_history=True)
 
+    def _commit_completed_turn(self, assistant_visible: str, *, store_history: bool) -> None:
+        """턴 성공 시에만 user+assistant를 memory·_history에 커밋 (Iris: 접두어 제외)."""
+        if not store_history:
+            return
+        user = (self._last_user_text or "").strip()
+        if not user:
+            return
+        body = strip_iris_prefix(assistant_visible)
+        if commit_turn_pair(self._assistant.memory, user, assistant_visible):
+            self._history.append(ChatMessage("user", user))
+            self._history.append(ChatMessage("assistant", body))
+
     def _finish_assistant_reply(self, text: str, store_history: bool) -> None:
         self._chat.append_message_typed("Iris", text)
-        self._assistant.memory.add_turn("assistant", text)
         self._db.insert_log("assistant", text, None)
-        if store_history:
-            self._history.append(ChatMessage("user", self._last_user_text))
-            self._history.append(ChatMessage("assistant", text))
+        self._commit_completed_turn(text, store_history=store_history)
         tone = infer_speech_tone(from_llm=store_history, reply_text=text)
         if self._settings.tts_enable_speech_formatter:
             spoken = format_speech(
@@ -706,6 +747,7 @@ class MainWindow(QMainWindow):
         self._speak(spoken)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        register_activity_sink(None)
         self._monitor_mgr.stop()
         self._continuous_listen.stop()
         self._tts.stop()
