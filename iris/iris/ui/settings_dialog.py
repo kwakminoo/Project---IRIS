@@ -34,6 +34,16 @@ from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
 
+_COMBO_STYLE = """
+QComboBox {
+    background-color: #1a1c24;
+    color: #ffffff;
+    border: 1px solid #3f3f5f;
+    border-radius: 4px;
+    padding: 4px;
+}
+"""
+
 
 @dataclass(frozen=True)
 class MicrophoneOption:
@@ -100,6 +110,7 @@ class SettingsDialog(QDialog):
         self._model_combo = QComboBox()
         self._refresh_model_combo(settings.gemma_model_name)
         form.addRow("사용할 AI 모델", self._model_combo)
+        self._model_combo.setStyleSheet(_COMBO_STYLE)
 
         model_tools = QHBoxLayout()
         self._model_input = QLineEdit()
@@ -116,14 +127,17 @@ class SettingsDialog(QDialog):
         self._browser_combo = QComboBox()
         self._populate_web_browsers(settings.default_web_browser)
         form.addRow("웹 기본 브라우저", self._browser_combo)
+        self._browser_combo.setStyleSheet(_COMBO_STYLE)
 
         self._thinking_combo = QComboBox()
         self._populate_thinking_mode(settings.thinking_mode)
         form.addRow("LLM 추론 (Thinking)", self._thinking_combo)
+        self._thinking_combo.setStyleSheet(_COMBO_STYLE)
 
         self._mic_combo = QComboBox()
         self._populate_microphones(settings.always_listen_input_device)
         form.addRow("입력 마이크", self._mic_combo)
+        self._mic_combo.setStyleSheet(_COMBO_STYLE)
 
         self._mic_gauge = MicLevelGaugeWidget()
         self._mic_gauge.set_threshold_rms(settings.always_listen_speech_rms)
