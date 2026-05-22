@@ -25,22 +25,26 @@ class _ChatInputBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ChatInputBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumHeight(48)
         self.setStyleSheet(
             """
             QWidget#ChatInputBar {
                 background-color: #111827;
-                border: none;
+                border: 2px solid #475569;
+                border-radius: 10px;
             }
             QWidget#ChatInputBar QLineEdit {
                 background: transparent;
                 border: none;
+                color: #ffffff;
                 padding: 8px 4px 8px 12px;
             }
             """
         )
         row = QHBoxLayout(self)
-        row.setContentsMargins(4, 4, 6, 4)
-        row.setSpacing(4)
+        row.setContentsMargins(10, 6, 8, 6)
+        row.setSpacing(8)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Iris에게 메시지를 입력하세요…")

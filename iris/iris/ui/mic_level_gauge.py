@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from iris.audio.mic_level import (
@@ -72,7 +72,7 @@ class MicLevelGaugeWidget(QWidget):
 
         inner = self._inner_rect()
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#1e293b"))
+        p.setBrush(QColor("#13151a"))
         p.drawRoundedRect(inner, 6, 6)
 
         thresh_x = self._display_to_x(self._threshold_display, inner)
@@ -80,16 +80,39 @@ class MicLevelGaugeWidget(QWidget):
         below = QRect(inner)
         below.setRight(thresh_x)
         if below.width() > 0:
-            p.setBrush(QColor(30, 41, 59, 180))
+            p.setBrush(QColor(20, 25, 35, 120))
             p.drawRoundedRect(below, 4, 4)
 
         level_w = self._display_to_x(self._level, inner) - inner.left()
         if level_w > 0:
-            fill = inner.adjusted(0, 0, 0, 0)
-            fill.setWidth(level_w)
-            grad_color = QColor("#22d3ee") if self._level >= self._threshold_display else QColor("#64748b")
-            p.setBrush(grad_color)
-            p.drawRoundedRect(fill, 4, 4)
+            base_color = (
+                QColor("#22d3ee")
+                if self._level >= self._threshold_display
+                else QColor("#475569")
+            )
+            gradient = QLinearGradient(inner.left(), 0, inner.right(), 0)
+            gradient.setColorAt(
+                0.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0)
+            )
+            gradient.setColorAt(
+                0.1, QColor(base_color.red(), base_color.green(), base_color.blue(), 255)
+            )
+            gradient.setColorAt(
+                0.9, QColor(base_color.red(), base_color.green(), base_color.blue(), 255)
+            )
+            gradient.setColorAt(
+                1.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0)
+            )
+            center_y = inner.center().y()
+            wave_height = max(2, int(self._level * (inner.height() - 4)))
+            wave_rect = QRect(
+                inner.left(),
+                center_y - (wave_height // 2),
+                level_w,
+                wave_height,
+            )
+            p.setBrush(gradient)
+            p.drawRoundedRect(wave_rect, 4, 4)
 
         # 감도 막대
         p.setPen(QPen(QColor("#fbbf24"), 2))
