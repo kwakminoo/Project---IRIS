@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import QWidget
 
 
@@ -38,6 +39,10 @@ _STATE_PROFILES: dict[str, dict[str, float]] = {
 }
 
 
+def _asset_path(relative_path: str) -> Path:
+    return Path(__file__).resolve().parents[2] / "assets" / relative_path
+
+
 class ParticleVisualizer(QWidget):
     """
     푸른/시안 계열 홀로그래픽 파티클 코어.
@@ -54,6 +59,7 @@ class ParticleVisualizer(QWidget):
         self._cx = 0.0
         self._cy = 0.0
         self._core_r = 120.0
+        self._core_image = QPixmap(str(_asset_path("visuals/iris_core.png")))
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
@@ -162,6 +168,10 @@ class ParticleVisualizer(QWidget):
             gr.setColorAt(1.0, QColor(8, 47, 73, 0))
             painter.fillRect(0, 0, w, h, gr)
 
+        self._draw_core_image(painter, cx, cy, mic)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        return
+
         # 궤도 링 (EXECUTING 등)
         if self._state_name in ("EXECUTING", "MONITORING", "ALERTING"):
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
@@ -222,6 +232,41 @@ class ParticleVisualizer(QWidget):
             painter.drawEllipse(QRectF(px - glow_r, py - glow_r, 2 * glow_r, 2 * glow_r))
 
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+    def _draw_core_image(self, painter: QPainter, cx: float, cy: float, mic: float) -> None:
+        """Draw the imported orb image with a subtle living-core animation."""
+        if self._core_image.isNull():
+            return
+
+        pulse = 1.0 + 0.045 * math.sin(self._t * 1.7) + 0.035 * mic
+        side = self._core_r * 2.42 * pulse
+        rect = QRectF(cx - side / 2, cy - side / 2, side, side)
+
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        for scale, alpha in ((1.04, 28), (0.82, 38)):
+            glow_r = side * scale / 2
+            glow = QRadialGradient(cx, cy, glow_r)
+            glow.setColorAt(0.0, QColor(96, 165, 250, alpha))
+            glow.setColorAt(0.5, QColor(34, 211, 238, max(8, alpha // 2)))
+            glow.setColorAt(1.0, QColor(15, 23, 42, 0))
+            painter.fillRect(
+                QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2),
+                glow,
+            )
+
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setOpacity(0.92)
+        source_side = min(self._core_image.width(), self._core_image.height())
+        source_rect = QRectF(
+            (self._core_image.width() - source_side) / 2,
+            (self._core_image.height() - source_side) / 2,
+            source_side,
+            source_side,
+        )
+        painter.drawPixmap(rect, self._core_image, source_rect)
+        painter.setOpacity(1.0)
+        painter.restore()
 
     def _particle_color(self, p: Particle, bright: float, idx: int) -> tuple[int, int, int]:
         """blue/cyan 기반, ALERTING은 약한 amber 포인트, ERROR는 약한 violet/red."""
