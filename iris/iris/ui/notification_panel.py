@@ -54,9 +54,27 @@ class NotificationPanel(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("NotificationPanel")
+        self.setStyleSheet(
+            """
+            QWidget#NotificationPanel {
+                background-color: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+            }
+            QWidget#NotificationPanel QListWidget {
+                background-color: #111827;
+                border: 1px solid #243247;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            """
+        )
         self._cooldown_sec = cooldown_seconds
         self._policy = policy
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
         lay.addWidget(QLabel("알림"))
         self._list = QListWidget()
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
