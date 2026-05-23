@@ -1,4 +1,4 @@
-"""마이크 입력 게이지 + 드래그 감도(인식 임계) 막대."""
+"""마이크 입력 게이지 + 드래그 감도(인식 임계) 막대 (주파수 그라데이션)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ _MAX_DISPLAY = 0.98
 class MicLevelGaugeWidget(QWidget):
     """
     가로 게이지: 채워진 영역은 현재 입력 레벨, 세로 막대는 인식 감도 임계값.
-    막대 미만 소리는 continuous_listen에서 무시된다.
+    양쪽 끝이 흐려지며 소리 크기에 따라 위아래로 출렁이는 주파수 효과를 적용한다.
     """
 
     threshold_changed = pyqtSignal(float)
