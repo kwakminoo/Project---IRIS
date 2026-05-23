@@ -24,7 +24,6 @@ class _ChatInputBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        super().__init__(parent)
         self.setObjectName("ChatInputBar")
         self.setStyleSheet(
             """
