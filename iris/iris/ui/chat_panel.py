@@ -134,6 +134,17 @@ class ChatPanel(QWidget):
         super().__init__()
         self._log = QTextEdit()
         self._log.setReadOnly(True)
+        self._log.setMinimumHeight(170)
+        self._log.setStyleSheet(
+            """
+            QTextEdit {
+                background-color: #0f172a;
+                border: 1px solid #243247;
+                border-radius: 8px;
+                padding: 8px;
+            }
+            """
+        )
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(18)
         self._typing_timer.timeout.connect(self._type_next_chunk)
@@ -148,6 +159,8 @@ class ChatPanel(QWidget):
         self._input_area.input_bar.send_button.clicked.connect(self._emit_send)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
         root.addWidget(self._log, 1)
         root.addWidget(self._input_area)
 

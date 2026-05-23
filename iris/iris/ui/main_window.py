@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter, QVBoxLayout, QWidget
 
 from iris.agent.report_window import ReportWindow
 from iris.ai.gemma_client import ChatMessage, GemmaClient
@@ -69,6 +69,29 @@ def _apply_dark_theme(w: QWidget) -> None:
             background-color: #312e81; color: #e0e7ff; border-radius: 6px; padding: 6px 12px;
         }
         QPushButton:hover { background-color: #4338ca; }
+        QFrame#StatusHeader {
+            background-color: #0f172a;
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+        }
+        QFrame#WorkspacePanel {
+            background-color: #0b1220;
+            border: none;
+        }
+        QLabel#StatusPill {
+            background-color: #111827;
+            border: 1px solid #243247;
+            border-radius: 7px;
+            padding: 5px 9px;
+            color: #cbd5e1;
+        }
+        QLabel#BackendStatus { color: #dbeafe; }
+        QLabel#TtsStatus { color: #cbd5e1; }
+        QSplitter::handle {
+            background-color: #111827;
+            margin: 8px 2px;
+            border-radius: 2px;
+        }
         QLabel#DragTitle { font-weight: 700; font-size: 16px; color: #c4b5fd; }
         QLabel#PanelTitle { font-weight: 600; color: #93c5fd; }
         QLabel#ModelStatus { color: #a5b4fc; font-weight: 600; }
@@ -142,34 +165,54 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         self._drag = DragTab(self)
         self._drag.settings_clicked.connect(self._open_settings_dialog)
         root.addWidget(self._drag)
 
+        status_header = QFrame()
+        status_header.setObjectName("StatusHeader")
+        status_header_lay = QVBoxLayout(status_header)
+        status_header_lay.setContentsMargins(12, 10, 12, 10)
+        status_header_lay.setSpacing(8)
+        status_top = QHBoxLayout()
+        status_top.setContentsMargins(0, 0, 0, 0)
+        status_top.setSpacing(8)
+
         self._model_label = QLabel()
         self._model_label.setObjectName("ModelStatus")
         self._refresh_model_label()
-        root.addWidget(self._model_label)
+        status_top.addWidget(self._model_label)
+        status_top.addStretch(1)
 
         self._status_label = QLabel("상태: IDLE")
-        root.addWidget(self._status_label)
+        self._status_label.setObjectName("StatusPill")
+        status_top.addWidget(self._status_label)
         self._tts_status_label = QLabel(self._tts.status_label)
         self._tts_status_label.setObjectName("TtsStatus")
-        root.addWidget(self._tts_status_label)
+        status_top.addWidget(self._tts_status_label)
+        status_header_lay.addLayout(status_top)
         self._backend_status = QLabel(external_backend_status_line(self._settings))
         self._backend_status.setObjectName("BackendStatus")
-        root.addWidget(self._backend_status)
+        self._backend_status.setWordWrap(True)
+        status_header_lay.addWidget(self._backend_status)
+        root.addWidget(status_header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
 
         # 좌측 통합 사이드바 — 실행 중인 창 목록
         self._window_sidebar = WindowListPanel()
         splitter.addWidget(self._window_sidebar)
 
         left = QWidget()
+        left.setObjectName("WorkspacePanel")
         left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(10)
         self._viz = Visualizer()
         self._viz.setMinimumHeight(300)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
@@ -204,9 +247,10 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left)
 
         right = QWidget()
+        right.setObjectName("WorkspacePanel")
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(4)
+        rl.setSpacing(10)
 
         # 실행 화면 + 모니터링 통합 (세로 1열)
         self._monitor = UnifiedMonitorPanel()
@@ -218,7 +262,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(self._notes, 1)
         splitter.addWidget(right)
         # [사이드바 | 메인 좌측 | 우측 모니터]
-        splitter.setSizes([220, 720, 360])
+        splitter.setSizes([230, 760, 390])
         splitter.setCollapsible(0, False)  # 사이드바는 접히지 않도록
 
         root.addWidget(splitter, 1)

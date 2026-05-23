@@ -88,11 +88,25 @@ class UnifiedMonitorPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("UnifiedMonitorPanel")
+        self.setStyleSheet(
+            """
+            QWidget#UnifiedMonitorPanel {
+                background-color: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+            }
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
         self._db: Optional["Database"] = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
         title = QLabel("실행 화면 / 모니터링")
         title.setObjectName("PanelTitle")
@@ -104,7 +118,7 @@ class UnifiedMonitorPanel(QWidget):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._inner = QWidget()
         self._inner_lay = QVBoxLayout(self._inner)
-        self._inner_lay.setContentsMargins(2, 2, 2, 2)
+        self._inner_lay.setContentsMargins(0, 0, 0, 0)
         self._inner_lay.setSpacing(8)
         self._inner_lay.addStretch(1)
         self._scroll.setWidget(self._inner)
