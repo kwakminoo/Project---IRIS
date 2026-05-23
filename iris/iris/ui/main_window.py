@@ -7,7 +7,17 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSplitter,
+    QStackedLayout,
+    QVBoxLayout,
+    QWidget,
+)
 
 from iris.agent.report_window import ReportWindow
 from iris.ai.gemma_client import ChatMessage, GemmaClient
@@ -213,16 +223,31 @@ class MainWindow(QMainWindow):
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(10)
+
+        visual_stage = QWidget()
+        visual_stage.setMinimumHeight(560)
+        visual_stack = QStackedLayout(visual_stage)
+        visual_stack.setContentsMargins(0, 0, 0, 0)
+        visual_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+
         self._viz = Visualizer()
-        self._viz.setMinimumHeight(300)
+        self._viz.setMinimumHeight(560)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
-        left_lay.addWidget(self._viz, 1)
+        visual_stack.addWidget(self._viz)
 
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
         self._activity_relay.line.connect(self._live_activity.enqueue_typed_line)
         register_activity_sink(self._activity_relay.push)
-        left_lay.addWidget(self._live_activity)
+
+        activity_overlay = QWidget()
+        activity_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        activity_lay = QVBoxLayout(activity_overlay)
+        activity_lay.setContentsMargins(0, 0, 0, 10)
+        activity_lay.addStretch(1)
+        activity_lay.addWidget(self._live_activity)
+        visual_stack.addWidget(activity_overlay)
+        left_lay.addWidget(visual_stage, 3)
 
         if os.environ.get("IRIS_DEBUG_PARTICLE") == "1":
             dbg = QWidget()
@@ -243,7 +268,7 @@ class MainWindow(QMainWindow):
         self._chat = ChatPanel()
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
-        left_lay.addWidget(self._chat, 2)
+        left_lay.addWidget(self._chat, 1)
         splitter.addWidget(left)
 
         right = QWidget()

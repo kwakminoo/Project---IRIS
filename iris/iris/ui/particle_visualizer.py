@@ -134,7 +134,7 @@ class ParticleVisualizer(QWidget):
         width, height = max(self.width(), 1), max(self.height(), 1)
         self._cx = width * 0.5
         self._cy = height * 0.5
-        self._core_r = min(width, height) * 0.34
+        self._core_r = min(width, height) * 0.36
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])
@@ -165,10 +165,7 @@ class ParticleVisualizer(QWidget):
         energy = min(1.0, max(self._smooth_audio, synthetic_voice) + self._state_burst * 0.35)
 
         self._draw_back_glow(painter, cx, cy, accent, energy)
-        self._draw_orbit_rings(painter, cx, cy, accent, energy)
-        self._draw_state_effects(painter, cx, cy, accent, energy)
         self._draw_core_image(painter, cx, cy, energy)
-        self._draw_front_sheen(painter, cx, cy, accent, energy)
 
         painter.end()
 
@@ -307,11 +304,6 @@ class ParticleVisualizer(QWidget):
         side = self._core_r * 2.42 * (1.0 + pulse * breathe + energy * 0.035)
         rect = QRectF(cx - side / 2, cy - side / 2, side, side)
 
-        painter.save()
-        painter.setOpacity(0.92 + min(0.08, energy * 0.08))
-        clip = QPainterPath()
-        clip.addEllipse(rect)
-        painter.setClipPath(clip)
         source_side = min(self._core_image.width(), self._core_image.height()) * 0.92
         source_rect = QRectF(
             (self._core_image.width() - source_side) / 2,
@@ -319,7 +311,52 @@ class ParticleVisualizer(QWidget):
             source_side,
             source_side,
         )
+
+        outer_clip = QPainterPath()
+        outer_clip.addEllipse(rect)
+        inner_side = side * 0.56
+        inner_rect = QRectF(cx - inner_side / 2, cy - inner_side / 2, inner_side, inner_side)
+        inner_clip = QPainterPath()
+        inner_clip.addEllipse(inner_rect)
+
+        rotation = self._t * 3.4
+
+        painter.save()
+        painter.setOpacity(0.58 + min(0.18, energy * 0.18))
+        painter.setClipPath(outer_clip.subtracted(inner_clip))
+        painter.translate(cx, cy)
+        painter.rotate(rotation)
+        painter.translate(-cx, -cy)
         painter.drawPixmap(rect, self._core_image, source_rect)
+        painter.restore()
+
+        painter.save()
+        painter.setOpacity(0.98)
+        painter.setClipPath(inner_clip)
+        painter.drawPixmap(rect, self._core_image, source_rect)
+        painter.restore()
+
+    def _draw_outer_rotation_highlight(
+        self,
+        painter: QPainter,
+        cx: float,
+        cy: float,
+        accent: tuple[int, int, int],
+        energy: float,
+    ) -> None:
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        radius = self._core_r * 1.08
+        rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
+        for idx in range(2):
+            pen = QPen(QColor(accent[0], accent[1], accent[2], int(28 + energy * 46)))
+            pen.setWidthF(1.1 + idx * 0.35)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            direction = 1 if idx == 0 else -1
+            start = int((self._t * direction * (18 + idx * 8) + idx * 180) * 16)
+            span = int((34 + energy * 20) * 16)
+            painter.drawArc(rect, start, span)
         painter.restore()
 
     def _draw_front_sheen(
