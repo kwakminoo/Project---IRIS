@@ -24,31 +24,39 @@ class _ChatInputBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        super().__init__(parent)
         self.setObjectName("ChatInputBar")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setMinimumHeight(48)
         self.setStyleSheet(
             """
             QWidget#ChatInputBar {
                 background-color: #111827;
-                border: 2px solid #475569;
-                border-radius: 10px;
+                border: none;
             }
             QWidget#ChatInputBar QLineEdit {
                 background: transparent;
                 border: none;
-                color: #ffffff;
                 padding: 8px 4px 8px 12px;
             }
             """
         )
         row = QHBoxLayout(self)
-        row.setContentsMargins(10, 6, 8, 6)
-        row.setSpacing(8)
+        row.setContentsMargins(4, 4, 6, 4)
+        row.setSpacing(4)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Iris에게 메시지를 입력하세요…")
-        self.input.setFrame(False)
+        # 입력창 자체 테두리·배경 — 다크 모드에 맞춘 독립 스타일
+        self.input.setStyleSheet(
+            """
+            QLineEdit {
+                background-color: #1a1c24;
+                color: #ffffff;
+                border: 1px solid #3f3f5f;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            """
+        )
 
         self.send_button = QPushButton("↑")
         self.send_button.setObjectName("ChatSendButton")
