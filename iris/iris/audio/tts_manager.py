@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QMetaObject, Qt, pyqtSignal, pyqtSlot
 
+from iris.audio.audio_file_fx import apply_voice_fx_to_file
 from iris.audio.audio_player import AudioPlayer
 from iris.audio.fallback_tts_engine import FallbackTTSEngine
 from iris.audio.voice_fx import apply_voice_fx
@@ -276,10 +277,33 @@ class TTSManager(QObject):
                         )
                         return
                     if ok and out_mp3.is_file() and out_mp3.stat().st_size > 0:
+                        fx_block = preset.get("fx") if self._settings.tts_enable_voice_fx else None
+                        use_fx = bool(fx_block and fx_block.get("enabled"))
+                        play_path = out_mp3
+                        if use_fx:
+                            fd_fx, tmp_fx = tempfile.mkstemp(suffix=".wav", prefix="iris_edge_fx_")
+                            os.close(fd_fx)
+                            out_fx = Path(tmp_fx)
+                            if apply_voice_fx_to_file(
+                                out_mp3,
+                                out_fx,
+                                fx_block,
+                                global_enabled=self._settings.tts_enable_voice_fx,
+                            ):
+                                try:
+                                    out_mp3.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                play_path = out_fx
+                            else:
+                                try:
+                                    out_fx.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
                         if playback_start:
                             playback_start()
                         self._speaking = True
-                        self._player.play_file.emit(token, str(out_mp3))
+                        self._player.play_file.emit(token, str(play_path))
                         return
                 except Exception:
                     try:

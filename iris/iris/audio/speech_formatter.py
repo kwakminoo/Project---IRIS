@@ -40,12 +40,16 @@ def _apply_phrase_map(text: str) -> str:
 def _soften_formal_korean(text: str) -> str:
     """남은 경어체를 과하지 않게 구어체에 가깝게."""
     t = text
-    t = re.sub(r"습니다\.", "어요.", t)
-    t = re.sub(r"습니다\b", "어요", t)
-    t = re.sub(r"입니다\.", "이에요.", t)
-    t = re.sub(r"입니다\b", "이에요", t)
     t = re.sub(r"하겠습니다\.", "할게요.", t)
     t = re.sub(r"하겠습니다\b", "할게요", t)
+    t = re.sub(r"했습니다\.", "했어요.", t)
+    t = re.sub(r"했습니다\b", "했어요", t)
+    t = re.sub(r"합니다\.", "해요.", t)
+    t = re.sub(r"합니다\b", "해요", t)
+    t = re.sub(r"됩니다\.", "돼요.", t)
+    t = re.sub(r"됩니다\b", "돼요", t)
+    t = re.sub(r"입니다\.", "이에요.", t)
+    t = re.sub(r"입니다\b", "이에요", t)
     return t
 
 
