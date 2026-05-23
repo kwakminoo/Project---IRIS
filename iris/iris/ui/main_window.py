@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import QDateTime, QEvent, Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
 from PyQt6.QtWidgets import (
     QFrame,
@@ -37,6 +37,7 @@ from iris.audio.barge_in import BargeInController
 from iris.audio.continuous_listen import ContinuousListenController
 from iris.audio.speech_formatter import format_speech, infer_speech_tone
 from iris.audio.stt_engine import SttEngine
+from iris.audio.system_sounds import SystemSoundPlayer
 from iris.audio.tts_engine import TtsEngine
 from iris.audio.tts_manager import TtsStatus
 from iris.audio.voice_gate import VoiceCommandGate
@@ -182,6 +183,7 @@ class MainWindow(QMainWindow):
         )
         self._state = StateMachine()
         self._state.state_changed.connect(self._on_state_changed)
+        self._system_sounds = SystemSoundPlayer(self)
 
         self._history: list[ChatMessage] = []
         self._llm_worker: LlmWorker | None = None
@@ -561,6 +563,7 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, s: object) -> None:
         if isinstance(s, AppState):
             self._viz.set_state(s)
+            self._system_sounds.play_state(s, QDateTime.currentMSecsSinceEpoch())
             self._status_label.setText(f"상태: {s.name}")
             push_activity_line(f"UI: app state → {s.name}.")
             self._backend_status.setText(external_backend_status_line(self._settings))
