@@ -47,14 +47,14 @@ def _env_optional_int(key: str) -> int | None:
 
 
 def _resolve_tts_provider() -> str:
-    """TTS_PROVIDER 우선, 없으면 TTS_ENGINE 레거시, 둘 다 없으면 edge."""
+    """TTS_PROVIDER 우선, 없으면 TTS_ENGINE 레거시, 둘 다 없으면 supertonic."""
     explicit = os.getenv("TTS_PROVIDER")
     if explicit is not None and explicit.strip():
         return explicit.strip().lower()
     legacy = os.getenv("TTS_ENGINE")
     if legacy is not None and legacy.strip():
         return "pyttsx3" if legacy.strip().lower() == "pyttsx3" else "edge"
-    return "edge"
+    return "supertonic"
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ class Settings:
     stt_vad_filter: bool  # False 권장: 앞단 RMS VAD와 중복 방지
     stt_beam_size: int
     stt_initial_prompt: str  # 비어 있으면 호출어 기반 자동 생성
-    # TTS: TTS_PROVIDER (xtts | edge | pyttsx3). 미설정 시 TTS_ENGINE 레거시로 추론.
+    # TTS: TTS_PROVIDER (supertonic | xtts | edge | pyttsx3). 미설정 시 TTS_ENGINE 레거시로 추론.
     tts_provider: str
     tts_fallback_provider: str
     tts_voice: str
@@ -87,6 +87,9 @@ class Settings:
     tts_enable_speech_formatter: bool
     tts_enable_voice_fx: bool
     tts_max_spoken_sentences: int
+    supertonic_voice: str
+    supertonic_language: str
+    supertonic_total_steps: int
     # XTTS-v2 (선택, requirements-tts.txt)
     xtts_model_name: str
     xtts_language: str
@@ -206,6 +209,9 @@ def load_settings(env_path: Path | None = None) -> Settings:
         tts_enable_speech_formatter=_env_bool("TTS_ENABLE_SPEECH_FORMATTER", True),
         tts_enable_voice_fx=_env_bool("TTS_ENABLE_VOICE_FX", True),
         tts_max_spoken_sentences=_env_int("TTS_MAX_SPOKEN_SENTENCES", 3),
+        supertonic_voice=os.getenv("SUPERTONIC_VOICE", "F1").strip(),
+        supertonic_language=os.getenv("SUPERTONIC_LANGUAGE", "ko").strip(),
+        supertonic_total_steps=_env_int("SUPERTONIC_TOTAL_STEPS", 8),
         xtts_model_name=os.getenv(
             "XTTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2"
         ).strip(),

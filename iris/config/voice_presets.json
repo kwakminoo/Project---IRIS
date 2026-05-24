@@ -6,9 +6,9 @@
       "enabled": true,
       "reverb": 0.045,
       "chorus": 0.08,
-      "robotic_texture": 0.56,
-      "presence": 0.10,
-      "ai_resonance": 0.20
+      "robotic_texture": 0.82,
+      "presence": 0.13,
+      "ai_resonance": 0.36
     }
   },
   "iris_jarvis": {
@@ -18,9 +18,9 @@
       "enabled": true,
       "reverb": 0.055,
       "chorus": 0.10,
-      "robotic_texture": 0.68,
-      "presence": 0.12,
-      "ai_resonance": 0.28
+      "robotic_texture": 0.88,
+      "presence": 0.14,
+      "ai_resonance": 0.42
     }
   },
   "iris_clean": {
