@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 _REFRESH_MS = 4_000   # 4초마다 썸네일 갱신
 _MAX_WINDOWS = 12
+_CAPTURE_PER_WINDOW_SEC = 2.5  # PrintWindow 무한 대기 방지
 _THUMB_W = 320        # 1열이므로 충분히 크게
 _THUMB_H = 180        # 16:9
 
@@ -132,7 +133,8 @@ class UnifiedMonitorPanel(QWidget):
         self._timer.setInterval(_REFRESH_MS)
         self._timer.timeout.connect(self._start_capture)
         self._timer.start()
-        self._start_capture()
+        # 첫 캡처는 창 표시·이벤트 루프 기동 후 — PrintWindow가 show() 중 메인 스레드를 막는 경우 완화
+        QTimer.singleShot(600, self._start_capture)
 
     # ------------------------------------------------------------------
     # public
@@ -241,7 +243,10 @@ def _capture_all_windows(sig: _CaptureSignals) -> None:
         cap: Optional[CaptureResult] = None
         # 1) PrintWindow (가려진 창 포함, hwnd 필요)
         if info.hwnd:
-            cap = capture_window_by_hwnd(info.hwnd)
+            cap = capture_window_by_hwnd(
+                info.hwnd,
+                timeout_sec=_CAPTURE_PER_WINDOW_SEC,
+            )
         # 2) 폴백: mss 화면 영역 캡처
         if cap is None and info.width > 0 and info.height > 0:
             cap = capture_region(info.left, info.top, info.width, info.height)

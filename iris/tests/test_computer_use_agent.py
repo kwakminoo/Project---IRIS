@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,6 +16,19 @@ from iris.assistant.computer_use_agent import ComputerUseAgent
 from iris.automation.action_executor import ActionExecutor
 from iris.automation.tool_types import AutomationToolResult
 from iris.storage.database import Database
+
+_FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _cu_vlm_settings(**overrides: object) -> SimpleNamespace:
+    base = {
+        "computer_use_vlm_enabled": True,
+        "computer_use_vision_model": "gemma4:26b",
+        "gemma_model_name": "gemma4:e2b",
+        "gemma_backend": "ollama",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
 class _StepQueueGemma:
@@ -43,10 +57,31 @@ class _RepeatGemma:
         return self._reply
 
 
-def _make_assistant(tmp_path: Path, gemma: object) -> IrisAssistant:
+class _VisionStepGemma(_StepQueueGemma):
+    """VLM on — chat_with_images 호출 추적."""
+
+    def __init__(self, steps: list[str]) -> None:
+        super().__init__(steps)
+        self.vision_calls: list[Sequence[ChatMessage]] = []
+
+    def chat_with_images(
+        self,
+        messages: Sequence[ChatMessage],
+        **kwargs: object,
+    ) -> tuple[str, bool]:
+        self.vision_calls.append(list(messages))
+        return self.chat(messages, **kwargs), True
+
+
+def _make_assistant(
+    tmp_path: Path,
+    gemma: object,
+    *,
+    settings: object | None = None,
+) -> IrisAssistant:
     db = Database(path=tmp_path / "cu.db")
     executor = ActionExecutor(db, {})
-    return IrisAssistant(db, executor, gemma, {})  # type: ignore[arg-type]
+    return IrisAssistant(db, executor, gemma, {}, settings=settings)  # type: ignore[arg-type]
 
 
 def test_parse_computer_use_step_valid() -> None:
@@ -277,6 +312,88 @@ def test_approval_required_sets_pending_tool(tmp_path: Path) -> None:
     assert pending is not None
     assert pending.pending_tool_name == "run_shell"
     assert pending.pending_tool_params.get("command") == "echo hi"
+
+
+def test_planner_chat_with_images_when_vlm_on(tmp_path: Path) -> None:
+    """COMPUTER_USE_VLM_ENABLED — 플래너 루프에서 chat_with_images ≥1회."""
+    gemma = _VisionStepGemma(
+        [
+            '{"tool": "step_complete", "params": {}, "reason": "완료했습니다."}',
+        ]
+    )
+    settings = _cu_vlm_settings()
+    assistant = _make_assistant(tmp_path, gemma, settings=settings)
+    registry = assistant._executor.tool_registry
+    registry.run = MagicMock(  # type: ignore[method-assign]
+        side_effect=[
+            AutomationToolResult(True, "창", "Notepad"),
+            _perceive_ok(),
+        ]
+    )
+    with patch(
+        "iris.assistant.computer_use_agent.capture_planner_screenshot",
+        return_value=(_FAKE_PNG, "640x480 via active_window"),
+    ):
+        agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+        agent.run("메모장에서 작업 확인")
+
+    assert len(gemma.vision_calls) >= 1
+    planner_msgs = gemma.vision_calls[0]
+    assert "Computer Use 플래너" in planner_msgs[0].content
+    user_msg = planner_msgs[1]
+    assert user_msg.images and len(user_msg.images) == 1
+    assert "screenshot_attached=yes" in user_msg.content
+    assert "첨부 화면이 현재 PC 상태입니다" in user_msg.content
+
+
+def test_planner_chat_only_when_vlm_off(tmp_path: Path) -> None:
+    """VLM off — 기존 chat 경로만 (vision_calls 없음)."""
+    gemma = _VisionStepGemma(
+        [
+            '{"tool": "step_complete", "params": {}, "reason": "끝."}',
+        ]
+    )
+    settings = _cu_vlm_settings(computer_use_vlm_enabled=False)
+    assistant = _make_assistant(tmp_path, gemma, settings=settings)
+    registry = assistant._executor.tool_registry
+    registry.run = MagicMock(  # type: ignore[method-assign]
+        side_effect=[
+            AutomationToolResult(True, "창", "w"),
+            _perceive_ok(),
+        ]
+    )
+    agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+    agent.run("테스트")
+
+    assert len(gemma.calls) >= 1
+    assert len(gemma.vision_calls) == 0
+    user_msg = gemma.calls[0][1]
+    assert "screenshot_attached=no" in user_msg.content
+    assert not user_msg.images
+
+
+def test_media_play_skill_skips_cu_planner(tmp_path: Path) -> None:
+    """skill_id=media_play — MediaPlaybackFlow만, CU 플래너·chat_with_images 없음."""
+    gemma = _VisionStepGemma(
+        ['{"tool": "open_url", "params": {}, "reason": "금지"}']
+    )
+    settings = _cu_vlm_settings()
+    assistant = _make_assistant(tmp_path, gemma, settings=settings)
+    registry = assistant._executor.tool_registry
+    with patch(
+        "iris.assistant.media_playback_flow.MediaPlaybackFlow.run",
+        return_value="검색 결과를 열었습니다.",
+    ) as mock_flow:
+        agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+        msg = agent.run(
+            "유튜브에서 아이유 검색",
+            slots={"skill_id": "media_play", "search_query": "아이유"},
+        )
+    assert "검색" in msg
+    mock_flow.assert_called_once()
+    assert len(gemma.vision_calls) == 0
+    planner = [c for c in gemma.calls if c and "Computer Use 플래너" in c[0].content]
+    assert len(planner) == 0
 
 
 def test_llm_unavailable_fallback(tmp_path: Path) -> None:

@@ -383,7 +383,7 @@ class TurnCoordinator:
         *,
         on_early_ack: Callable[[str], None] | None = None,
     ) -> TurnResult:
-        """CU 레인 — early_ack 후 goal/slots로 PAV 루프."""
+        """CU 레인 — early_ack 후 goal/slots로 PAV 루프 (ORCHESTRATED ≠ PC 미디어 스킬)."""
         ctx = self._assistant.ctx
         cu_goal = (routed_turn.goal or user_text).strip()
         slots = dict(routed_turn.slots)

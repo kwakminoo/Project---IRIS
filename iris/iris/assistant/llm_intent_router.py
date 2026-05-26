@@ -11,6 +11,7 @@ from iris.ai.response_parser import extract_json_object
 from iris.assistant.router_policy import RouteLane, RoutedTurn, is_multi_turn_active, resolve_route_lane
 from iris.assistant.tool_layer import is_search_intent
 from iris.core.command_router import CommandKind, classify_command
+from iris.assistant.media_completion import normalize_routed_media_slots
 from iris.core.context_manager import DialogueContext
 
 INTENT_ROUTER_SYSTEM = """당신은 Iris Intent Router입니다. 사용자 발화를 분석해 JSON만 출력하세요.
@@ -127,10 +128,14 @@ def parse_llm_intent_json(raw: Mapping[str, Any], user_text: str) -> RoutedInten
     clar = raw.get("clarification")
     clarification = clar.strip() if isinstance(clar, str) and clar.strip() else None
 
+    slots = normalize_routed_media_slots(_parse_slots(raw.get("slots")))
+    if task_type_str == "media_play":
+        slots.setdefault("task_type", "media_play")
+
     return RoutedIntent(
         lane=lane,
         goal=goal,
-        slots=_parse_slots(raw.get("slots")),
+        slots=slots,
         task_type=task_type_str,
         risk_hint=risk_hint,
         needs_user_confirm=needs_confirm,

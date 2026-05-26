@@ -66,6 +66,7 @@ class Settings:
     gemma_model_name: str
     ai_model_names: tuple[str, ...]
     gemma_backend: str  # ollama | openai_compatible
+    llm_timeout_seconds: float
     use_local_llm: bool
     use_whisper: bool
     stt_model: str
@@ -141,10 +142,14 @@ class Settings:
     # Computer Use Phase B: UIA / VLM 하이브리드 인식
     computer_use_uia_enabled: bool
     computer_use_vlm_enabled: bool
+    computer_use_vision_model: str  # 비우면 gemma_model_name
     # Phase 3: 멀티턴 프리셋 매칭에 Gemma 1회 (실패 시 modes/* regex 폴백)
     phase3_mode_preset_llm: bool
     # Ollama think: off | default | on (IRIS_THINKING_MODE)
     thinking_mode: str
+    # Media Ranker — 창 스크린샷 멀티모달 (DB·디스크 저장 없음, HTTP body만)
+    media_ranker_use_screenshot: bool
+    media_ranker_vision_model: str  # 비어 있으면 gemma_model_name
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -181,6 +186,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         gemma_model_name=model_name,
         ai_model_names=model_names or (model_name,),
         gemma_backend=os.getenv("GEMMA_BACKEND", "ollama").strip().lower(),
+        llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 60.0),
         use_local_llm=_env_bool("USE_LOCAL_LLM", True),
         use_whisper=_env_bool("USE_WHISPER", True),
         stt_model=os.getenv("STT_MODEL", "medium"),
@@ -250,10 +256,17 @@ def load_settings(env_path: Path | None = None) -> Settings:
         default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),
         computer_use_uia_enabled=_env_bool("COMPUTER_USE_UIA_ENABLED", True),
         computer_use_vlm_enabled=_env_bool("COMPUTER_USE_VLM_ENABLED", False),
+        computer_use_vision_model=os.getenv("COMPUTER_USE_VISION_MODEL", "").strip(),
         phase3_mode_preset_llm=_env_bool("IRIS_PHASE3_MODE_PRESET_LLM", True),
         thinking_mode=_normalize_thinking_mode_env(
             os.getenv("IRIS_THINKING_MODE", "default")
         ),
+        media_ranker_use_screenshot=_env_bool(
+            "IRIS_MEDIA_RANKER_USE_SCREENSHOT", True
+        ),
+        media_ranker_vision_model=os.getenv(
+            "IRIS_MEDIA_RANKER_VISION_MODEL", ""
+        ).strip(),
     )
 
 

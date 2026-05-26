@@ -49,12 +49,14 @@ def build_perception_observation(ctx: AutomationToolContext) -> PerceptionObserv
 
     focus_hint = str(ctx.params.get("focus_hint") or "").strip()
     title_sub = str(ctx.params.get("window_title_sub") or "").strip()
-    active = window_controller.get_active_window_title()
-    if not title_sub:
-        title_sub = active or focus_hint
+    prefer_window_only = bool(ctx.params.get("prefer_window_only"))
 
     if focus_hint:
         window_controller.focus_and_place(focus_hint, 40, 40, 1100, 720)
+
+    active = window_controller.get_active_window_title()
+    if not title_sub:
+        title_sub = active or focus_hint
 
     obs = PerceptionObservation(active_window=active or title_sub)
     uia_enabled = bool(getattr(settings, "computer_use_uia_enabled", True))
@@ -69,6 +71,10 @@ def build_perception_observation(ctx: AutomationToolContext) -> PerceptionObserv
     if uia_json and not uia_reader.is_uia_summary_sparse(uia_json):
         obs.summary = uia_json
         obs.perception_source = "uia"
+    elif prefer_window_only:
+        # Media play: 전체 화면 OCR 폴백 생략 (Iris/타 창 텍스트 혼입 방지)
+        obs.summary = uia_json or ""
+        obs.perception_source = "uia" if uia_json else "unknown"
     else:
         ok, msg, ocr_summary = read_screen_summary_text(settings)
         if ok:

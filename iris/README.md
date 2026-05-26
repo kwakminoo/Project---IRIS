@@ -93,6 +93,11 @@ cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\IRIS\iris"
 - TTS 재생·처리 중에는 마이크 수집을 잠시 멈춰 스피커 에코를 줄입니다.
 - Barge-in(TTS 중 끊기)은 기본 꺼짐 (`BARGE_IN_ENABLED=false`)
 
+## Chrome 확장 (YouTube DOM 재생)
+
+유튜브에서 **검색 결과 탭**을 연 뒤, 확장 아이콘 → **현재 탭 허용**을 눌러 `allowedTabIds`에 등록하세요.
+Iris가 검색 URL을 연 뒤 확장이 `/watch?v=` 링크·제목만 수집하면 DOM 경로로 재생합니다 (미등록 시 UIA 클릭 폴백).
+
 ## 검증
 
 ```powershell

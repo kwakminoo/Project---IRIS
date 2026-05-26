@@ -25,6 +25,37 @@ function sensitiveUrl(url) {
   );
 }
 
+/** YouTube 검색 결과에서 watch 링크·제목만 수집 (최대 8, Shorts·광고 제외). */
+function extractYoutubeSearchResults() {
+  const out = [];
+  const seen = new Set();
+  const selectors = [
+    'a#video-title[href*="watch?v="]',
+    'ytd-video-renderer a[href*="watch?v="]',
+    'a.ytd-video-renderer[href*="watch?v="]',
+  ];
+  const blocked = /\/shorts\/|googleads|doubleclick|\/pagead/i;
+
+  function pushCandidate(title, href) {
+    const t = (title || "").trim().slice(0, 240);
+    let url = (href || "").trim();
+    if (!t || !url || blocked.test(url)) return;
+    if (url.startsWith("/")) url = "https://www.youtube.com" + url;
+    if (!url.includes("watch?v=")) return;
+    if (seen.has(url)) return;
+    seen.add(url);
+    out.push({ title: t, url });
+  }
+
+  for (const sel of selectors) {
+    document.querySelectorAll(sel).forEach((a) => {
+      pushCandidate(a.textContent || a.innerText || a.getAttribute("title"), a.href || a.getAttribute("href"));
+    });
+    if (out.length >= 8) break;
+  }
+  return out.slice(0, 8);
+}
+
 async function pushTab(tabId) {
   const { allowed, port, token } = await loadConfig();
   if (!allowed.has(tabId)) return;
@@ -38,6 +69,17 @@ async function pushTab(tabId) {
     },
   }).catch(() => [{ result: "" }]);
 
+  let youtubeSearchResults = [];
+  if (/youtube\.com\/results/i.test(tab.url)) {
+    const [{ result: yt }] = await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        func: extractYoutubeSearchResults,
+      })
+      .catch(() => [{ result: [] }]);
+    youtubeSearchResults = Array.isArray(yt) ? yt : [];
+  }
+
   const payload = {
     tabId,
     title: tab.title || "",
@@ -45,6 +87,9 @@ async function pushTab(tabId) {
     visibleText: result || "",
     timestamp: Date.now(),
   };
+  if (youtubeSearchResults.length > 0) {
+    payload.youtubeSearchResults = youtubeSearchResults;
+  }
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
   await fetch(`http://127.0.0.1:${port}/ingest`, {
@@ -60,6 +105,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   for (const id of allowed) {
     await pushTab(id);
   }
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete" || !tab?.url) return;
+  if (!/youtube\.com\/results/i.test(tab.url)) return;
+  const { allowed } = await loadConfig();
+  if (!allowed.has(tabId)) return;
+  await pushTab(tabId);
 });
 
 chrome.runtime.onInstalled.addListener(() => {

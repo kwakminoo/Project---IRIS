@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -76,13 +77,8 @@ def capture_region(left: int, top: int, width: int, height: int) -> Optional[Cap
         return None
 
 
-def capture_window_by_hwnd(hwnd: int) -> Optional[CaptureResult]:
-    """HWND 기반 창 캡처 (Windows ``PrintWindow`` API).
-
-    - 가려진 창도 캡처 가능 (mss는 화면에 보이는 영역만 캡처)
-    - ``PW_RENDERFULLCONTENT (0x2)`` 사용 → Windows 8.1+ 에서 Chrome/Electron 등도 캡처
-    - 실패 시 None → 호출 측에서 ``capture_region`` 으로 폴백 권장
-    """
+def _capture_window_by_hwnd_impl(hwnd: int) -> Optional[CaptureResult]:
+    """PrintWindow 실제 호출 (별도 스레드에서 실행 가능)."""
     if sys.platform != "win32":
         return None
     if hwnd <= 0:
@@ -143,6 +139,49 @@ def capture_window_by_hwnd(hwnd: int) -> Optional[CaptureResult]:
                 win32gui.ReleaseDC(hwnd, hwndDC)
         except Exception:
             pass
+
+
+def capture_window_by_hwnd(
+    hwnd: int,
+    *,
+    timeout_sec: float = 2.5,
+) -> Optional[CaptureResult]:
+    """HWND 기반 창 캡처 (Windows ``PrintWindow`` API).
+
+    - 가려진 창도 캡처 가능 (mss는 화면에 보이는 영역만 캡처)
+    - ``PW_RENDERFULLCONTENT (0x2)`` 사용 → Windows 8.1+ 에서 Chrome/Electron 등도 캡처
+    - 일부 HWND에서 PrintWindow가 무한 대기할 수 있어 timeout_sec로 스레드 join 제한
+    - 실패 시 None → 호출 측에서 ``capture_region`` 으로 폴백 권장
+    """
+    if timeout_sec <= 0:
+        return _capture_window_by_hwnd_impl(hwnd)
+
+    holder: list[Optional[CaptureResult]] = [None]
+
+    def _run() -> None:
+        holder[0] = _capture_window_by_hwnd_impl(hwnd)
+
+    worker = threading.Thread(target=_run, name="iris-printwindow", daemon=True)
+    worker.start()
+    worker.join(timeout=timeout_sec)
+    if worker.is_alive():
+        return None
+    return holder[0]
+
+
+def capture_result_to_png_bytes(cap: CaptureResult) -> bytes | None:
+    """CaptureResult → PNG bytes (Ranker 멀티모달 전송용, 디스크 저장 없음)."""
+    try:
+        import io
+
+        from PIL import Image  # type: ignore
+
+        img = Image.frombytes("RGB", (cap.width, cap.height), cap.rgb_bytes)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
 
 
 def maybe_save_debug_screenshot(settings: Settings, cap: CaptureResult, path: Path) -> None:

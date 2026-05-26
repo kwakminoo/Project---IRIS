@@ -20,6 +20,7 @@ from iris.assistant.tool_layer import is_search_intent
 from iris.config.app_index import resolve_app_candidates_for_llm
 from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind, legacy_classify_command
+from iris.assistant.media_completion import normalize_routed_media_slots
 from iris.core.context_manager import DialogueContext
 
 if TYPE_CHECKING:
@@ -50,6 +51,8 @@ pending_cu가 있으면 사용자 답을 approve_followup|reject_followup|clarif
   - play: 틀어줘·재생·들려줘·노래/영상 틀어 → 실제 재생(시청/재생 UI)까지가 목표.
 - slots.search_query: 곡명·영상명·채널명·키워드·짧은 구문만. "유튜브에서", "틀어줘", "검색해줘" 등 동사·플랫폼 접두어 제외. STT 오타·표기(예: 치챗/칈챗)는 사용자가 말한 그대로(자동 교정 금지).
 - search_query가 비면 needs_user_confirm=true 또는 clarification에 무엇을 찾/틀지 질문, goal에도 질문 포함.
+- slots.success_criteria (선택): search → search_results_visible, play → playback_confirmed. URL만 열기는 play/search 완료가 아님.
+- slots.skill_id: media_action+search_query가 있으면 media_play (선택, 없으면 코드가 유도).
 - slots.user_request_summary: 사용자 원문 요약(선택).
 - 재생(play)이면 goal에 "…을 재생한다"까지 명시.
 
@@ -67,6 +70,8 @@ JSON 스키마(엄격):
     "platform_hint": "youtube|spotify|netflix|browser|unknown",
     "media_action": "search|play",
     "search_query": "",
+    "success_criteria": "search_results_visible|playback_confirmed",
+    "skill_id": "media_play",
     "user_request_summary": ""
   },
   "risk_hint": "low|medium|high|critical",
@@ -87,34 +92,9 @@ _LANE_MAP: dict[str, RouteLane] = {
     "multi_turn": RouteLane.MULTI_TURN,
 }
 
-_PLATFORM_HINTS = frozenset({"youtube", "spotify", "netflix", "browser", "unknown"})
-_MEDIA_ACTIONS = frozenset({"search", "play"})
-
-
 def _normalize_media_slots(slots: dict[str, Any]) -> dict[str, Any]:
-    """LLM slots 내 미디어 필드만 스키마 정규화(사용자 발화 키워드 분류 아님)."""
-    out = dict(slots)
-    ph_raw = out.get("platform_hint")
-    if ph_raw is not None:
-        ph = str(ph_raw).strip().lower()
-        out["platform_hint"] = ph if ph in _PLATFORM_HINTS else "unknown"
-
-    ma_raw = out.get("media_action")
-    if ma_raw is not None:
-        ma = str(ma_raw).strip().lower()
-        if ma in _MEDIA_ACTIONS:
-            out["media_action"] = ma
-        else:
-            out.pop("media_action", None)
-
-    sq_raw = out.get("search_query")
-    if isinstance(sq_raw, str):
-        sq = sq_raw.strip()
-        if sq:
-            out["search_query"] = sq
-        else:
-            out.pop("search_query", None)
-    return out
+    """LLM slots 미디어 필드 정규화 — media_completion.normalize_routed_media_slots 위임."""
+    return normalize_routed_media_slots(slots)
 
 
 _INTENT_MODE_KIND: dict[str, CommandKind] = {
@@ -270,6 +250,7 @@ def _payload_to_routed_turn(
     slots = dict(payload.slots)
     if payload.task_type:
         slots.setdefault("task_type", payload.task_type)
+    slots = normalize_routed_media_slots(slots)
 
     intent = payload.intent.strip().lower()
     lane = payload.lane
@@ -386,9 +367,15 @@ def route_user_turn(
     if recent_turns:
         recent_block = "recent_turns=" + json.dumps(recent_turns[-4:], ensure_ascii=False)
 
+    hint_line = ""
+    hint_raw = ctx.slots.get("last_execution_hint")
+    if isinstance(hint_raw, str) and hint_raw.strip():
+        hint_line = f"last_execution_hint={hint_raw.strip()[:80]!r}\n"
+
     user_block = (
         f"user_text={text!r}\n"
         f"{_build_dialogue_context_block(ctx)}\n"
+        f"{hint_line}"
         f"app_catalog={catalog_json}\n"
         f"{recent_block}\n"
         "risk_policy: critical 작업은 needs_user_confirm=true"

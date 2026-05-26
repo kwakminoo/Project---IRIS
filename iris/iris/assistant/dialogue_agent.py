@@ -60,18 +60,20 @@ class DialogueAgent:
         disp_raw = slot.get("display_name")
         if isinstance(disp_raw, str) and disp_raw.strip():
             return f"{disp_raw.strip()} 관련 작업을 진행할게요."
-        # Unified Router 미디어 슬롯 — media_action은 LLM 분류 결과만 사용
+        # Unified Router 미디어 — success_criteria와 일치하는 ack (완료 과장 금지)
         media_action = str(slot.get("media_action") or "").strip().lower()
         if media_action in {"search", "play"}:
             sq_raw = slot.get("search_query") or slot.get("query") or slot.get("title")
             q = sq_raw.strip()[:40] if isinstance(sq_raw, str) and sq_raw.strip() else None
-            if media_action == "search":
+            sc = str(slot.get("success_criteria") or "").strip().lower()
+            if sc in {"", "search_results_visible"} and media_action == "search":
                 if q:
                     return f"'{q}' 검색 결과를 열게요."
                 return "검색 결과를 열게요."
-            if q:
-                return f"'{q}' 검색 후 재생까지 진행할게요."
-            return "검색 후 재생까지 진행할게요."
+            if sc in {"", "playback_confirmed", "play_confirmed"} or media_action == "play":
+                if q:
+                    return f"'{q}' 찾아서 재생을 시도할게요."
+                return "찾아서 재생을 시도할게요."
         g = (goal or "").strip()
         hint = " ".join(
             str(slot.get(k) or "")
