@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
 from PyQt6.QtWidgets import (
     QFrame,
@@ -50,6 +50,7 @@ from iris.memory.memory_manager import commit_turn_pair, strip_iris_prefix
 from iris.storage.database import Database
 from iris.ui.chat_panel import ChatPanel
 from iris.ui.drag_tab import DragTab
+from iris.ui.frameless_chrome import FramelessShell, center_on_screen
 from iris.ui.live_activity_panel import LiveActivityPanel, UiActivityRelay
 from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
@@ -102,6 +103,11 @@ def _apply_dark_theme(w: QWidget) -> None:
             margin: 8px 2px;
             border-radius: 2px;
         }
+        QPushButton#WinCtrl {
+            background-color: #1e293b; padding: 2px 0; min-height: 0;
+        }
+        QPushButton#WinCtrl:hover { background-color: #334155; }
+        QPushButton#WinCtrl:pressed { background-color: #475569; }
         QLabel#DragTitle { font-weight: 700; font-size: 16px; color: #c4b5fd; }
         QLabel#PanelTitle { font-weight: 600; color: #93c5fd; }
         QLabel#ModelStatus { color: #a5b4fc; font-weight: 600; }
@@ -129,7 +135,10 @@ class MainWindow(QMainWindow):
             register_target=lambda k, h: self._targets.register(k, h),
             settings=self._settings,
         )
-        self._gemma = GemmaClient(self._settings)
+        self._gemma = GemmaClient(
+            self._settings,
+            timeout_sec=self._settings.llm_timeout_seconds,
+        )
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
@@ -180,6 +189,8 @@ class MainWindow(QMainWindow):
 
         self._drag = DragTab(self)
         self._drag.settings_clicked.connect(self._open_settings_dialog)
+        self._drag.minimize_clicked.connect(self.showMinimized)
+        self._drag.maximize_clicked.connect(self._toggle_maximize)
         root.addWidget(self._drag)
 
         status_header = QFrame()
@@ -292,14 +303,12 @@ class MainWindow(QMainWindow):
 
         root.addWidget(splitter, 1)
 
-        self.setCentralWidget(central)
+        shell = FramelessShell(self)
+        shell.set_center_widget(central)
+        self.setCentralWidget(shell)
         _apply_dark_theme(self)
 
         self._chat.send_clicked.connect(lambda t: self._on_user_text(t, from_voice=False))
-        if self._settings.always_listen_enabled:
-            self._continuous_listen.start()
-            self._notes.add_note("상시 음성 대기: 말씀하시면 인식합니다.")
-        self._warmup_stt_async()
 
         self._monitor_mgr = MonitorManager(
             self._settings,
@@ -310,16 +319,42 @@ class MainWindow(QMainWindow):
             notification_policy=self._notif_policy,
             parent=self,
         )
+        # YouTube DOM play 경로 — MediaPlaybackFlow가 허용 탭 결과를 읽음
+        self._assistant._browser_monitor = self._browser  # noqa: SLF001
         self._monitor_mgr.alert_emitted.connect(self._on_monitor_alert)
         self._monitor_mgr.targets_changed.connect(self._on_targets_changed)
-        self._monitor_mgr.start()
 
         act_quit = QAction("종료", self)
         act_quit.triggered.connect(self.close)
         self.addAction(act_quit)
 
-        # 전체화면(최대화)으로 시작
-        self.showMaximized()
+        # 기본 크기(리사이즈 가능) — 전체화면은 타이틀바 □ 버튼으로 전환
+        self.resize(1280, 800)
+        center_on_screen(self)
+        # 무거운 백그라운드 서비스는 창 표시 후 — show()·첫 페인트 블로킹 완화
+        QTimer.singleShot(0, self._deferred_startup_services)
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self._drag.set_maximized(self.isMaximized())
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._drag.set_maximized(self.isMaximized())
+        super().changeEvent(event)
+
+    def _deferred_startup_services(self) -> None:
+        """창이 뜬 뒤 상시 음성·모니터·STT 워밍업 시작."""
+        if self._settings.always_listen_enabled:
+            self._continuous_listen.start()
+            self._notes.add_note("상시 음성 대기: 말씀하시면 인식합니다.")
+        self._warmup_stt_async()
+        self._monitor_mgr.start()
+        self._state.reset_to_idle()
+        self._viz.set_state(AppState.IDLE)
 
     def _warmup_stt_async(self) -> None:
         """Whisper 모델 선로딩 — 첫 음성 인식 지연 완화."""
@@ -403,7 +438,10 @@ class MainWindow(QMainWindow):
     def _apply_runtime_settings(self) -> None:
         """저장된 설정을 현재 세션에 반영한다."""
         self._settings = load_settings(self._env_path)
-        self._gemma = GemmaClient(self._settings)
+        self._gemma = GemmaClient(
+            self._settings,
+            timeout_sec=self._settings.llm_timeout_seconds,
+        )
         self._refresh_app_paths()
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings

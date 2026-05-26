@@ -22,6 +22,7 @@ class BrowserTabPayload:
     url: str
     visible_text: str
     timestamp: float = field(default_factory=time.time)
+    youtube_search_results: list[tuple[str, str]] = field(default_factory=list)
 
 
 class BrowserTabMonitor:
@@ -31,6 +32,7 @@ class BrowserTabMonitor:
         self._max_text = max_text
         self._lock = threading.Lock()
         self._by_tab: Dict[int, BrowserTabPayload] = {}
+        self._youtube_by_search_key: Dict[str, list[tuple[str, str]]] = {}
 
     def ingest(
         self,
@@ -38,19 +40,62 @@ class BrowserTabMonitor:
         title: str,
         url: str,
         visible_text: str,
+        *,
+        youtube_search_results: list[tuple[str, str]] | None = None,
     ) -> bool:
         """민감 URL이면 False."""
         if _SENSITIVE_URL.search(url or ""):
             return False
         vt = (visible_text or "")[: self._max_text]
+        yt_pairs = list(youtube_search_results or [])[:8]
         with self._lock:
             self._by_tab[tab_id] = BrowserTabPayload(
                 tab_id=tab_id,
                 title=title or "",
                 url=url or "",
                 visible_text=vt,
+                youtube_search_results=yt_pairs,
             )
+            if yt_pairs and "youtube.com/results" in (url or ""):
+                key = self._search_url_key(url)
+                if key:
+                    self._youtube_by_search_key[key] = yt_pairs
         return True
+
+    @staticmethod
+    def _search_url_key(url: str) -> str:
+        """search_query 기준 매칭 키 (쿼리 순서 무관)."""
+        from urllib.parse import parse_qs, urlparse
+
+        try:
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            q = (qs.get("search_query") or [""])[0].strip().lower()
+            if q:
+                return q
+        except Exception:
+            pass
+        base = (url or "").split("#")[0].split("?")[0].rstrip("/").lower()
+        return base
+
+    def youtube_results_for_search(self, search_url: str) -> list[tuple[str, str]] | None:
+        """YouTube 검색 URL과 매칭되는 DOM 결과 (제목, watch URL)."""
+        key = self._search_url_key(search_url)
+        with self._lock:
+            if key and key in self._youtube_by_search_key:
+                return list(self._youtube_by_search_key[key])
+            for p in self._by_tab.values():
+                if not p.youtube_search_results:
+                    continue
+                if search_url and p.url and (
+                    p.url == search_url
+                    or p.url.startswith(search_url.split("#")[0])
+                    or search_url.startswith(p.url.split("#")[0])
+                ):
+                    return list(p.youtube_search_results)
+                if key and self._search_url_key(p.url) == key:
+                    return list(p.youtube_search_results)
+        return None
 
     def snapshot_lines(self) -> List[str]:
         """가상 타깃용 텍스트 라인."""

@@ -14,6 +14,8 @@ def main() -> None:
     app.setApplicationName("Iris")
     win = MainWindow()
     win.show()
+    # 창을 먼저 그린 뒤 deferred_startup_services(QTimer)가 돌도록 한 틱 양보
+    app.processEvents()
     sys.exit(app.exec())
 
 

@@ -79,8 +79,11 @@ def _settings(uia: bool = True, vlm: bool = False) -> Settings:
         default_web_browser="chrome",
         computer_use_uia_enabled=uia,
         computer_use_vlm_enabled=vlm,
+        computer_use_vision_model="",
         phase3_mode_preset_llm=True,
         thinking_mode="default",
+        media_ranker_use_screenshot=True,
+        media_ranker_vision_model="",
     )
 
 

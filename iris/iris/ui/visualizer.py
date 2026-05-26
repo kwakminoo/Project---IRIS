@@ -1,4 +1,4 @@
-"""Iris 상태 비주얼라이저 — 파티클 코어를 감싼 얇은 래퍼."""
+"""Iris 상태 비주얼라이저 — 구체 코어를 감싼 얇은 래퍼."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from iris.ui.particle_visualizer import ParticleVisualizer
 class Visualizer(QWidget):
     """
     MainWindow가 기대하는 API(set_state(AppState), set_mic_level)를 유지하고
-    실제 렌더링은 독립 컴포넌트 ParticleVisualizer에 위임한다.
+    실제 렌더링은 구체 코어 컴포넌트에 위임한다.
     """
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:

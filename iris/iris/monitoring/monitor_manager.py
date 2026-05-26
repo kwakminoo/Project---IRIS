@@ -92,7 +92,25 @@ class MonitorManager(QObject):
             vtext = str(data.get("visibleText") or data.get("visible_text") or "")
             if tab_id <= 0:
                 return
-            if self._browser.ingest(tab_id, title, url, vtext):
+            yt_raw = data.get("youtubeSearchResults") or data.get(
+                "youtube_search_results"
+            )
+            yt_pairs: list[tuple[str, str]] = []
+            if isinstance(yt_raw, list):
+                for item in yt_raw[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    t = str(item.get("title") or "").strip()
+                    u = str(item.get("url") or item.get("href") or "").strip()
+                    if t and u:
+                        yt_pairs.append((t[:240], u[:500]))
+            if self._browser.ingest(
+                tab_id,
+                title,
+                url,
+                vtext,
+                youtube_search_results=yt_pairs or None,
+            ):
                 self._db.upsert_browser_tab_target(url, title)
 
         try:

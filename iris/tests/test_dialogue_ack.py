@@ -47,7 +47,7 @@ def test_cu_early_ack_media_play() -> None:
             "search_query": "치챗",
         },
     )
-    assert "'치챗' 검색 후 재생까지 진행할게요." == ack
+    assert "'치챗' 찾아서 재생을 시도할게요." == ack
 
 
 def test_build_user_visible_skips_ack_when_early_ack_shown() -> None:

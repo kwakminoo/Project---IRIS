@@ -25,9 +25,16 @@ class Database:
         self.path = path or default_db_path()
         # UI·AgentWorker·모니터·HTTP 스레드가 동일 연결을 쓰므로 직렬화
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        # timeout/busy_timeout — 좀비 Iris 프로세스가 DB를 잡고 있을 때 무한 대기 방지
+        self._conn = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            timeout=15.0,
+        )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=15000")
             self._migrate_legacy_actions()
             self._init_schema()
 

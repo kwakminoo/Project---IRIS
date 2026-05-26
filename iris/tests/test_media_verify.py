@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ from iris.assistant.agent_adapter import IrisAssistant
 from iris.assistant.computer_use_agent import ComputerUseAgent
 from iris.assistant.media_verify import (
     mechanical_play_achieved,
+    media_pre_rank_ready,
     play_step_complete_allowed,
 )
 from iris.automation.action_executor import ActionExecutor
@@ -23,6 +25,35 @@ def test_mechanical_play_youtube_watch_and_shorts() -> None:
         "youtube", "perceive | https://www.youtube.com/watch?v=abc"
     )
     assert mechanical_play_achieved("youtube", "https://www.youtube.com/shorts/xyz")
+
+
+def test_media_pre_rank_ready_url_only_with_candidates() -> None:
+    """URL+search_query만 있어도 필터 후보≥1이면 Ranker 진입."""
+    url = "https://www.youtube.com/results?search_query=치챗"
+    blob = json.dumps(
+        {"active_window": "YouTube - Chrome", "summary": url},
+        ensure_ascii=False,
+    )
+    assert media_pre_rank_ready("youtube", "치챗", blob, ["치챗 - 공식 MV"])
+
+
+def test_media_pre_rank_ready_rejects_url_only_no_candidates() -> None:
+    url = "https://www.youtube.com/results?search_query=치챗"
+    blob = json.dumps(
+        {"active_window": "YouTube - Chrome", "summary": url},
+        ensure_ascii=False,
+    )
+    assert not media_pre_rank_ready("youtube", "치챗", blob, [])
+
+
+def test_media_pre_rank_ready_rejects_iris_active_with_candidates() -> None:
+    blob = json.dumps(
+        {"active_window": "Iris", "summary": "some results"},
+        ensure_ascii=False,
+    )
+    assert not media_pre_rank_ready(
+        "youtube", "아이유", blob, ["아이유 - 라일락"]
+    )
 
 
 def test_mechanical_play_rejects_search_results_only() -> None:

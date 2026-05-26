@@ -1,13 +1,26 @@
 """미디어 검색·재생 고정 단계 플로우 — 의도·선택·완료 판단은 LLM, URL·검증 게이트는 코드."""
+
 from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
+
 from iris.ai.gemma_client import FALLBACK_KO, ChatMessage
 from iris.ai.response_parser import extract_json_object
 from iris.ai.thinking_policy import LlmPurpose
 from iris.assistant.computer_use_agent import USER_QUESTION_PREFIX
+from iris.assistant.media_completion import (
+    MediaExecutionPhase,
+    MediaSuccessCriteria,
+    clear_last_execution_hint,
+    criteria_satisfied,
+    criteria_value_from_slots,
+    derive_success_criteria as resolve_media_contract,
+    set_last_execution_hint,
+)
 from iris.assistant.media_verify import (
     _MAX_MECHANICAL_PERCEIVE_RETRY,
     format_media_verify_ok,
@@ -15,102 +28,706 @@ from iris.assistant.media_verify import (
     mechanical_search_achieved,
     verify_media_with_llm_retries,
 )
+from iris.automation import uia_reader, window_controller
+from iris.automation.window_controller import WindowInfo
 from iris.automation.media_urls import build_media_open_url
 from iris.automation.tool_types import AutomationToolResult
+from iris.automation.youtube_dom import (
+    YoutubeWatchCandidate,
+    extract_video_id,
+    parse_youtube_search_results,
+    pick_watch_url,
+)
+from iris.config.settings import Settings
 from iris.core.activity_sink import push_activity_line
+from iris.monitoring import ocr_engine, screen_capture
+
 if TYPE_CHECKING:
     from iris.assistant.computer_use_agent import ComputerUseAgent
+
+# play 경로: 의도적 sleep 없음 — perceive 재시도만으로 로딩 흡수
+_PLAY_CANDIDATE_MAX = 5
+_RANKER_AUTO_PLAY_MIN_CONFIDENCE = 0.45
+_PERCEIVE_LOAD_MAX_RETRIES = 3
+_YOUTUBE_DOM_POLL_RETRIES = 4
+_CANDIDATE_NAME_MAX_LEN = 240
+_PERCEIVE_DETAIL_MAX = 3500
+_PERCEIVE_MESSAGE_MAX = 1600
+_CANDIDATE_MIN_TOKEN_OVERLAP = 0.2
+_BROWSER_TITLE_SUBS = ("Chrome", "Microsoft Edge", "Edge", "Firefox")
+
 MEDIA_RESULT_RANKER_SYSTEM = """당신은 Iris Media Result Ranker입니다.
-검색 결과 후보 제목 목록 중 사용자 goal과 search_query에 가장 부합하는 항목 하나를 고르세요.
+첨부 스크린샷이 **정본**입니다. candidates는 보조 힌트(0번=맨 위)입니다.
 규칙:
-- 후보 목록에 실제로 있는 문자열과 동일한 pick_name만 선택 (자동 교정·번역 금지).
-- 적합한 항목이 없으면 pick_name은 null, reason에 ask_user 권고(한국어).
-- JSON만 출력: {"pick_name": "문자열 또는 null", "confidence": 0.0~1.0, "reason": "한국어"}
+- 스크린샷에서 검색 결과 영상 제목을 확인하고, 클릭할 항목을 고르세요.
+- pick_name: uia_click에 쓸 문자열. **가능하면 candidates[pick_index]와 완전히 동일**하게.
+- pick_name이 candidates에 없으면 스크린샷에서 읽은 제목을 넣되, 불확실하면 pick_index=0·pick_name=candidates[0]을 우선하세요.
+- STT 오타(예: 알레프 칫챗 ↔ Aleph, Chit Chat)를 허용합니다. 관련 영상이 보이면 pick을 null로 두지 마세요.
+- 사용자에게 고르게 하지 마세요. 가장 유력한 항목을 스스로 선택합니다.
+- pick_index: candidates의 0-based 인덱스. 반드시 후보 범위 안의 정수.
+- 제목이 검색어와 조금 다르도(띄어쓰기·부제·가수명) 의미상 같으면 선택하세요.
+- Shorts·커버·라이브 중 원곡·공식 뮤직비디오가 더 맞으면 그쪽을 우선하세요.
+- 후보가 전혀 무관하고 스크린샷에도 해당 영상이 없을 때만 pick_index·pick_name을 null.
+- JSON만 출력: {"pick_index": 0, "pick_name": "문자열 또는 null", "confidence": 0.0~1.0, "reason": "한국어"}
 """
-_WINDOW_TITLE_SUB: dict[str, str] = {
-    "youtube": "YouTube",
-    "spotify": "Spotify",
-    "netflix": "Netflix",
-    "browser": "Chrome",
-    "unknown": "Chrome",
-}
+
+_RANK_LOG_JSON_MAX = 800
+_VIDEO_TITLE_MIN_LEN = 8
+_VIDEO_TITLE_MAX_LEN = 240
+
+# YouTube 제목 필터 — UI·메타 라벨 제외 (테스트로 고정)
+_VIDEO_TITLE_JUNK_SUBSTRINGS = (
+    "조회수",
+    "구독",
+    "만회",
+    "천회",
+    "전에",
+    "시청",
+    "mix ·",
+    "mix·",
+    "재생 목록",
+    "playlist",
+)
+_VIDEO_TITLE_JUNK_EXACT = frozenset(
+    {
+        "home",
+        "search",
+        "filter",
+        "filters",
+        "로그인",
+        "premium",
+        "youtube",
+        "홈",
+        "검색",
+        "탐색",
+    }
+)
+_SYMBOLS_ONLY_RE = re.compile(r"^[\d\s\W_]+$", re.UNICODE)
+
+@dataclass(frozen=True)
+class MediaTarget:
+    """플랫폼별 perceive·클릭 대상 창."""
+
+    window_title_sub: str
+    focus_before_perceive: bool = True
+    url_domain_hint: str | None = None
+    alt_title_subs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolvedMediaWindow:
+    """open_url 직후 화면 기준으로 고른 미디어 창."""
+
+    hwnd: int
+    title_sub: str
+    match_reason: str
+
+
+_IDE_TITLE_PENALTY = ("iris", "cursor", "vscode", "visual studio", "pycharm", "agent")
+
+
+def resolve_media_target(platform_hint: str) -> MediaTarget:
+    """platform_hint → 타깃 창·URL 검증 힌트."""
+    ph = (platform_hint or "unknown").strip().lower()
+    if ph == "youtube":
+        return MediaTarget("YouTube", url_domain_hint="youtube.com")
+    if ph == "netflix":
+        return MediaTarget("Netflix", url_domain_hint="netflix.com")
+    if ph == "spotify":
+        return MediaTarget("Spotify", url_domain_hint="open.spotify.com")
+    if ph in {"browser", "unknown"}:
+        return MediaTarget(
+            _BROWSER_TITLE_SUBS[0],
+            url_domain_hint=None,
+            alt_title_subs=_BROWSER_TITLE_SUBS,
+        )
+    return MediaTarget(ph.capitalize() or "Chrome", alt_title_subs=_BROWSER_TITLE_SUBS)
+
+# 검색 결과가 아닌 UI 라벨(후보 제외)
+_UI_JUNK_SUBSTRINGS = (
+    "home",
+    "search",
+    "sign in",
+    "로그인",
+    "구독",
+    "subscribe",
+    "skip",
+    "menu",
+    "settings",
+    "설정",
+    "filter",
+    "filters",
+    "sort by",
+    "정렬",
+    "youtube premium",
+    "premium",
+    "guide",
+    "library",
+    "history",
+    "탐색",
+    "홈",
+    "검색",
+    "재생",
+    "pause",
+    "play ",
+    "chrome",
+    "edge",
+    "firefox",
+    "minimize",
+    "maximize",
+    "close",
+)
+
+_SKIP_LINE_PREFIXES = (
+    "perceive:",
+    "windows:",
+    "tool_",
+    "goal:",
+    "slots:",
+    "recipe_hint:",
+    "media_verify_ok:",
+    "verify_required:",
+)
+
+# 후보 필터 — 광고·Shorts·시스템/UI 잡음
+_MEDIA_JUNK_SUBSTRINGS = (
+    "sponsored",
+    "광고",
+    " shorts",
+    "#shorts",
+    "/shorts/",
+    "cursor",
+    "agent",
+    "iris",
+    "화면 캡처",
+    "[monitor_target",
+    "브라우저",
+    "perceive:",
+    "windows:",
+)
+
+
+def _query_tokens(query: str) -> list[str]:
+    """검색어에서 2글자 이상 토큰 (중복 제거, 순서 유지)."""
+    raw = re.findall(r"[\w가-힣]{2,}", query.strip().lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in raw:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def token_overlap_score(text: str, query_tokens: list[str]) -> float:
+    """후보 제목과 검색어 토큰 겹침 비율 (0~1)."""
+    if not query_tokens:
+        return 1.0
+    text_tokens = set(re.findall(r"[\w가-힣]+", text.lower()))
+    if not text_tokens:
+        return 0.0
+    hits = sum(
+        1
+        for t in query_tokens
+        if t in text_tokens or any(t in wt or wt in t for wt in text_tokens)
+    )
+    return hits / len(query_tokens)
+
+
+def filter_media_candidates(
+    candidates: list[str],
+    *,
+    platform: str,
+    search_query: str,
+    exclude_shorts: bool = True,
+    exclude_ads: bool = True,
+    require_query_token_overlap: bool = True,
+) -> list[str]:
+    """광고·Shorts·시스템 라벨 제거. play pre-rank는 토큰 겹침 비활성 가능."""
+    del platform  # 플랫폼별 규칙 확장 슬롯
+    tokens = _query_tokens(search_query) if require_query_token_overlap else []
+    out: list[str] = []
+    for name in candidates:
+        low = name.lower()
+        if exclude_shorts and (
+            "shorts" in low or "#shorts" in low or "/shorts/" in low
+        ):
+            continue
+        if exclude_ads and (
+            "sponsored" in low
+            or "광고" in name
+            or re.search(r"\bad\b", low)
+        ):
+            continue
+        if any(j in low for j in _MEDIA_JUNK_SUBSTRINGS):
+            continue
+        if any(j in low for j in _UI_JUNK_SUBSTRINGS) and len(name.strip()) < 28:
+            continue
+        if tokens and token_overlap_score(name, tokens) < _CANDIDATE_MIN_TOKEN_OVERLAP:
+            continue
+        out.append(name)
+    return out
+
+
+def _is_video_title_shape(name: str) -> bool:
+    """영상 제목 형태인지 (길이·URL·숫자만·UI 라벨)."""
+    t = name.strip()
+    if len(t) < _VIDEO_TITLE_MIN_LEN or len(t) > _VIDEO_TITLE_MAX_LEN:
+        return False
+    if re.match(r"^https?://", t, re.I):
+        return False
+    if t.startswith("{") or t.startswith("["):
+        return False
+    if "perception_source" in t or '"elements"' in t:
+        return False
+    if _SYMBOLS_ONLY_RE.match(t):
+        return False
+    low = t.lower()
+    if low in _VIDEO_TITLE_JUNK_EXACT:
+        return False
+    if any(j in low for j in _VIDEO_TITLE_JUNK_SUBSTRINGS):
+        return False
+    if any(j in low for j in _UI_JUNK_SUBSTRINGS) and len(t) < 28:
+        return False
+    if low in {"mix", "playlist", "재생목록"}:
+        return False
+    return True
+
+
+def filter_video_title_candidates(
+    candidates: list[str],
+    *,
+    platform: str,
+    search_query: str,
+) -> list[str]:
+    """filter_media_candidates 이후 — 영상 제목만 Ranker에 전달."""
+    del platform
+    kept = [c for c in candidates if _is_video_title_shape(c)]
+    tokens = _query_tokens(search_query)
+    if not tokens or len(kept) <= 1:
+        return kept[:_PLAY_CANDIDATE_MAX]
+    # 검색어 토큰 겹침 높은 순 정렬 (겹침 없어도 제목형이면 유지)
+    kept.sort(key=lambda c: (-token_overlap_score(c, tokens), c))
+    return kept[:_PLAY_CANDIDATE_MAX]
+
+
+def mechanical_pick_candidate(
+    candidates: list[str],
+    search_query: str,
+) -> str | None:
+    """Ranker null 시 토큰 겹침 최고 후보; 동점·0점이면 candidates[0]."""
+    if not candidates:
+        return None
+    tokens = _query_tokens(search_query)
+    if not tokens:
+        return candidates[0]
+    best_name = candidates[0]
+    best_score = -1.0
+    for c in candidates:
+        score = token_overlap_score(c, tokens)
+        if score > best_score:
+            best_score = score
+            best_name = c
+    return best_name
+
+
+def _patch_perception_active_window(detail: str, active_window: str) -> str:
+    """resolved 창 제목으로 perception detail의 active_window 정규화."""
+    if not detail or not active_window:
+        return detail
+    try:
+        meta = json.loads(detail)
+    except json.JSONDecodeError:
+        return detail
+    if not isinstance(meta, dict):
+        return detail
+    meta["active_window"] = active_window
+    return json.dumps(meta, ensure_ascii=False)
+
+
+def candidates_ready_for_rank(
+    platform: str,
+    query: str,
+    observation_blob: str,
+    candidates: list[str],
+    *,
+    criteria: MediaSuccessCriteria | str | None = None,
+) -> bool:
+    """Ranker 진입 전 — criteria_satisfied(PRE_RANK) thin wrapper."""
+    crit = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
+    return criteria_satisfied(
+        crit,
+        MediaExecutionPhase.PRE_RANK,
+        platform=platform,
+        query=query,
+        observation_blob=observation_blob,
+        candidates=candidates,
+    )
+
+
+def derive_success_criteria(slots: dict[str, Any]) -> str:
+    """Router slots → 완료 계약 문자열 (테스트·로그 호환)."""
+    return criteria_value_from_slots(slots)
+
+
+def resolve_focus_window_after_open(
+    platform: str,
+    *,
+    open_url: str,
+    window_list_blob: str,
+    last_perception_active: str = "",
+) -> ResolvedMediaWindow | None:
+    """open_url 직후 창 목록·perception으로 이번에 연 미디어 창 선택."""
+    target = resolve_media_target(platform)
+    host = ""
+    try:
+        host = (urlparse(open_url).netloc or "").lower().replace("www.", "")
+    except ValueError:
+        host = ""
+    active = (last_perception_active or window_controller.get_active_window_title()).strip()
+    wins = window_controller.list_visible_windows()
+    if not wins and window_list_blob:
+        for line in window_list_blob.splitlines():
+            title = line.strip()
+            if len(title) < 3:
+                continue
+            wins.append(WindowInfo(title, 0, 0, 800, 600, 0))
+    scored: list[tuple[float, Any, str]] = []
+    for w in wins:
+        title = getattr(w, "title", str(w))
+        hwnd = int(getattr(w, "hwnd", 0) or 0)
+        title_l = title.lower()
+        score = 0.0
+        reasons: list[str] = []
+        if target.window_title_sub.lower() in title_l:
+            score += 40.0
+            reasons.append("platform_in_title")
+        for alt in target.alt_title_subs:
+            if alt.lower() in title_l:
+                score += 28.0
+                reasons.append("browser_in_title")
+                break
+        if target.url_domain_hint and target.url_domain_hint.lower() in title_l:
+            score += 25.0
+            reasons.append("domain_in_title")
+        if host and host in title_l:
+            score += 22.0
+            reasons.append("url_host_in_title")
+        if active and active.lower() in title_l or title_l in active.lower():
+            score += 15.0
+            reasons.append("active_match")
+        if any(p in title_l for p in _IDE_TITLE_PENALTY):
+            score -= 55.0
+            reasons.append("ide_penalty")
+        if score > 0:
+            scored.append((score, (hwnd, title), ",".join(reasons)))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best_score, (hwnd, title), reason = scored[0]
+    if best_score <= 0:
+        return None
+    title_sub = target.window_title_sub
+    if target.window_title_sub.lower() not in title.lower():
+        for alt in target.alt_title_subs:
+            if alt.lower() in title.lower():
+                title_sub = alt
+                break
+        else:
+            title_sub = title[:48]
+    return ResolvedMediaWindow(hwnd=hwnd, title_sub=title_sub, match_reason=reason)
+
+
 def should_run_media_flow(slots: dict[str, Any] | None) -> bool:
-    """Router slots로 Media Flow 진입 여부."""
+    """Router skill_id 또는 media_action+search_query로 Media Flow 진입."""
     if not slots:
         return False
+    if str(slots.get("skill_id") or "").strip() == "media_play":
+        query = slots.get("search_query")
+        return isinstance(query, str) and bool(query.strip())
     action = str(slots.get("media_action") or "").strip().lower()
     query = slots.get("search_query")
     return action in {"search", "play"} and isinstance(query, str) and bool(query.strip())
+
+
 @dataclass(frozen=True)
 class MediaRankerResult:
     pick_name: str | None
+    pick_index: int | None
     confidence: float
     reason: str
+
+
 def parse_media_ranker_json(raw: str) -> MediaRankerResult | None:
     data = extract_json_object(raw)
     if not data:
         return None
     pick_raw = data.get("pick_name")
     pick = pick_raw.strip() if isinstance(pick_raw, str) and pick_raw.strip() else None
+    pick_index: int | None = None
+    idx_raw = data.get("pick_index")
+    if idx_raw is not None:
+        try:
+            pick_index = int(idx_raw)
+        except (TypeError, ValueError):
+            pick_index = None
     try:
         conf = float(data.get("confidence", 0.0))
     except (TypeError, ValueError):
         conf = 0.0
     reason = str(data.get("reason") or "").strip()
-    return MediaRankerResult(pick_name=pick, confidence=conf, reason=reason)
-def extract_result_candidates(observation_blob: str, *, max_items: int = 12) -> list[str]:
-    """perceive 요약에서 후보 제목 추출 (UIA/OCR 한 줄 단위)."""
-    candidates: list[str] = []
-    seen: set[str] = set()
-    skip_prefixes = (
-        "perceive:",
-        "windows:",
-        "tool_",
-        "goal:",
-        "slots:",
-        "recipe_hint:",
-        "media_verify_ok:",
-        "verify_required:",
+    return MediaRankerResult(
+        pick_name=pick, pick_index=pick_index, confidence=conf, reason=reason
     )
-    for line in observation_blob.splitlines():
-        t = line.strip()
-        if len(t) < 3 or len(t) > 120:
+
+
+def _is_usable_candidate_name(name: str) -> bool:
+    """검색 결과 제목으로 쓸 만한 문자열인지."""
+    t = name.strip()
+    if len(t) < 3:
+        return False
+    if len(t) > _CANDIDATE_NAME_MAX_LEN:
+        return False
+    if re.match(r"^https?://", t, re.I):
+        return False
+    low = t.lower()
+    if any(j in low for j in _UI_JUNK_SUBSTRINGS) and len(t) < 28:
+        return False
+    if low in {"ok", "yes", "no", "on", "off"}:
+        return False
+    return True
+
+
+def _iter_json_objects(blob: str) -> list[dict[str, Any]]:
+    """observation blob 안의 JSON 객체 수집 (중첩 summary·UIA)."""
+    found: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    def _add(obj: dict[str, Any]) -> None:
+        key = json.dumps(obj, sort_keys=True, ensure_ascii=False)[:200]
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        found.append(obj)
+
+    for line in blob.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
             continue
-        low = t.lower()
-        if any(low.startswith(p) for p in skip_prefixes):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
             continue
-        if t in seen:
-            continue
-        seen.add(t)
-        candidates.append(t)
-        if len(candidates) >= max_items:
-            break
-    if candidates:
-        return candidates
-    for chunk in re.findall(r"\{[^{}]*\"summary\"[^{}]*\}", observation_blob):
+        if isinstance(obj, dict):
+            _add(obj)
+
+    for chunk in re.findall(r"\{[^{}]*\"summary\"[^{}]*\}", blob):
         try:
             meta = json.loads(chunk)
         except json.JSONDecodeError:
             continue
-        summ = str(meta.get("summary") or "")
-        for part in re.split(r"[\n|•·]", summ):
-            p = part.strip()
-            if 3 <= len(p) <= 120 and p not in seen:
-                seen.add(p)
-                candidates.append(p)
-                if len(candidates) >= max_items:
-                    return candidates
-    return candidates
+        if isinstance(meta, dict):
+            _add(meta)
+
+    # UIA payload: window + elements (긴 JSON 한 덩어리)
+    for m in re.finditer(r'\{"window"[^}]*"elements"\s*:\s*\[', blob):
+        start = m.start()
+        depth = 0
+        for i in range(start, min(start + 12000, len(blob))):
+            ch = blob[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(blob[start : i + 1])
+                        if isinstance(obj, dict):
+                            _add(obj)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+    return found
+
+
+def _candidates_from_uia_object(obj: dict[str, Any]) -> list[str]:
+    """UIA elements 배열에서 제목 후보 추출 (순서 유지 = 상위 결과 우선)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    elements = obj.get("elements")
+    if not isinstance(elements, list):
+        return out
+    preferred_types = ("hyperlink", "listitem", "text", "document", "button")
+    typed: list[tuple[int, str]] = []
+    for el in elements:
+        if not isinstance(el, dict):
+            continue
+        name = str(el.get("name") or "").strip()
+        if not _is_usable_candidate_name(name):
+            continue
+        ctype = str(el.get("type") or "").lower()
+        # Button/Edit/Menu는 Chrome UI 라벨 — 제목 후보 제외
+        if any(t in ctype for t in ("button", "edit", "menu")):
+            continue
+        prio = 2
+        if any(p in ctype for p in preferred_types):
+            prio = 0
+        elif ctype in ("pane", "unknown"):
+            prio = 3
+        typed.append((prio, name))
+    typed.sort(key=lambda x: x[0])
+    for _, name in typed:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _candidates_from_summary_text(text: str) -> list[str]:
+    """OCR/hybrid summary 텍스트에서 줄 단위 후보."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[\n|•·]+", text):
+        p = part.strip()
+        if not _is_usable_candidate_name(p):
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def extract_result_candidates(
+    observation_blob: str,
+    *,
+    max_items: int = _PLAY_CANDIDATE_MAX,
+) -> list[str]:
+    """perceive 요약에서 재생 후보 상위 N개 (UIA JSON 우선, OCR 줄 단위 보조)."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _append_batch(names: list[str]) -> None:
+        for n in names:
+            if n in seen:
+                continue
+            seen.add(n)
+            candidates.append(n)
+            if len(candidates) >= max_items:
+                return
+
+    for obj in _iter_json_objects(observation_blob):
+        summ = obj.get("summary")
+        if isinstance(summ, str) and summ.strip().startswith("{"):
+            try:
+                inner = json.loads(summ)
+                if isinstance(inner, dict):
+                    _append_batch(_candidates_from_uia_object(inner))
+                    if len(candidates) >= max_items:
+                        return candidates[:max_items]
+            except json.JSONDecodeError:
+                pass
+        if isinstance(summ, str):
+            _append_batch(_candidates_from_summary_text(summ))
+            if len(candidates) >= max_items:
+                return candidates[:max_items]
+        _append_batch(_candidates_from_uia_object(obj))
+        if len(candidates) >= max_items:
+            return candidates[:max_items]
+
+    for line in observation_blob.splitlines():
+        t = line.strip()
+        if len(t) < 3:
+            continue
+        low = t.lower()
+        if any(low.startswith(p) for p in _SKIP_LINE_PREFIXES):
+            continue
+        if not _is_usable_candidate_name(t):
+            continue
+        _append_batch([t])
+        if len(candidates) >= max_items:
+            return candidates[:max_items]
+
+    return candidates[:max_items]
+
+
+def _ranker_screenshot_enabled(settings: object | None) -> bool:
+    """Settings·테스트용 SimpleNamespace 모두 지원."""
+    if settings is None:
+        return False
+    if isinstance(settings, Settings):
+        return settings.media_ranker_use_screenshot
+    return bool(getattr(settings, "media_ranker_use_screenshot", False))
+
+
+def _ranker_vision_model_name(settings: object | None) -> str | None:
+    if settings is None:
+        return None
+    if isinstance(settings, Settings):
+        return settings.media_ranker_vision_model or settings.gemma_model_name
+    vision = str(getattr(settings, "media_ranker_vision_model", "") or "").strip()
+    base = str(getattr(settings, "gemma_model_name", "") or "").strip()
+    return vision or base or None
+
+
+def _settings_gemma_backend(settings: object | None) -> str:
+    if isinstance(settings, Settings):
+        return settings.gemma_backend
+    return str(getattr(settings, "gemma_backend", "ollama") or "ollama")
+
+
+def resolve_ranker_pick(
+    rank: MediaRankerResult,
+    candidates: list[str],
+) -> str | None:
+    """Ranker 출력을 실제 uia_click name으로 해석 (인덱스·fuzzy)."""
+    if not candidates:
+        return None
+    if rank.pick_index is not None and 0 <= rank.pick_index < len(candidates):
+        return candidates[rank.pick_index]
+    pick = (rank.pick_name or "").strip()
+    if not pick:
+        return None
+    if pick in candidates:
+        return pick
+    pl = pick.lower()
+    for c in candidates:
+        cl = c.lower()
+        if pl == cl or pl in cl or cl in pl:
+            return c
+    pick_tokens = set(re.findall(r"[\w가-힣]+", pl))
+    if not pick_tokens:
+        return None
+    best: tuple[float, str] | None = None
+    for c in candidates:
+        ct = set(re.findall(r"[\w가-힣]+", c.lower()))
+        if not ct:
+            continue
+        overlap = len(pick_tokens & ct) / max(len(pick_tokens), 1)
+        if best is None or overlap > best[0]:
+            best = (overlap, c)
+    if best and best[0] >= 0.35:
+        return best[1]
+    return None
+
+
 # 하위 호환 — 테스트·외부 import
 code_verify_search = mechanical_search_achieved
 code_verify_play = mechanical_play_achieved
+
+
 class MediaPlaybackFlow:
     """플랫폼별 Open → Perceive → (Select) → Act → Verify."""
+
     def __init__(self, cu_agent: ComputerUseAgent) -> None:
         self._agent = cu_agent
         self._gemma = cu_agent._gemma
         self._registry = cu_agent._registry
         self._assistant = cu_agent._assistant
+        self._last_resolved_window: ResolvedMediaWindow | None = None
+
     def run(self, goal: str, slots: dict[str, Any]) -> str:
         goal = goal.strip()
         platform = str(slots.get("platform_hint") or "unknown").strip().lower()
@@ -130,10 +747,22 @@ class MediaPlaybackFlow:
         if not open_res.success:
             db.insert_log("media_flow", "open_fail", open_res.message[:200])
             return "미디어 페이지를 열지 못했습니다. 다시 요청해 주세요."
-        self._log(platform, action, "perceive")
-        obs_blob = self._perceive()
+
+        contract = resolve_media_contract(slots=slots)
+        criteria_str = contract.value if contract else criteria_value_from_slots(slots)
+        self._assistant._db.insert_log(
+            "media_flow",
+            "criteria",
+            criteria_str[:80] if criteria_str else f"derive:{action}",
+        )
+
         if action == "search":
-            if self._verify_search(goal, platform, query, obs_blob):
+            self._log(platform, action, "perceive")
+            obs_blob = self._perceive(platform, open_url=open_url)
+            if self._verify_search(
+                goal, platform, query, obs_blob, criteria=contract
+            ):
+                clear_last_execution_hint(self._assistant)
                 msg = f"'{query}' 검색 결과를 열었습니다."
                 db.insert_log("media_flow", "complete", msg[:200])
                 self._log(platform, action, "complete")
@@ -145,11 +774,156 @@ class MediaPlaybackFlow:
                 )
                 return msg
             db.insert_log("media_flow", "verify_fail", "search")
+            set_last_execution_hint(self._assistant, "media:search:verify_fail")
+            push_activity_line("skill=media_play gate=fail")
             return (
-                "검색 페이지를 열었지만 결과 확인이 어렵습니다. "
+                "검색 페이지를 열었지만 결과 화면을 확인하지 못했습니다. "
                 "화면을 확인하시거나 다시 요청해 주세요."
             )
-        return self._run_play_path(goal, platform, query, db, obs_blob)
+        if platform == "youtube":
+            dom_msg = self._run_youtube_dom_play_path(
+                goal, platform, query, db, open_url=open_url, criteria=contract
+            )
+            if dom_msg:
+                return dom_msg
+        return self._run_play_path(
+            goal, platform, query, db, open_url=open_url, criteria=contract
+        )
+
+    def _browser_monitor(self) -> Any | None:
+        """MainWindow가 주입한 Chrome 탭 모니터 (없으면 DOM 경로 스킵)."""
+        return getattr(self._assistant, "_browser_monitor", None)
+
+    def _run_youtube_dom_play_path(
+        self,
+        goal: str,
+        platform: str,
+        query: str,
+        db: Any,
+        *,
+        open_url: str = "",
+        criteria: MediaSuccessCriteria | None = None,
+    ) -> str | None:
+        """Tier 1: 확장 DOM → watch open_url → verify. 실패 시 None(legacy 폴백)."""
+        monitor = self._browser_monitor()
+        if monitor is None:
+            return None
+        contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
+        raw_pairs: list[tuple[str, str]] | None = None
+        for attempt in range(_YOUTUBE_DOM_POLL_RETRIES):
+            raw_pairs = monitor.youtube_results_for_search(open_url)
+            if raw_pairs:
+                break
+            if attempt > 0:
+                self._log(platform, "play", f"dom_poll_{attempt}")
+        if not raw_pairs:
+            db.insert_log("youtube_dom", "empty", f"query={query[:60]}")
+            return None
+        dom_candidates = parse_youtube_search_results(
+            [{"title": t, "url": u} for t, u in raw_pairs]
+        )
+        if not dom_candidates:
+            db.insert_log("youtube_dom", "parse_empty", f"pairs={len(raw_pairs)}")
+            return None
+        db.insert_log(
+            "youtube_dom",
+            "candidates",
+            f"count={len(dom_candidates)} query={query[:40]}",
+        )
+        self._log(platform, "play", "dom_pick")
+
+        def _rank_titles(titles: list[str]) -> str | None:
+            rank = self._rank(
+                goal,
+                query,
+                titles,
+                screenshot_png=self._capture_play_verify_screenshot(platform),
+                platform=platform,
+            )
+            if not rank:
+                return None
+            return resolve_ranker_pick(rank, titles)
+
+        picked: YoutubeWatchCandidate | None = pick_watch_url(
+            query,
+            dom_candidates,
+            rank_pick_title=_rank_titles,
+        )
+        if not picked:
+            db.insert_log("youtube_dom", "pick_fail", f"candidates={len(dom_candidates)}")
+            return None
+        vid = extract_video_id(picked.url)
+        db.insert_log(
+            "youtube_dom",
+            "picked",
+            f"videoId={vid} title={picked.title[:80]} url={picked.url[:120]}",
+        )
+        self._log(platform, "play", "dom_open_watch")
+        watch_res = self._run_tool(
+            "open_url",
+            {"url": picked.url},
+            summary="media dom watch",
+        )
+        if not watch_res.success:
+            db.insert_log("youtube_dom", "open_watch_fail", watch_res.message[:120])
+            return None
+        obs_after = self._perceive(platform, open_url=picked.url, for_play=True)
+        for mech_try in range(_MAX_MECHANICAL_PERCEIVE_RETRY + 1):
+            if criteria_satisfied(
+                contract,
+                MediaExecutionPhase.PLAY_DONE,
+                platform=platform,
+                query=query,
+                observation_blob=obs_after,
+            ):
+                clear_last_execution_hint(self._assistant)
+                msg = f"'{query}' 재생을 시작했습니다."
+                db.insert_log("media_flow", "complete", f"dom|{msg[:120]}")
+                self._log(platform, "play", "complete_dom")
+                self._save_session(
+                    goal,
+                    query,
+                    tools=["open_url", "open_url", "perceive_desktop"],
+                    media_action="play",
+                )
+                return msg
+            if mech_try < _MAX_MECHANICAL_PERCEIVE_RETRY:
+                obs_after = self._perceive(platform, open_url=picked.url, for_play=True)
+        verify_shot = self._capture_play_verify_screenshot(platform)
+        verify, verify_vision_used = verify_media_with_llm_retries(
+            self._gemma,
+            goal=goal,
+            media_action="play",
+            observation_blob=obs_after,
+            screenshot_png=verify_shot,
+        )
+        db.insert_log(
+            "media_flow",
+            "verify_play",
+            json.dumps(
+                {
+                    "path": "dom",
+                    "vision_used": verify_vision_used,
+                    "achieved": bool(verify and verify.achieved),
+                    "videoId": vid,
+                },
+                ensure_ascii=False,
+            )[:_RANK_LOG_JSON_MAX],
+        )
+        if verify and verify.achieved:
+            clear_last_execution_hint(self._assistant)
+            msg = f"'{query}' 재생을 시작했습니다."
+            db.insert_log("media_flow", "complete", f"dom_llm|{vid}")
+            self._log(platform, "play", "complete_dom_llm")
+            self._save_session(
+                goal,
+                query,
+                tools=["open_url", "open_url", "perceive_desktop"],
+                media_action="play",
+            )
+            return msg
+        db.insert_log("youtube_dom", "verify_fail", vid or "unknown")
+        return None
 
     def _run_play_path(
         self,
@@ -157,30 +931,156 @@ class MediaPlaybackFlow:
         platform: str,
         query: str,
         db: Any,
-        obs_blob: str,
+        *,
+        open_url: str = "",
+        criteria: MediaSuccessCriteria | None = None,
     ) -> str:
-        """play — ranker → click → 기계 게이트 → (재perceive) → LLM verify."""
-        candidates = extract_result_candidates(obs_blob)
-        self._log(platform, "play", "rank")
-        rank = self._rank(goal, query, candidates)
-        if not rank or not rank.pick_name:
-            question = (rank.reason if rank and rank.reason else "") or (
-                f"'{query}' 검색 결과에서 재생할 항목을 골라 주세요."
+        """play — perceive → ranker(상위 N 자동 선택) → click → verify (의도적 sleep 없음)."""
+        contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
+        self._log(platform, "play", "perceive_loop")
+        obs_blob, candidates, gate_ready = self._perceive_for_play(
+            platform, query, open_url=open_url, criteria=contract
+        )
+        degraded = (not gate_ready) and len(candidates) >= 1
+        if not candidates:
+            question = (
+                "검색 결과가 아직 보이지 않습니다. "
+                "잠시 후 다시 요청하시거나 재생할 영상 제목을 알려주세요."
             )
+            db.insert_log(
+                "media_flow",
+                "gate_fail",
+                f"candidates={len(candidates)} ready={gate_ready}",
+            )
+            self._log(
+                platform,
+                "play",
+                "gate_fail",
+                extra=f"candidates={len(candidates)}",
+            )
+            set_last_execution_hint(self._assistant, "media:pre_rank:no_candidates")
+            push_activity_line("skill=media_play gate=fail")
+            return f"{USER_QUESTION_PREFIX} {question}"
+        if degraded:
+            set_last_execution_hint(self._assistant, "media:pre_rank:degraded")
+            self._log(platform, "play", "degraded", extra=f"candidates={len(candidates)}")
+            push_activity_line("skill=media_play pre_rank=degraded")
+        self._log(platform, "play", "rank")
+        screenshot_png = self._capture_play_verify_screenshot(platform)
+        db.insert_log(
+            "media_flow",
+            "rank_input",
+            json.dumps(
+                {"query": query[:80], "candidates": candidates},
+                ensure_ascii=False,
+            )[:_RANK_LOG_JSON_MAX],
+        )
+        shot_hwnd = (
+            self._last_resolved_window.hwnd if self._last_resolved_window else 0
+        )
+        if screenshot_png:
+            w, h = 0, 0
+            try:
+                from PIL import Image  # type: ignore
+                import io
+
+                im = Image.open(io.BytesIO(screenshot_png))
+                w, h = im.size
+            except Exception:
+                w, h = 0, 0
+            db.insert_log(
+                "media_flow",
+                "rank_screenshot",
+                f"hwnd={shot_hwnd} sent=true size={w}x{h}",
+            )
+        else:
+            db.insert_log(
+                "media_flow",
+                "rank_screenshot",
+                f"hwnd={shot_hwnd} sent=false",
+            )
+        rank = self._rank(
+            goal,
+            query,
+            candidates,
+            screenshot_png=screenshot_png,
+            platform=platform,
+        )
+        if rank:
+            db.insert_log(
+                "media_flow",
+                "rank_output",
+                json.dumps(
+                    {
+                        "query": query[:80],
+                        "pick_index": rank.pick_index,
+                        "pick_name": rank.pick_name,
+                        "confidence": rank.confidence,
+                        "reason": rank.reason[:200],
+                    },
+                    ensure_ascii=False,
+                )[:_RANK_LOG_JSON_MAX],
+            )
+        click_name = resolve_ranker_pick(rank, candidates) if rank else None
+
+        if not click_name and candidates:
+            click_name = mechanical_pick_candidate(candidates, query)
+            if click_name:
+                db.insert_log(
+                    "media_flow",
+                    "rank_fallback",
+                    f"mechanical={click_name[:80]}",
+                )
+                self._log(platform, "play", "rank_fallback")
+
+        if not click_name:
+            low_conf = rank is not None and rank.confidence < _RANKER_AUTO_PLAY_MIN_CONFIDENCE
+            if low_conf or not rank or not rank.pick_name:
+                question = (rank.reason if rank and rank.reason else "") or (
+                    f"'{query}'와 가장 비슷한 결과를 찾지 못했습니다. "
+                    "재생할 제목을 조금 더 구체적으로 말씀해 주세요."
+                )
+            else:
+                question = (
+                    f"'{query}' 검색 결과에서 클릭할 항목을 화면에서 찾지 못했습니다. "
+                    "다시 요청해 주세요."
+                )
             db.insert_log("media_flow", "ask_user", question[:200])
             return f"{USER_QUESTION_PREFIX} {question}"
-        window_sub = _WINDOW_TITLE_SUB.get(platform) or _WINDOW_TITLE_SUB["unknown"]
+
+        db.insert_log(
+            "media_flow",
+            "rank_pick",
+            f"query={query[:40]} click_name={click_name[:120]}",
+        )
+
+        resolved = self._last_resolved_window
+        click_sub = (
+            resolved.title_sub
+            if resolved
+            else resolve_media_target(platform).window_title_sub
+        )
         self._log(platform, "play", "act")
-        click_ok = self._click_with_retry(window_sub, rank.pick_name)
+        click_ok = self._click_with_retry(click_sub, click_name)
         if not click_ok:
-            db.insert_log("media_flow", "click_fail", rank.pick_name[:120])
+            self._log(platform, "play", "hotkey_fallback")
+            click_ok = self._play_keyboard_fallback(platform)
+        if not click_ok:
+            db.insert_log("media_flow", "click_fail", click_name[:120])
             return (
-                f"'{rank.pick_name}' 항목을 클릭하지 못했습니다. "
+                f"'{click_name}' 항목을 클릭하지 못했습니다. "
                 "화면에서 직접 선택하시거나 다시 요청해 주세요."
             )
-        obs_after = self._perceive()
+        obs_after = self._perceive(platform, open_url=open_url)
         for mech_try in range(_MAX_MECHANICAL_PERCEIVE_RETRY + 1):
-            if mechanical_play_achieved(platform, obs_after):
+            if criteria_satisfied(
+                contract,
+                MediaExecutionPhase.PLAY_DONE,
+                platform=platform,
+                query=query,
+                observation_blob=obs_after,
+            ):
+                clear_last_execution_hint(self._assistant)
                 msg = f"'{query}' 재생을 시작했습니다."
                 db.insert_log("media_flow", "complete", msg[:200])
                 self._log(platform, "play", "complete")
@@ -193,14 +1093,30 @@ class MediaPlaybackFlow:
                 return msg
             if mech_try < _MAX_MECHANICAL_PERCEIVE_RETRY:
                 self._log(platform, "play", "perceive_retry")
-                obs_after = self._perceive()
-        verify = verify_media_with_llm_retries(
+                obs_after = self._perceive(platform, open_url=open_url)
+        verify_shot = self._capture_play_verify_screenshot(platform)
+        verify, verify_vision_used = verify_media_with_llm_retries(
             self._gemma,
             goal=goal,
             media_action="play",
             observation_blob=obs_after,
+            screenshot_png=verify_shot,
+        )
+        db.insert_log(
+            "media_flow",
+            "verify_play",
+            json.dumps(
+                {
+                    "vision_used": verify_vision_used,
+                    "achieved": bool(verify and verify.achieved),
+                    "evidence": (verify.evidence if verify else "")[:120],
+                    "missing": (verify.missing if verify else "")[:120],
+                },
+                ensure_ascii=False,
+            )[:_RANK_LOG_JSON_MAX],
         )
         if verify and verify.achieved:
+            clear_last_execution_hint(self._assistant)
             msg = f"'{query}' 재생을 시작했습니다."
             db.insert_log("media_flow", "complete", f"llm|{verify.evidence[:120]}")
             self._log(platform, "play", "complete_llm")
@@ -217,21 +1133,97 @@ class MediaPlaybackFlow:
         elif verify and verify.evidence:
             reason = verify.evidence
         db.insert_log("media_flow", "verify_fail", "play")
+        set_last_execution_hint(self._assistant, "media:play:not_confirmed")
+        push_activity_line("skill=media_play gate=fail")
         tail = f" ({reason})" if reason else ""
         return (
             "재생 화면을 확인하지 못했습니다. "
             f"브라우저에서 재생 상태를 확인하시거나 다시 요청해 주세요.{tail}"
         )
+
+    def _perceive_for_play(
+        self,
+        platform: str,
+        query: str,
+        *,
+        open_url: str = "",
+        criteria: MediaSuccessCriteria | None = None,
+    ) -> tuple[str, list[str], bool]:
+        """타깃 perceive — 의도적 대기 제거, 실패 시 sleep 없이 perceive만 재시도."""
+        contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
+        self._last_resolved_window = None
+        obs = ""
+        candidates: list[str] = []
+        db = self._assistant._db
+        gate_ready = False
+        for attempt in range(_PERCEIVE_LOAD_MAX_RETRIES):
+            if attempt > 0:
+                # sleep 없음 — 즉시 다음 perceive
+                self._log(platform, "play", f"perceive_retry_{attempt}")
+            obs = self._perceive(platform, open_url=open_url, for_play=True)
+            raw_candidates = extract_result_candidates(obs)
+            candidates = filter_video_title_candidates(
+                filter_media_candidates(
+                    raw_candidates,
+                    platform=platform,
+                    search_query=query,
+                    require_query_token_overlap=False,
+                ),
+                platform=platform,
+                search_query=query,
+            )
+            ready = criteria_satisfied(
+                contract,
+                MediaExecutionPhase.PRE_RANK,
+                platform=platform,
+                query=query,
+                observation_blob=obs,
+                candidates=candidates,
+            )
+            gate_ready = ready
+            target_sub = (
+                self._last_resolved_window.title_sub[:24]
+                if self._last_resolved_window
+                else resolve_media_target(platform).window_title_sub[:24]
+            )
+            gate_tag = "pass" if ready else "fail"
+            db.insert_log(
+                "media_flow",
+                "perceive_gate",
+                (
+                    f"target={target_sub} "
+                    f"raw={len(raw_candidates)} filt={len(candidates)} gate={gate_tag}"
+                )[:200],
+            )
+            self._log(
+                platform,
+                "play",
+                f"perceive_gate_{gate_tag}",
+                extra=f"candidates={len(candidates)}",
+            )
+            if ready:
+                return obs, candidates, True
+        return obs, candidates, gate_ready
+
     def _verify_search(
         self,
         goal: str,
         platform: str,
         search_query: str,
         observation_blob: str,
+        *,
+        criteria: MediaSuccessCriteria | None = None,
     ) -> bool:
-        if mechanical_search_achieved(platform, observation_blob, search_query):
+        contract = criteria or MediaSuccessCriteria.SEARCH_RESULTS_VISIBLE
+        if criteria_satisfied(
+            contract,
+            MediaExecutionPhase.SEARCH_DONE,
+            platform=platform,
+            query=search_query,
+            observation_blob=observation_blob,
+        ):
             return True
-        verify = verify_media_with_llm_retries(
+        verify, _vision_used = verify_media_with_llm_retries(
             self._gemma,
             goal=goal,
             media_action="search",
@@ -239,8 +1231,20 @@ class MediaPlaybackFlow:
             max_attempts=2,
         )
         return bool(verify and verify.achieved)
-    def _log(self, platform: str, action: str, step: str) -> None:
-        push_activity_line(f"MediaFlow: platform={platform} action={action} step={step}")
+
+    def _log(
+        self,
+        platform: str,
+        action: str,
+        step: str,
+        *,
+        extra: str = "",
+    ) -> None:
+        line = f"MediaFlow: platform={platform} action={action} step={step}"
+        if extra:
+            line += f" {extra}"
+        push_activity_line(line)
+
     def _save_session(
         self,
         goal: str,
@@ -257,21 +1261,227 @@ class MediaPlaybackFlow:
             tools_run=tools,
             observations=obs,
         )
-    def _perceive(self) -> str:
-        """list_open_windows + perceive_desktop → observation blob."""
+
+    def _focus_resolved_window(
+        self,
+        resolved: ResolvedMediaWindow,
+        platform: str,
+    ) -> None:
+        """점수화로 고른 창 포커스 — hwnd 우선, 실패 시 title_sub."""
+        if resolved.hwnd > 0 and window_controller.focus_window_by_hwnd(resolved.hwnd):
+            self._log(
+                platform,
+                "media",
+                "focus_ok",
+                extra=f"hwnd={resolved.hwnd} reason={resolved.match_reason[:40]}",
+            )
+            return
+        res = self._run_tool(
+            "focus_window",
+            {"title_sub": resolved.title_sub},
+            summary=f"media focus {resolved.title_sub[:24]}",
+        )
+        if res.success:
+            self._log(
+                platform,
+                "media",
+                "focus_ok",
+                extra=f"target={resolved.title_sub[:24]} reason={resolved.match_reason[:32]}",
+            )
+            return
+        self._log(
+            platform,
+            "media",
+            "focus_skip",
+            extra=f"reason={resolved.match_reason[:32]}",
+        )
+
+    def _focus_media_target(self, target: MediaTarget, platform: str) -> None:
+        """타깃 창 포커스 — 실패해도 perceive는 계속 (fallback)."""
+        subs: list[str] = []
+        if target.window_title_sub:
+            subs.append(target.window_title_sub)
+        for alt in target.alt_title_subs:
+            if alt not in subs:
+                subs.append(alt)
+        for sub in subs:
+            res = self._run_tool(
+                "focus_window",
+                {"title_sub": sub},
+                summary=f"media focus {sub[:24]}",
+            )
+            if res.success:
+                self._log(platform, "media", "focus_ok", extra=f"target={sub[:24]}")
+                return
+        self._log(platform, "media", "focus_skip")
+
+    def _perceive(
+        self,
+        platform: str = "unknown",
+        *,
+        open_url: str = "",
+        for_play: bool = False,
+    ) -> str:
+        """타깃 포커스 후 list_open_windows + perceive_desktop (resolved window 우선)."""
+        target = resolve_media_target(platform)
         parts: list[str] = []
         win = self._run_tool("list_open_windows", {}, summary="media windows")
+        window_blob = ""
         if win.success:
-            parts.append(f"windows: {(win.detail or win.message or '')[:400]}")
-        pd = self._run_tool("perceive_desktop", {}, summary="media perceive")
+            window_blob = (win.detail or win.message or "")[:600]
+            parts.append(f"windows: {window_blob}")
+        resolved = resolve_focus_window_after_open(
+            platform,
+            open_url=open_url,
+            window_list_blob=window_blob,
+        )
+        if resolved:
+            self._last_resolved_window = resolved
+            if target.focus_before_perceive:
+                self._focus_resolved_window(resolved, platform)
+        elif target.focus_before_perceive:
+            self._focus_media_target(target, platform)
+        focus_sub = (
+            resolved.title_sub if resolved else target.window_title_sub
+        )
+        perceive_params: dict[str, Any] = {
+            "focus_hint": focus_sub,
+            "window_title_sub": focus_sub,
+        }
+        if for_play:
+            perceive_params["prefer_window_only"] = True
+        pd = self._run_tool(
+            "perceive_desktop",
+            perceive_params,
+            summary=f"media perceive {focus_sub[:20]}",
+        )
+        detail = ""
         if pd.success:
-            parts.append(pd.message[:500])
+            parts.append(pd.message[:_PERCEIVE_MESSAGE_MAX])
             if pd.detail:
-                parts.append(pd.detail[:800])
+                raw_detail = pd.detail[:_PERCEIVE_DETAIL_MAX]
+                if resolved:
+                    raw_detail = _patch_perception_active_window(
+                        raw_detail, resolved.title_sub
+                    )
+                detail = raw_detail
+                parts.append(detail)
         else:
             parts.append(f"perceive: fail | {pd.message[:200]}")
-        self._assistant._db.insert_log("media_flow", "perceive", parts[-1][:300] if parts else "")
-        return "\n".join(parts)
+        blob = "\n".join(parts)
+        perceive_target = MediaTarget(
+            focus_sub,
+            url_domain_hint=target.url_domain_hint,
+            alt_title_subs=target.alt_title_subs,
+        )
+        resolved_hwnd = resolved.hwnd if resolved else 0
+        blob = self._maybe_window_ocr_augment(
+            blob,
+            detail,
+            perceive_target,
+            for_play=for_play,
+            resolved_hwnd=resolved_hwnd,
+        )
+        reason = resolved.match_reason[:32] if resolved else "default_target"
+        self._assistant._db.insert_log(
+            "media_flow",
+            "perceive",
+            f"target={focus_sub[:24]} reason={reason}|{parts[-1][:180] if parts else ''}",
+        )
+        return blob
+
+    def _maybe_window_ocr_augment(
+        self,
+        blob: str,
+        detail: str,
+        target: MediaTarget,
+        *,
+        for_play: bool = False,
+        resolved_hwnd: int = 0,
+    ) -> str:
+        """UIA sparse·타깃 불일치 시 창 단위 OCR (play+hwnd면 1회 우선, 전체 화면 OCR 없음)."""
+        settings = self._assistant._settings
+        if not isinstance(settings, Settings):
+            return blob
+        if for_play and resolved_hwnd > 0:
+            augmented = self._window_ocr_augment_blob(
+                blob, target.window_title_sub, resolved_hwnd, settings
+            )
+            if augmented != blob:
+                return augmented
+        uia_json = ""
+        perception_source = ""
+        active = ""
+        if detail:
+            try:
+                meta = json.loads(detail)
+                if isinstance(meta, dict):
+                    perception_source = str(meta.get("perception_source") or "")
+                    active = str(meta.get("active_window") or "")
+                    summ = meta.get("summary")
+                    if isinstance(summ, str) and summ.strip().startswith("{"):
+                        uia_json = summ
+            except json.JSONDecodeError:
+                pass
+        target_ok = target.window_title_sub.lower() in active.lower()
+        if not target_ok and target.alt_title_subs:
+            target_ok = any(a.lower() in active.lower() for a in target.alt_title_subs)
+        sparse = not uia_json or uia_reader.is_uia_summary_sparse(uia_json)
+        need_ocr = sparse or perception_source in ("ocr", "hybrid", "") or not target_ok
+        if not need_ocr:
+            return blob
+        hwnd = 0
+        for sub in (target.window_title_sub, *target.alt_title_subs):
+            wins = window_controller.find_windows_by_title_substring(sub)
+            if wins and wins[0].hwnd > 0:
+                hwnd = wins[0].hwnd
+                break
+        if hwnd <= 0:
+            return blob
+        return self._window_ocr_augment_blob(
+            blob, target.window_title_sub, hwnd, settings
+        )
+
+    def _window_ocr_augment_blob(
+        self,
+        blob: str,
+        active_window: str,
+        hwnd: int,
+        settings: Settings,
+    ) -> str:
+        cap = screen_capture.capture_window_by_hwnd(hwnd)
+        if not cap:
+            return blob
+        raw = ocr_engine.ocr_image(settings, cap)
+        summary, _ = ocr_engine.ocr_for_storage(settings, raw)
+        if not summary.strip():
+            return blob
+        augment = json.dumps(
+            {
+                "perception_source": "window_ocr",
+                "active_window": active_window,
+                "summary": summary[:1800],
+            },
+            ensure_ascii=False,
+        )
+        return f"{blob}\n{augment}"
+
+    def _play_keyboard_fallback(self, platform: str) -> bool:
+        """uia_click 실패 시 tab/enter·down/enter (HIGH_RISK, Safety Guard 통과)."""
+        ph = (platform or "unknown").strip().lower()
+        sequences: list[list[str]] = [["tab"], ["tab"], ["enter"]]
+        if ph == "youtube":
+            sequences.append(["down", "enter"])
+        for keys in sequences:
+            res = self._run_tool(
+                "send_hotkey",
+                {"keys": keys},
+                summary=f"media hotkey {'+'.join(keys)}",
+            )
+            if res.success:
+                return True
+        return False
+
     def _run_tool(
         self,
         tool_name: str,
@@ -285,34 +1495,114 @@ class MediaPlaybackFlow:
             summary=summary[:200],
             approved=True,
         )
+
+    def _capture_play_verify_screenshot(self, platform: str) -> bytes | None:
+        """Ranker·play verify용 미디어 창 캡처 — 메모리 PNG만 (DB·디스크 저장 없음)."""
+        settings = self._assistant._settings
+        if not _ranker_screenshot_enabled(settings):
+            return None
+        hwnd = 0
+        resolved = self._last_resolved_window
+        if resolved and resolved.hwnd > 0:
+            hwnd = resolved.hwnd
+        else:
+            target = resolve_media_target(platform)
+            for sub in (target.window_title_sub, *target.alt_title_subs):
+                wins = window_controller.find_windows_by_title_substring(sub)
+                if wins and wins[0].hwnd > 0:
+                    hwnd = wins[0].hwnd
+                    break
+        if hwnd <= 0:
+            return None
+        cap = screen_capture.capture_window_by_hwnd(hwnd)
+        if not cap:
+            return None
+        return screen_capture.capture_result_to_png_bytes(cap)
+
+    def _capture_rank_screenshot(self, platform: str) -> bytes | None:
+        """하위 호환 — _capture_play_verify_screenshot 위임."""
+        return self._capture_play_verify_screenshot(platform)
+
     def _rank(
         self,
         goal: str,
         search_query: str,
         candidates: list[str],
+        *,
+        screenshot_png: bytes | None = None,
+        platform: str = "unknown",
     ) -> MediaRankerResult | None:
-        if not candidates:
+        top = candidates[:_PLAY_CANDIDATE_MAX]
+        if not top:
             return MediaRankerResult(
                 pick_name=None,
+                pick_index=None,
                 confidence=0.0,
-                reason="검색 결과 후보를 화면에서 찾지 못했습니다. 항목 이름을 알려주세요.",
+                reason="검색 결과 후보를 화면에서 찾지 못했습니다. 잠시 후 다시 요청해 주세요.",
             )
         user_body = (
             f"goal: {goal}\n"
             f"search_query: {search_query}\n"
-            f"candidates: {json.dumps(candidates, ensure_ascii=False)}\n"
+            f"candidates: {json.dumps(top, ensure_ascii=False)}\n"
+            "위 candidates와 첨부 스크린샷을 함께 보고 pick_index·pick_name을 결정하세요.\n"
         )
-        raw = self._gemma.chat(
-            [
-                ChatMessage("system", MEDIA_RESULT_RANKER_SYSTEM),
-                ChatMessage("user", user_body),
-            ],
-            purpose=LlmPurpose.COMPUTER_USE,
-            lane="computer_use",
-        )
+        settings = self._assistant._settings
+        db = self._assistant._db
+        want_shot = _ranker_screenshot_enabled(settings)
+        if want_shot and not screenshot_png:
+            screenshot_png = self._capture_play_verify_screenshot(platform)
+            if not screenshot_png:
+                screenshot_png = self._capture_play_verify_screenshot(platform)
+        use_shot = bool(screenshot_png)
+        vision_model = _ranker_vision_model_name(settings) if use_shot else None
+        images: tuple[bytes, ...] = (screenshot_png,) if screenshot_png else ()
+        msgs = [
+            ChatMessage("system", MEDIA_RESULT_RANKER_SYSTEM),
+            ChatMessage("user", user_body, images=images),
+        ]
+        vision_used = False
+        if images and hasattr(self._gemma, "chat_with_images"):
+            raw, vision_used = self._gemma.chat_with_images(
+                msgs,
+                purpose=LlmPurpose.COMPUTER_USE,
+                lane="computer_use",
+                model_override=vision_model,
+            )
+            db.insert_log("media_flow", "rank_vision", f"used={vision_used}")
+        elif want_shot:
+            if _settings_gemma_backend(settings) == "openai_compatible":
+                db.insert_log(
+                    "media_flow",
+                    "rank_vision",
+                    "vision_unavailable=openai_compatible",
+                )
+                push_activity_line(
+                    "MediaRanker: vision_unavailable backend=openai_compatible"
+                )
+            elif not images:
+                db.insert_log(
+                    "media_flow",
+                    "rank_vision",
+                    "used=false reason=screenshot_capture_failed",
+                )
+            raw = self._gemma.chat(
+                msgs,
+                purpose=LlmPurpose.COMPUTER_USE,
+                lane="computer_use",
+                model_override=vision_model,
+            )
+        else:
+            db.insert_log("media_flow", "rank_vision", "used=false reason=disabled")
+            raw = self._gemma.chat(
+                msgs,
+                purpose=LlmPurpose.COMPUTER_USE,
+                lane="computer_use",
+                model_override=vision_model,
+            )
         if self._is_llm_unavailable(raw):
             return None
         return parse_media_ranker_json(raw)
+
     def _click_with_retry(self, window_title_sub: str, pick_name: str) -> bool:
         params = {"window_title_sub": window_title_sub, "name": pick_name}
         for attempt in range(2):
@@ -326,6 +1616,7 @@ class MediaPlaybackFlow:
             if attempt == 0:
                 self._log("media", "play", "click_retry")
         return False
+
     @staticmethod
     def _is_llm_unavailable(text: str) -> bool:
         t = text.strip()
