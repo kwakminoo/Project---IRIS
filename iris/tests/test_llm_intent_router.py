@@ -21,7 +21,7 @@ class _FakeGemma:
         self.reply = reply
         self.calls: list[Sequence[ChatMessage]] = []
 
-    def chat(self, messages: Sequence[ChatMessage]) -> str:
+    def chat(self, messages: Sequence[ChatMessage], **kwargs: object) -> str:
         self.calls.append(list(messages))
         return self.reply
 
@@ -65,19 +65,19 @@ def test_route_with_llm_computer_use_not_overridden_by_url() -> None:
 def test_route_with_llm_fallback_on_bad_json() -> None:
     gemma = _FakeGemma("안녕하세요")
     routed = route_with_llm("디스코드 켜줘", DialogueContext(), gemma)  # type: ignore[arg-type]
-    kind = CommandKind.APP_LAUNCH
-    expected = resolve_route_lane("디스코드 켜줘", kind, DialogueContext())
-    assert routed.lane == expected.lane
-    assert routed.kind == expected.kind
+    assert routed.lane is RouteLane.CHAT_ONLY
+    assert routed.kind is CommandKind.GENERAL_CHAT
 
 
 def test_route_with_llm_search_lane() -> None:
     gemma = _FakeGemma(
         '{"lane":"search","goal":"최신 영화 정보 검색","task_type":"unknown",'
-        '"slots":{},"risk_hint":"low","needs_user_confirm":false}'
+        '"slots":{"query":"요즘 영화","search_topic":"movie"},'
+        '"risk_hint":"low","needs_user_confirm":false}'
     )
     routed = route_with_llm("요즘 영화 뭐 있어", DialogueContext(), gemma)  # type: ignore[arg-type]
     assert routed.lane is RouteLane.SEARCH
+    assert routed.kind is CommandKind.MOVIE_SEARCH
 
 
 def test_route_with_llm_critical_confirm() -> None:

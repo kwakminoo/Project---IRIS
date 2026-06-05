@@ -9,8 +9,8 @@ from iris.ai.gemma_client import ChatMessage, GemmaClient, FALLBACK_KO
 from iris.ai.thinking_policy import LlmPurpose
 from iris.ai.response_parser import extract_json_object
 from iris.assistant.router_policy import RouteLane, RoutedTurn, is_multi_turn_active, resolve_route_lane
-from iris.assistant.tool_layer import is_search_intent
-from iris.core.command_router import CommandKind, classify_command
+from iris.assistant.search_routing import command_kind_for_search_slots
+from iris.core.command_router import CommandKind
 from iris.assistant.media_completion import normalize_routed_media_slots
 from iris.core.context_manager import DialogueContext
 
@@ -23,7 +23,7 @@ Unity, Discord, Excel, 유튜브, 카톡, 메모장 등 임의의 앱·작업도
 실행 방법(버튼/경로)은 쓰지 마세요. Computer Use가 perceive 후 결정합니다.
 slots는 선택 힌트(dict). 비어도 됨. 필수 필드 없음.
 순수 인사·잡담 → chat_only
-날씨·뉴스·영화·최신 이슈 등 웹 검색 요약 → search, slots에 query 키로 검색 엔진용 짧은 질의 한 줄 가능
+날씨·뉴스·영화·최신 이슈 등 웹 검색 요약 → search, slots.query(필수), slots.search_topic=general|weather|news|movie|current_info
 PC 사양만 → fast_tool
 작업/게임/창작 모드 진입(바로 실행 금지) → multi_turn
 lane 기본값: computer_use (PC에서 뭔가 열·조작·보내·재생)
@@ -84,25 +84,19 @@ def _parse_slots(raw: object) -> dict[str, Any]:
     return {}
 
 
-def _kind_for_lane(user_text: str, lane: RouteLane, fallback: CommandKind) -> CommandKind:
+def _kind_for_lane(
+    lane: RouteLane,
+    fallback: CommandKind,
+    *,
+    slots: dict[str, Any] | None = None,
+) -> CommandKind:
     if lane is RouteLane.SEARCH:
-        k = classify_command(user_text)
-        return k if is_search_intent(k) else CommandKind.WEB_SEARCH
+        return command_kind_for_search_slots(slots)
     if lane is RouteLane.FAST_TOOL:
         return CommandKind.GET_SYSTEM_INFO
     if lane is RouteLane.COMPUTER_USE:
-        k = classify_command(user_text)
-        if k in {CommandKind.COMPUTER_USE, CommandKind.COMPLEX_AUTOMATION}:
-            return k
         return CommandKind.COMPUTER_USE
     if lane is RouteLane.MULTI_TURN:
-        k = classify_command(user_text)
-        if k in {
-            CommandKind.WORK_MODE,
-            CommandKind.GAME_MODE,
-            CommandKind.CREATIVE_MODE,
-        }:
-            return k
         return fallback
     return fallback
 
@@ -143,6 +137,14 @@ def parse_llm_intent_json(raw: Mapping[str, Any], user_text: str) -> RoutedInten
     )
 
 
+def _safe_chat_fallback(user_text: str) -> RoutedTurn:
+    return RoutedTurn(
+        kind=CommandKind.GENERAL_CHAT,
+        lane=RouteLane.CHAT_ONLY,
+        goal=user_text.strip() or None,
+    )
+
+
 def route_with_llm(
     user_text: str,
     ctx: DialogueContext,
@@ -150,8 +152,8 @@ def route_with_llm(
     *,
     fallback_kind: CommandKind | None = None,
 ) -> RoutedTurn:
-    """Gemma 1회 Intent JSON → RoutedTurn. 실패 시 classify_command + resolve_route_lane."""
-    kind = fallback_kind if fallback_kind is not None else classify_command(user_text)
+    """Gemma 1회 Intent JSON → RoutedTurn. 실패 시 CHAT_ONLY (regex 휴리스틱 미사용)."""
+    kind = fallback_kind if fallback_kind is not None else CommandKind.GENERAL_CHAT
 
     if is_multi_turn_active(ctx):
         return resolve_route_lane(user_text, kind, ctx)
@@ -162,17 +164,17 @@ def route_with_llm(
     ]
     raw_reply = gemma.chat(messages, purpose=LlmPurpose.INTENT_ROUTER)
     if _is_llm_unavailable(raw_reply):
-        return resolve_route_lane(user_text, kind, ctx)
+        return _safe_chat_fallback(user_text)
 
     data = extract_json_object(raw_reply)
     if not data:
-        return resolve_route_lane(user_text, kind, ctx)
+        return _safe_chat_fallback(user_text)
 
     intent = parse_llm_intent_json(data, user_text)
     if intent is None:
-        return resolve_route_lane(user_text, kind, ctx)
+        return _safe_chat_fallback(user_text)
 
-    kind = _kind_for_lane(user_text, intent.lane, kind)
+    kind = _kind_for_lane(intent.lane, kind, slots=intent.slots)
     routed = intent.to_routed_turn(kind)
 
     # LLM이 computer_use면 detect_open_url로 DIRECT_ACTION 덮어쓰기 금지

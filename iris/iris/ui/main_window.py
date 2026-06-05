@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -14,16 +15,22 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
-    QStackedLayout,
     QVBoxLayout,
     QWidget,
 )
 
-from iris.agent.report_window import ReportWindow
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.assistant.agent_adapter import IrisAssistant
 from iris.assistant.external_agent_adapter import external_backend_status_line
-from iris.agent.needs_agent import format_hits_for_gemma_context
+from iris.agent.needs_agent import (
+    assess_research_quality,
+    format_comparison_degraded_context,
+    format_hits_for_gemma_context,
+    format_hybrid_without_hits,
+    format_search_degraded_context,
+    resolve_answer_mode,
+)
+from iris.agent.search_providers import ResearchQuality
 from iris.assistant.tool_layer import is_search_intent
 from iris.automation.action_executor import ActionExecutor
 from iris.audio.barge_in import BargeInController
@@ -75,6 +82,12 @@ def _apply_dark_theme(w: QWidget) -> None:
         QWidget { background-color: #0b1220; color: #e2e8f0; font-size: 13px; }
         QTextEdit, QListWidget, QLineEdit {
             background-color: #111827; border: 1px solid #334155; border-radius: 6px;
+        }
+        QWidget#LiveActivityPanel,
+        QPlainTextEdit#LiveActivityLog {
+            background: transparent;
+            background-color: transparent;
+            border: none;
         }
         QPushButton {
             background-color: #312e81; color: #e0e7ff; border-radius: 6px; padding: 6px 12px;
@@ -171,7 +184,6 @@ class MainWindow(QMainWindow):
         self._state.state_changed.connect(self._on_state_changed)
 
         self._history: list[ChatMessage] = []
-        self._report = ReportWindow(self)
         self._llm_worker: LlmWorker | None = None
         self._search_worker: SearchWorker | None = None
         self._agent_worker: AgentWorker | None = None
@@ -206,7 +218,6 @@ class MainWindow(QMainWindow):
         self._model_label.setObjectName("ModelStatus")
         self._refresh_model_label()
         status_top.addWidget(self._model_label)
-        status_top.addStretch(1)
 
         self._status_label = QLabel("상태: IDLE")
         self._status_label.setObjectName("StatusPill")
@@ -214,6 +225,7 @@ class MainWindow(QMainWindow):
         self._tts_status_label = QLabel(self._tts.status_label)
         self._tts_status_label.setObjectName("TtsStatus")
         status_top.addWidget(self._tts_status_label)
+        status_top.addStretch(1)
         status_header_lay.addLayout(status_top)
         self._backend_status = QLabel(external_backend_status_line(self._settings))
         self._backend_status.setObjectName("BackendStatus")
@@ -235,30 +247,16 @@ class MainWindow(QMainWindow):
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(10)
 
-        visual_stage = QWidget()
-        visual_stage.setMinimumHeight(560)
-        visual_stack = QStackedLayout(visual_stage)
-        visual_stack.setContentsMargins(0, 0, 0, 0)
-        visual_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-
         self._viz = Visualizer()
-        self._viz.setMinimumHeight(560)
+        self._viz.setMinimumHeight(300)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
-        visual_stack.addWidget(self._viz)
+        left_lay.addWidget(self._viz, 1)
 
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
         self._activity_relay.line.connect(self._live_activity.enqueue_typed_line)
         register_activity_sink(self._activity_relay.push)
-
-        activity_overlay = QWidget()
-        activity_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        activity_lay = QVBoxLayout(activity_overlay)
-        activity_lay.setContentsMargins(0, 0, 0, 10)
-        activity_lay.addStretch(1)
-        activity_lay.addWidget(self._live_activity)
-        visual_stack.addWidget(activity_overlay)
-        left_lay.addWidget(visual_stage, 3)
+        left_lay.addWidget(self._live_activity)
 
         if os.environ.get("IRIS_DEBUG_PARTICLE") == "1":
             dbg = QWidget()
@@ -279,7 +277,7 @@ class MainWindow(QMainWindow):
         self._chat = ChatPanel()
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
-        left_lay.addWidget(self._chat, 1)
+        left_lay.addWidget(self._chat, 2)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -469,6 +467,9 @@ class MainWindow(QMainWindow):
             self,
             db=self._db,
             on_app_paths_changed=self._refresh_app_paths,
+            browser_monitor=self._browser,
+            extension_server_active=self._monitor_mgr.extension_ingest_server_active,
+            ensure_extension_server=self._monitor_mgr.ensure_extension_ingest_server,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             if resume_listen:
@@ -790,16 +791,37 @@ class MainWindow(QMainWindow):
             return
         self._finish_assistant_reply(reply, store_history=store_history)
 
-    @pyqtSlot(str, str, str)
+    @pyqtSlot(str, str, str, str)
     def _on_agent_delegate_search(
-        self, text: str, intent_name: str, slot_query: str = ""
+        self,
+        text: str,
+        intent_name: str,
+        slot_query: str = "",
+        search_meta_json: str = "",
     ) -> None:
         try:
             intent = CommandKind[intent_name]
         except KeyError:
             intent = CommandKind.WEB_SEARCH
         sq = slot_query.strip() or None
-        self._start_search_worker(text, intent, slot_query=sq)
+        meta = self._parse_search_meta(search_meta_json)
+        self._start_search_worker(
+            text,
+            intent,
+            slot_query=sq,
+            slot_queries=meta.get("queries") or None,
+            search_meta_json=search_meta_json,
+        )
+
+    @staticmethod
+    def _parse_search_meta(raw: str) -> dict:
+        if not raw or not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
     def _start_search_worker(
         self,
@@ -807,27 +829,57 @@ class MainWindow(QMainWindow):
         intent: CommandKind,
         *,
         slot_query: str | None = None,
+        slot_queries: list[str] | None = None,
+        search_meta_json: str = "",
     ) -> None:
-        self._search_worker = SearchWorker(text, intent=intent, slot_query=slot_query)
+        self._search_worker = SearchWorker(
+            text,
+            intent=intent,
+            slot_query=slot_query,
+            slot_queries=slot_queries,
+            search_meta_json=search_meta_json,
+        )
         self._search_worker.finished_hits.connect(self._on_search_done)
         self._search_worker.start()
 
-    def _on_search_done(self, query: str, hits: object, intent_name: str) -> None:
+    def _on_search_done(
+        self,
+        query: str,
+        hits: object,
+        intent_name: str,
+        search_meta_json: str = "",
+    ) -> None:
         push_activity_line(
             f"UI: search worker returned intent={intent_name!r} hit_count={len(hits)}."
         )
-        self._report.set_hits(query, hits)  # type: ignore[arg-type]
-        self._report.show()
         try:
             intent = CommandKind[intent_name]
         except KeyError:
             intent = CommandKind.WEB_SEARCH
+        meta = self._parse_search_meta(search_meta_json)
+        hybrid = bool(meta.get("hybrid"))
         self._db.insert_log("web", query, f"hits={len(hits)} intent={intent.name}")  # type: ignore[arg-type]
-        ctx = format_hits_for_gemma_context(
-            query,
-            hits,  # type: ignore[arg-type]
-            intent_label=intent.name,
+        hit_list = list(hits)  # type: ignore[arg-type]
+        quality = assess_research_quality(hit_list)
+        comparison = str(meta.get("answer_shape") or "").strip().lower() == "comparison"
+        answer_mode = resolve_answer_mode(
+            comparison=comparison,
+            hybrid=hybrid,
+            quality=quality,
         )
+        push_activity_line(
+            f"UI: research quality score={quality.score} tier={quality.tier} "
+            f"mode={answer_mode}."
+        )
+
+        ctx = self._build_search_llm_context(
+            query,
+            hit_list,
+            intent_label=intent.name,
+            answer_mode=answer_mode,
+            quality=quality,
+        )
+
         messages = self._assistant.build_general_chat_messages(
             self._last_user_text,
             history=self._history[-8:],
@@ -837,6 +889,40 @@ class MainWindow(QMainWindow):
         push_activity_line("UI: summarization LlmWorker starting with search context.")
         self._llm_worker.finished_text.connect(self._on_llm_done)
         self._llm_worker.start()
+
+    def _build_search_llm_context(
+        self,
+        query: str,
+        hit_list: list,
+        *,
+        intent_label: str,
+        answer_mode: str,
+        quality: ResearchQuality,
+    ) -> str:
+        """P1/P3/P4 — 검색 실패·부분 성공도 LLM 프롬프트로 degrade (즉시 failure UI 금지)."""
+        reason = quality.reason_ko or ""
+        if answer_mode == "search_degraded":
+            push_activity_line(f"UI: P1 search degraded — {reason!r}.")
+            return format_search_degraded_context(
+                query, intent_label=intent_label, reason=reason
+            )
+        if answer_mode == "comparison_degraded":
+            push_activity_line(f"UI: P3 comparison degraded — {reason!r}.")
+            return format_comparison_degraded_context(
+                query, intent_label=intent_label, reason=reason
+            )
+        if answer_mode == "hybrid_empty":
+            push_activity_line(f"UI: hybrid empty — {reason!r}.")
+            return format_hybrid_without_hits(
+                query, intent_label=intent_label, reason=reason
+            )
+        return format_hits_for_gemma_context(
+            query,
+            hit_list,
+            intent_label=intent_label,
+            answer_mode=answer_mode,  # type: ignore[arg-type]
+            quality=quality,
+        )
 
     def _on_llm_done(self, text: str) -> None:
         self._finish_assistant_reply(text, store_history=True)

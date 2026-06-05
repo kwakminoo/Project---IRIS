@@ -128,6 +128,8 @@ class UnifiedMonitorPanel(QWidget):
         self._signals = _CaptureSignals(self)
         self._signals.done.connect(self._on_capture_done)
         self._capturing = False
+        self._shutdown = False
+        self.destroyed.connect(self._on_panel_destroyed)
 
         self._timer = QTimer(self)
         self._timer.setInterval(_REFRESH_MS)
@@ -146,12 +148,17 @@ class UnifiedMonitorPanel(QWidget):
     def refresh_now(self) -> None:
         self._start_capture()
 
+    def _on_panel_destroyed(self) -> None:
+        # 패널 파괴 후 백그라운드 스레드가 Qt 시그널을 emit 하지 않도록
+        self._shutdown = True
+        self._timer.stop()
+
     # ------------------------------------------------------------------
     # capture
     # ------------------------------------------------------------------
 
     def _start_capture(self) -> None:
-        if self._capturing:
+        if self._shutdown or self._capturing:
             return
         self._capturing = True
         sig = self._signals
@@ -252,7 +259,11 @@ def _capture_all_windows(sig: _CaptureSignals) -> None:
             cap = capture_region(info.left, info.top, info.width, info.height)
         snaps.append(_WindowSnap(info, cap))
 
-    sig.done.emit(snaps)
+    try:
+        sig.done.emit(snaps)
+    except RuntimeError:
+        # 패널이 닫힌 뒤 _CaptureSignals C++ 객체가 삭제된 경우
+        pass
 
 
 def _match_monitor(title: str, monitors: dict[str, _MonitorMeta]) -> Optional[_MonitorMeta]:

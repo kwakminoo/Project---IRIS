@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Iris Tab Monitor",
-  "version": "0.1.0",
-  "description": "허용한 Chrome 탭의 요약만 Iris 로컬 서버로 전송합니다.",
+  "version": "0.2.0",
+  "description": "허용한 사이트(URL 규칙)의 Chrome 탭 요약을 Iris 로컬 서버로 전송합니다.",
   "permissions": ["storage", "tabs", "scripting", "alarms"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://www.youtube.com/*"
+    "https://*.youtube.com/*",
+    "https://*.netflix.com/*",
+    "https://www.google.com/*",
+    "https://www.google.co.kr/*",
+    "https://*.naver.com/*"
   ],
   "action": {
     "default_title": "Iris 모니터링",
@@ -19,7 +23,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["url_rules.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

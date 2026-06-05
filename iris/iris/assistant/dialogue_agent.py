@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from iris.agent.needs_agent import CHAT_ONLY_KNOWLEDGE_INSTRUCTION
 from iris.ai.gemma_client import ChatMessage
 from iris.ai.thinking_policy import LlmPurpose
 from iris.core.command_router import CommandKind
@@ -49,7 +50,10 @@ class DialogueAgent:
         messages = self._assistant.build_general_chat_messages(user_text)
         # 시스템 프롬프트를 대화 전용으로 덮어씀 (첫 메시지만)
         if messages and messages[0].role == "system":
-            messages[0] = ChatMessage("system", _DIALOGUE_SYSTEM)
+            messages[0] = ChatMessage(
+                "system",
+                _DIALOGUE_SYSTEM + "\n\n" + CHAT_ONLY_KNOWLEDGE_INSTRUCTION,
+            )
         raw = self._gemma.chat(messages, purpose=LlmPurpose.DIALOGUE_CHAT)
         return self._with_iris_prefix(raw)
 

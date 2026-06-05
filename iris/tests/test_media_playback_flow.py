@@ -65,6 +65,29 @@ class _MediaGemma:
             return self._ranker or '{"pick_name": null, "confidence": 0, "reason": "없음"}'
         if "Media Playback Verifier" in sys:
             return self._verify or '{"achieved": true, "evidence": "ok", "missing": ""}'
+        # 미디어 사용자 멘트 합성 — outcome_code 힌트로 테스트·간이 응답 분기
+        if "한국어 안내 문장만 작성" in sys:
+            ub = messages[1].content if len(messages) > 1 else ""
+            if "success_search_open" in ub:
+                return "요청하신 검색 결과 페이지를 열었습니다."
+            if "success_play" in ub:
+                return "재생을 시작했습니다."
+            if '"query_missing"' in ub:
+                return "어떤 곡·영상을 재생할지 알려주세요."
+            if '"search_query_needed"' in ub:
+                return "검색어를 알려주세요."
+            if (
+                '"legacy_gate_no_candidates"' in ub
+                or '"youtube_dom_empty_after_poll"' in ub
+                or '"youtube_dom_skipped_no_monitor"' in ub
+                or '"youtube_dom_parse_empty"' in ub
+                or '"youtube_dom_pick_fail"' in ub
+            ):
+                return (
+                    "검색 결과가 아직 화면에 잡히지 않았습니다. "
+                    "잠시 후 다시 요청해 주세요."
+                )
+            return "요청하신 미디어 동작을 처리했습니다."
         return '{"achieved": false, "evidence": "", "missing": ""}'
 
     def chat_with_images(
@@ -475,7 +498,7 @@ def test_perceive_for_play_retries_without_sleep(tmp_path: Path) -> None:
         flow = MediaPlaybackFlow(
             ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
         )
-        obs, candidates, ready = flow._perceive_for_play(
+        obs, candidates, ready, _raw_n, _filt_n = flow._perceive_for_play(
             "youtube",
             "아이유",
             open_url=build_media_open_url("youtube", "아이유"),
@@ -1228,8 +1251,8 @@ def test_play_verify_logs_verify_play_with_vision(tmp_path: Path) -> None:
     assert "true" in payload.lower()
 
 
-def test_youtube_dom_play_open_url_twice(tmp_path: Path) -> None:
-    """DOM mock: search open_url + watch open_url, uia_click 없음."""
+def test_youtube_dom_play_watch_in_same_tab(tmp_path: Path) -> None:
+    """DOM mock: cached results에서 watch는 주소창 네비게이션으로 이동."""
     search_url = build_media_open_url("youtube", "아이유 라일락")
     watch_url = "https://www.youtube.com/watch?v=abc111"
     gemma = _MediaGemma()
@@ -1250,8 +1273,9 @@ def test_youtube_dom_play_open_url_twice(tmp_path: Path) -> None:
     with _patch_media_windows():
         registry.run = MagicMock(  # type: ignore[method-assign]
             side_effect=[
-                AutomationToolResult(True, "URL 열림", search_url[:80]),
-                AutomationToolResult(True, "URL 열림", watch_url[:80]),
+                AutomationToolResult(True, "단축키", "ctrl+l"),
+                AutomationToolResult(True, "키보드 입력", "ok"),
+                AutomationToolResult(True, "단축키", "enter"),
                 _focus_ok(),
                 _perceive_play_watch(),
             ]
@@ -1269,9 +1293,10 @@ def test_youtube_dom_play_open_url_twice(tmp_path: Path) -> None:
         )
     assert "재생" in msg
     open_calls = [c for c in registry.run.call_args_list if c[0][0] == "open_url"]
-    assert len(open_calls) == 2
-    assert "search_query=" in str(open_calls[0][0][1].params.get("url", ""))
-    assert open_calls[1][0][1].params.get("url") == watch_url
+    assert len(open_calls) == 0
+    type_calls = [c for c in registry.run.call_args_list if c[0][0] == "type_text"]
+    assert len(type_calls) == 1
+    assert type_calls[0][0][1].params.get("text") == watch_url
     assert not any(c[0][0] == "uia_click" for c in registry.run.call_args_list)
     yt_logs = assistant._db._execute(
         "SELECT message, result FROM logs WHERE type=?",

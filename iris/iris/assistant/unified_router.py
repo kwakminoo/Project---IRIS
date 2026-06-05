@@ -16,10 +16,10 @@ from iris.assistant.router_policy import (
     is_multi_turn_active,
     resolve_route_lane,
 )
-from iris.assistant.tool_layer import is_search_intent
+from iris.assistant.search_routing import command_kind_for_search_slots
 from iris.config.app_index import resolve_app_candidates_for_llm
 from iris.core.activity_sink import push_activity_line
-from iris.core.command_router import CommandKind, legacy_classify_command
+from iris.core.command_router import CommandKind
 from iris.assistant.media_completion import normalize_routed_media_slots
 from iris.core.context_manager import DialogueContext
 
@@ -27,51 +27,73 @@ if TYPE_CHECKING:
     from iris.assistant.agent_adapter import IrisAssistant
 
 UNIFIED_ROUTER_SYSTEM = """당신은 Iris Unified Router입니다. 사용자 발화를 분석해 JSON만 출력하세요.
-
-역할: 무엇을 원하는지(intent)와 어떻게 실행할지(lane·slots)를 결정합니다. 실행 방법·버튼 경로는 쓰지 마세요.
-
-라우팅 규칙:
-- 로컬 PC 앱 실행(스팀, 메모장, 디스코드 등 + 켜줘/실행/열어/해달라/부탁 등 모든 구어) → intent=launch_app, lane=direct_action, slots.app_key는 app_catalog에 있는 키만. catalog에 없으면 intent=computer_use, search 금지.
-- 웹 정보·날씨·뉴스·영화·"~가 뭐야" 조사 → intent=search, lane=search, slots.query에 실제 검색에 쓸 짧은 질의 한 줄(필수). PC 앱 실행과 혼동 금지.
-- 멀티 스텝 PC 조작(열고 보내고, 메시지 보내기 등) → intent=computer_use, lane=computer_use.
-- 미디어(유튜브·스포티파이·넷플릭스 등 검색/재생) → intent=computer_use, lane=computer_use, task_type=media_play, slots에 platform_hint·media_action·search_query 필수 채움(아래 미디어 규칙).
-- 순수 인사·잡담 → intent=chat, lane=chat_only.
-- PC 사양만 → intent=fast_tool, lane=fast_tool.
-- 작업/게임/창작 모드 진입(바로 앱 실행 금지) → intent=work_mode|game_mode|creative_mode, lane=multi_turn.
-- 명시 https URL 열기 → slots.url, lane=direct_action 가능.
-- critical(셸·삭제·결제·비밀번호·시스템 설정) → risk_hint=critical, needs_user_confirm=true.
-
-pending_cu가 있으면 사용자 답을 approve_followup|reject_followup|clarify|unrelated 중 하나로 분류.
-
-미디어 슬롯 (의도·검색/재생·검색어는 반드시 LLM이 판단 — 규칙 엔진·키워드 매칭 없음):
-- task_type=media_play, intent=computer_use, lane=computer_use.
-- slots.platform_hint: youtube | spotify | netflix | browser | unknown (불명확하면 unknown).
-- slots.media_action:
-  - search: 찾아줘·검색해줘·뭐 있어·목록만 → 검색 결과 페이지까지가 목표.
-  - play: 틀어줘·재생·들려줘·노래/영상 틀어 → 실제 재생(시청/재생 UI)까지가 목표.
-- slots.search_query: 곡명·영상명·채널명·키워드·짧은 구문만. "유튜브에서", "틀어줘", "검색해줘" 등 동사·플랫폼 접두어 제외. STT 오타·표기(예: 치챗/칈챗)는 사용자가 말한 그대로(자동 교정 금지).
-- search_query가 비면 needs_user_confirm=true 또는 clarification에 무엇을 찾/틀지 질문, goal에도 질문 포함.
-- slots.success_criteria (선택): search → search_results_visible, play → playback_confirmed. URL만 열기는 play/search 완료가 아님.
-- slots.skill_id: media_action+search_query가 있으면 media_play (선택, 없으면 코드가 유도).
-- slots.user_request_summary: 사용자 원문 요약(선택).
-- 재생(play)이면 goal에 "…을 재생한다"까지 명시.
-
+역할: (1) 지식 답변 방식 knowledge_lane, (2) PC 실행 방식 lane·intent·slots를 결정합니다.
+실행 방법·버튼 경로·키보드 단축키는 쓰지 마세요.
+=== knowledge_lane (지식 답변 3단) — 가장 먼저 결정 ===
+A) chat_only — 검색 없이 로컬 LLM만
+- 순수 인사·감사·잡담·능력 소개·의견·창작·코딩 아이디어·일반 조언
+- 최신 사실·가격·순위·출시일·법/의료/금융 확정 답이 필요 없는 대화
+- 사용자가 "지금/오늘/최신/요즘/2024/2025/2026" 등 시점을 요구하지 않음
+B) search — 웹 검색 후 근거 기반 답변 (기본: 사실·정의·비교·최신)
+- "~가 뭐야", "~란", 정의·설명·백과형 질문 (단일 개념도 search 우선)
+- 두 개 이상 대상 비교: "A와 B 차이", "vs", "뭐가 나아", "장단점"
+- 날씨·뉴스·영화·주가·환율·이벤트·제품 스펙·버전·가격 등 시점 민감 정보
+- 숫자·날짜·순위·인용이 중요한 질문
+- 사용자가 "검색해", "찾아봐", "출처", "근거"를 요구
+C) hybrid — 검색 시도 + 부족하면 모델 지식으로 보완 (불확실·복합 질문)
+- search만으로는 맥락이 부족해 보이지만 답은 필요한 경우
+- 역사+최신 혼합, 넓은 주제("AI 시장 전망"), 다단계 설명+사실 혼합
+- 비교이지만 한쪽이 매우 생소하거나 질문이 모호한 경우
+- confidence < 0.75 이고 사실 검증이 도움이 될 때
+우선순위 (충돌 시):
+1) PC 실행 의도(앱 실행·CU·미디어)가 있으면 knowledge_lane은 보조 — 실행 lane 우선
+2) 비교·vs·차이·두 고유명사 → search (chat_only 금지)
+3) 최신·숫자·날짜 요구 → search
+4) 단순 인사·잡담 → chat_only
+5) 애매하면 hybrid (search보다 chat_only를 기본으로 두지 말 것)
+=== 실행 라우팅 (기존과 동일) ===
+- 로컬 PC 앱 실행 → intent=launch_app, lane=direct_action, slots.app_key는 app_catalog만. 없으면 computer_use, search 금지.
+- 멀티 스텝 PC 조작 → intent=computer_use, lane=computer_use.
+- 미디어 검색/재생 → intent=computer_use, lane=computer_use, task_type=media_play, slots.platform_hint·media_action·search_query 필수.
+- PC 사양 → intent=fast_tool, lane=fast_tool.
+- 작업/게임/창작 모드 → intent=work_mode|game_mode|creative_mode, lane=multi_turn.
+- 명시 https URL → slots.url, lane=direct_action 가능.
+- critical → risk_hint=critical, needs_user_confirm=true.
+pending_cu가 있으면 approve_followup|reject_followup|clarify|unrelated.
+=== search / hybrid 슬롯 규칙 ===
+- slots.query: 주 검색어 1개 (짧은 키워드, 한국어 또는 영어, 2~8단어)
+- slots.queries: 추가 검색어 배열 (비교 시 필수, 2~4개)
+  예) "GPT vs Gemini" → queries: ["GPT large language model", "Google Gemini model", "GPT vs Gemini differences"]
+- slots.search_topic: general | weather | news | movie | current_info | comparison | definition
+- slots.answer_shape: definition | comparison | summary | how_to | list
+- 비교(comparison)일 때 queries는 최소 2개, 각 대상을 분리해 검색 가능하게 작성
+=== 검색 수집 정책(P2 MULTI-ENGINE) — 운영용 참고 문구 ===
+- 웹 검색 수집 엔진 우선순위(앞 성공하면 종료):
+  Brave Search API → Tavily API → SearXNG(엔진 다변화) → DuckDuckGo HTML → Playwright Google SERP(폴백, IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1일 때만)
+- SearXNG 규칙: SEARXNG_ENGINES 기본값을 google,bing,duckduckgo,wikipedia로 유지하고, keep_only도 google 단독이 아니게 유지하세요.
+- Router slots.query / slots.queries에는 위 백엔드로 전달될 검색어만 담습니다. (LLM 답변 프롬프트/검증 문구가 아님)
+미디어 슬롯 (변경 없음):
+- task_type=media_play, platform_hint, media_action, search_query, success_criteria 등 기존 규칙 준수.
 JSON 스키마(엄격):
 {
   "intent": "chat|search|launch_app|computer_use|fast_tool|work_mode|game_mode|creative_mode|monitoring|approve_followup|reject_followup|clarify|unrelated",
-  "lane": "chat_only|search|direct_action|computer_use|fast_tool|multi_turn",
-  "goal": "한국어 실행 목표 한 문장 (재생이면 '…을 재생한다'까지)",
-  "task_type": "open_app|media_play|send_message|file|window|multi_step|unknown",
+  "lane": "chat_only|search|hybrid|direct_action|computer_use|fast_tool|multi_turn",
+  "knowledge_lane": "chat_only|search|hybrid",
+  "goal": "한국어 실행·답변 목표 한 문장",
+  "task_type": "open_app|media_play|send_message|file|window|multi_step|knowledge|unknown",
   "slots": {
     "app_key": "",
     "display_name": "",
     "query": "",
+    "queries": [],
+    "search_topic": "general|weather|news|movie|current_info|comparison|definition",
+    "answer_shape": "definition|comparison|summary|how_to|list",
     "url": "",
     "platform_hint": "youtube|spotify|netflix|browser|unknown",
     "media_action": "search|play",
     "search_query": "",
     "success_criteria": "search_results_visible|playback_confirmed",
-    "skill_id": "media_play",
+    "skill_id": "",
     "user_request_summary": ""
   },
   "risk_hint": "low|medium|high|critical",
@@ -79,18 +101,45 @@ JSON 스키마(엄격):
   "clarification": null,
   "confidence": 0.0
 }
-
-다른 텍스트 없이 JSON만 출력하세요.
+규칙:
+- knowledge_lane=search 이면 lane도 search (PC 실행 제외).
+- knowledge_lane=hybrid 이면 lane=hybrid (PC 실행 제외).
+- knowledge_lane=chat_only 이면 lane=chat_only (PC 실행 제외).
+- PC 실행 intent가 있으면 knowledge_lane은 무시해도 됨.
+- 다른 텍스트 없이 JSON만 출력하세요.
 """
 
 _LANE_MAP: dict[str, RouteLane] = {
     "chat_only": RouteLane.CHAT_ONLY,
     "search": RouteLane.SEARCH,
+    "hybrid": RouteLane.HYBRID,
     "direct_action": RouteLane.DIRECT_ACTION,
     "computer_use": RouteLane.COMPUTER_USE,
     "fast_tool": RouteLane.FAST_TOOL,
     "multi_turn": RouteLane.MULTI_TURN,
 }
+
+_KNOWLEDGE_LANE_MAP: dict[str, RouteLane] = {
+    "chat_only": RouteLane.CHAT_ONLY,
+    "search": RouteLane.SEARCH,
+    "hybrid": RouteLane.HYBRID,
+}
+
+# PC 실행 intent — knowledge_lane으로 lane을 덮어쓰지 않음
+_PC_EXEC_INTENTS = frozenset(
+    {
+        "launch_app",
+        "computer_use",
+        "fast_tool",
+        "work_mode",
+        "game_mode",
+        "creative_mode",
+        "monitoring",
+        "approve_followup",
+        "reject_followup",
+    }
+)
+
 
 def _normalize_media_slots(slots: dict[str, Any]) -> dict[str, Any]:
     """LLM slots 미디어 필드 정규화 — media_completion.normalize_routed_media_slots 위임."""
@@ -117,6 +166,7 @@ class UnifiedRoutePayload:
     needs_user_confirm: bool = False
     clarification: str | None = None
     confidence: float = 0.0
+    knowledge_lane: str | None = None
 
 
 def _is_llm_unavailable(text: str) -> bool:
@@ -129,10 +179,45 @@ def _parse_lane(raw: object) -> RouteLane | None:
     return _LANE_MAP.get(raw.strip().lower())
 
 
+def _parse_knowledge_lane(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    key = raw.strip().lower()
+    if key in _KNOWLEDGE_LANE_MAP:
+        return key
+    return None
+
+
 def _parse_slots(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
-    return {str(k): v for k, v in raw.items() if v is not None and str(v).strip() != ""}
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if v is None:
+            continue
+        key = str(k)
+        if key == "queries" and isinstance(v, list):
+            cleaned = [str(x).strip() for x in v if str(x).strip()]
+            if cleaned:
+                out[key] = cleaned
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        out[key] = v
+    return out
+
+
+def _sync_knowledge_lane_to_lane(
+    intent: str,
+    lane: RouteLane,
+    knowledge_lane: str | None,
+) -> RouteLane:
+    """지식 3단 — PC 실행이 아니면 knowledge_lane이 lane을 결정."""
+    if intent in _PC_EXEC_INTENTS:
+        return lane
+    if knowledge_lane and knowledge_lane in _KNOWLEDGE_LANE_MAP:
+        return _KNOWLEDGE_LANE_MAP[knowledge_lane]
+    return lane
 
 
 def _pick_catalog_entry(
@@ -146,9 +231,14 @@ def _pick_catalog_entry(
     return None
 
 
-def _kind_for_search(user_text: str, fallback: CommandKind) -> CommandKind:
-    k = legacy_classify_command(user_text)
-    return k if is_search_intent(k) else CommandKind.WEB_SEARCH
+def _safe_chat_fallback_routed_turn(user_text: str) -> RoutedTurn:
+    """Unified Router 오프라인·JSON 실패 시 — regex 휴리스틱 대신 안전한 대화 레인."""
+    return RoutedTurn(
+        kind=CommandKind.GENERAL_CHAT,
+        lane=RouteLane.CHAT_ONLY,
+        goal=user_text.strip() or None,
+        knowledge_lane="chat_only",
+    )
 
 
 def _kind_from_payload(
@@ -164,14 +254,11 @@ def _kind_from_payload(
         return CommandKind.APP_LAUNCH
     if intent == "fast_tool" or payload.lane is RouteLane.FAST_TOOL:
         return CommandKind.GET_SYSTEM_INFO
-    if intent == "search" or payload.lane is RouteLane.SEARCH:
-        return _kind_for_search(user_text, fallback)
+    if intent == "search" or payload.lane in (RouteLane.SEARCH, RouteLane.HYBRID):
+        return command_kind_for_search_slots(payload.slots)
     if intent == "monitoring":
         return CommandKind.MONITORING_STATUS
     if intent in {"computer_use", "approve_followup", "reject_followup", "clarify"}:
-        k = legacy_classify_command(user_text)
-        if k in {CommandKind.COMPUTER_USE, CommandKind.COMPLEX_AUTOMATION}:
-            return k
         return CommandKind.COMPUTER_USE
     if intent == "chat" or payload.lane is RouteLane.CHAT_ONLY:
         return CommandKind.GENERAL_CHAT
@@ -189,6 +276,9 @@ def parse_unified_route_json(
 
     intent_raw = raw.get("intent")
     intent = intent_raw.strip().lower() if isinstance(intent_raw, str) else "unknown"
+
+    knowledge_lane = _parse_knowledge_lane(raw.get("knowledge_lane"))
+    lane = _sync_knowledge_lane_to_lane(intent, lane, knowledge_lane)
 
     goal_raw = raw.get("goal")
     goal = goal_raw.strip() if isinstance(goal_raw, str) and goal_raw.strip() else user_text.strip()
@@ -223,6 +313,7 @@ def parse_unified_route_json(
         needs_user_confirm=needs_confirm,
         clarification=clarification,
         confidence=confidence,
+        knowledge_lane=knowledge_lane,
     )
 
 
@@ -238,6 +329,17 @@ def _build_dialogue_context_block(ctx: DialogueContext) -> str:
     )
 
 
+def _routed_turn_common_fields(payload: UnifiedRoutePayload) -> dict[str, Any]:
+    return {
+        "goal": payload.goal,
+        "task_type": payload.task_type,
+        "risk_hint": payload.risk_hint,
+        "needs_user_confirm": payload.needs_user_confirm,
+        "clarification": payload.clarification,
+        "knowledge_lane": payload.knowledge_lane,
+    }
+
+
 def _payload_to_routed_turn(
     payload: UnifiedRoutePayload,
     user_text: str,
@@ -251,6 +353,7 @@ def _payload_to_routed_turn(
     if payload.task_type:
         slots.setdefault("task_type", payload.task_type)
     slots = normalize_routed_media_slots(slots)
+    common = _routed_turn_common_fields(payload)
 
     intent = payload.intent.strip().lower()
     lane = payload.lane
@@ -262,7 +365,6 @@ def _payload_to_routed_turn(
         raw_key = str(slots.get("app_key") or "").strip()
         entry = _pick_catalog_entry(raw_key, catalog) if raw_key else None
         if entry is None and catalog:
-            # LLM이 display_name만 넣은 경우
             disp = str(slots.get("display_name") or "").strip().lower()
             for c in catalog:
                 if str(c.get("display_name", "")).strip().lower() == disp:
@@ -274,25 +376,16 @@ def _payload_to_routed_turn(
             return RoutedTurn(
                 kind=CommandKind.APP_LAUNCH,
                 lane=RouteLane.DIRECT_ACTION,
-                goal=payload.goal,
                 slots=slots,
-                task_type=payload.task_type or "open_app",
-                risk_hint=payload.risk_hint,
-                needs_user_confirm=payload.needs_user_confirm,
-                clarification=payload.clarification,
+                **common,
             )
-        # catalog miss — Computer Use로 위임 (웹 검색 아님)
-        goal = payload.goal or user_text.strip()
         slots.pop("app_key", None)
+        cu_common = {**common, "goal": payload.goal or user_text.strip()}
         return RoutedTurn(
             kind=CommandKind.COMPUTER_USE,
             lane=RouteLane.COMPUTER_USE,
-            goal=goal,
             slots=slots,
-            task_type=payload.task_type or "open_app",
-            risk_hint=payload.risk_hint,
-            needs_user_confirm=payload.needs_user_confirm,
-            clarification=payload.clarification,
+            **cu_common,
         )
 
     open_url = str(slots.get("url") or "").strip() or detect_open_url(user_text)
@@ -301,35 +394,24 @@ def _payload_to_routed_turn(
             kind=CommandKind.OPEN_URL,
             lane=RouteLane.DIRECT_ACTION,
             open_url=open_url,
-            goal=payload.goal,
             slots=slots,
-            task_type=payload.task_type,
-            risk_hint=payload.risk_hint,
-            needs_user_confirm=payload.needs_user_confirm,
-            clarification=payload.clarification,
+            **common,
         )
 
     if lane is RouteLane.COMPUTER_USE:
+        cu_common = {**common, "goal": payload.goal or user_text.strip()}
         return RoutedTurn(
             kind=kind if kind is CommandKind.COMPUTER_USE else CommandKind.COMPUTER_USE,
             lane=RouteLane.COMPUTER_USE,
-            goal=payload.goal or user_text.strip(),
             slots=slots,
-            task_type=payload.task_type,
-            risk_hint=payload.risk_hint,
-            needs_user_confirm=payload.needs_user_confirm,
-            clarification=payload.clarification,
+            **cu_common,
         )
 
     return RoutedTurn(
         kind=kind,
         lane=lane,
-        goal=payload.goal,
         slots=slots,
-        task_type=payload.task_type,
-        risk_hint=payload.risk_hint,
-        needs_user_confirm=payload.needs_user_confirm,
-        clarification=payload.clarification,
+        **common,
     )
 
 
@@ -343,14 +425,21 @@ def route_user_turn(
     recent_turns: list[str] | None = None,
 ) -> RoutedTurn:
     """
-    단일 진입점 — Gemma JSON 라우팅. 실패·오프라인 시 legacy_classify + resolve_route_lane.
+    단일 진입점 — Gemma JSON 라우팅.
+    실패·오프라인 시 regex 휴리스틱 대신 CHAT_ONLY 안전 폴백(멀티턴은 상태 기반 resolve만).
     """
     text = user_text.strip()
-    fallback_kind = legacy_classify_command(text)
 
     if is_multi_turn_active(ctx):
-        push_activity_line("Router: multi-turn active — using legacy resolver.")
-        return resolve_route_lane(text, fallback_kind, ctx)
+        push_activity_line("Router: multi-turn active — lane from dialogue step.")
+        kind = CommandKind.GENERAL_CHAT
+        if ctx.step.name.startswith("WORK"):
+            kind = CommandKind.WORK_MODE
+        elif ctx.step.name.startswith("GAME"):
+            kind = CommandKind.GAME_MODE
+        elif ctx.step.name.startswith("CREATIVE"):
+            kind = CommandKind.CREATIVE_MODE
+        return resolve_route_lane(text, kind, ctx)
 
     catalog = app_catalog
     if catalog is None and assistant is not None:
@@ -388,17 +477,19 @@ def route_user_turn(
     push_activity_line("Router: unified LLM JSON routing call.")
     raw_reply = gemma.chat(messages, purpose=LlmPurpose.UNIFIED_ROUTER)
     if _is_llm_unavailable(raw_reply):
-        push_activity_line("Router: unified classifier offline — legacy intent resolver.")
-        return resolve_route_lane(text, fallback_kind, ctx)
+        push_activity_line("Router: unified classifier offline — chat_only fallback.")
+        return _safe_chat_fallback_routed_turn(text)
 
     data = extract_json_object(raw_reply)
     if not data:
-        push_activity_line("Router: unified JSON extract failed — legacy resolver.")
-        return resolve_route_lane(text, fallback_kind, ctx)
+        push_activity_line("Router: unified JSON extract failed — chat_only fallback.")
+        return _safe_chat_fallback_routed_turn(text)
 
     payload = parse_unified_route_json(data, text)
     if payload is None:
-        push_activity_line("Router: unified payload invalid — legacy resolver.")
-        return resolve_route_lane(text, fallback_kind, ctx)
+        push_activity_line("Router: unified payload invalid — chat_only fallback.")
+        return _safe_chat_fallback_routed_turn(text)
 
-    return _payload_to_routed_turn(payload, text, catalog, fallback_kind=fallback_kind)
+    return _payload_to_routed_turn(
+        payload, text, catalog, fallback_kind=CommandKind.GENERAL_CHAT
+    )

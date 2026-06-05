@@ -1,6 +1,15 @@
-// 허용 목록에 있는 탭에서만 동작 (background 가 주기적으로 스크립트 실행)
+// URL 규칙 상태 ping (실제 ingest는 background)
 
-chrome.storage.local.get(["irisAllowedTabIds"], (data) => {
-  const allowed = new Set(data.irisAllowedTabIds || []);
-  chrome.runtime.sendMessage({ type: "irisPing", allowed: allowed.has(0) });
-});
+chrome.storage.local.get(
+  [IRIS_STORAGE.allowedUrlRules, IRIS_STORAGE.allowedTabIds],
+  (data) => {
+    const rules = migrateLegacyTabIdsToRules(
+      data[IRIS_STORAGE.allowedUrlRules],
+      data[IRIS_STORAGE.allowedTabIds]
+    );
+    chrome.runtime.sendMessage({
+      type: "irisPing",
+      allowedUrlRules: rules,
+    });
+  }
+);

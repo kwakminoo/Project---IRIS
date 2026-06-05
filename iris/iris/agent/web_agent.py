@@ -1,7 +1,8 @@
-"""Playwright 웹 검색·페이지 리서치 (읽기 전용, headless=False)."""
+"""Playwright 웹 검색·페이지 리서치 (읽기 전용, 기본 headless)."""
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Sequence
@@ -95,6 +96,12 @@ def build_body_snippet(paragraphs: Sequence[str], max_chars: int = 480) -> str:
     return " ".join(parts)
 
 
+def _playwright_headless() -> bool:
+    """기본 True — 검색 시 브라우저 창을 띄우지 않음 (IRIS_PLAYWRIGHT_HEADLESS=0 이면 표시)."""
+    raw = os.getenv("IRIS_PLAYWRIGHT_HEADLESS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _domain(url: str) -> str:
     try:
         return urlparse(url).netloc.lower()
@@ -122,7 +129,7 @@ def fetch_search_hits(query: str, max_results: int = 8) -> List[SearchHit]:
     seen_domains: set[str] = set()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=_playwright_headless())
         page = browser.new_page()
         try:
             page.goto(google_search_url(query), timeout=60000, wait_until="domcontentloaded")
@@ -298,7 +305,7 @@ def enrich_research_hits(
 
     enriched: List[SearchHit] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=_playwright_headless())
         page = browser.new_page()
         try:
             for hit in to_visit:

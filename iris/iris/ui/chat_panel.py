@@ -134,6 +134,12 @@ class ChatPanel(QWidget):
         super().__init__()
         self._log = QTextEdit()
         self._log.setReadOnly(True)
+        self._log.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self._log.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._log.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._log.setMinimumHeight(170)
         self._log.setStyleSheet(
             """

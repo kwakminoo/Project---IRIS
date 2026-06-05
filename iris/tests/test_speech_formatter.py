@@ -54,3 +54,20 @@ def test_edge_tts_uses_plain_text_not_ssml() -> None:
     assert "<speak" not in payload
     assert "</speak>" not in payload
     assert "첫 문장" in payload
+
+
+def test_speech_formatter_strips_source_citations() -> None:
+    spoken = format_speech(
+        "루왁커피는 ... 출처: 나무위키, hapt.co.kr",
+        AppState.IDLE,
+    )
+    assert "출처" not in spoken
+
+
+def test_speech_formatter_strips_source_failure_sentence() -> None:
+    spoken = format_speech(
+        "출처에서 확인되지 않았습니다.",
+        AppState.IDLE,
+    )
+    assert "출처" in spoken
+    assert "확인" in spoken
