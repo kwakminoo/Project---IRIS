@@ -59,11 +59,12 @@ class MonitorManager(QObject):
         self._http_server: ThreadingHTTPServer | None = None
 
     def start(self) -> None:
+        # Chrome 확장 ingest — 유튜브 DOM·탭 요약 (미디어 play Tier-1). 모니터링 off여도 수신.
+        self._start_http()
         if not self._settings.enable_monitoring:
             return
         self._db.ensure_current_screen_target()
         self._db.ensure_system_log_target()
-        self._start_http()
         sec = max(1, int(self._settings.monitor_interval_seconds))
         self._timer.start(sec * 1000)
 
@@ -126,6 +127,18 @@ class MonitorManager(QObject):
     def refresh_now(self) -> None:
         """수동 한 번 갱신."""
         self._on_tick()
+
+    def ensure_extension_ingest_server(self) -> bool:
+        """Chrome 확장 수신 서버 기동 — 이미 떠 있으면 True."""
+        self._start_http()
+        return self._http_server is not None
+
+    def extension_ingest_server_active(self) -> bool:
+        return self._http_server is not None
+
+    @property
+    def browser_monitor(self) -> BrowserTabMonitor:
+        return self._browser
 
     def _on_tick(self) -> None:
         if not self._settings.enable_monitoring:

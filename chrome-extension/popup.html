@@ -6,32 +6,75 @@
     <style>
       body {
         font-family: system-ui, sans-serif;
-        width: 320px;
+        width: 360px;
         padding: 10px;
+        margin: 0;
       }
-      label {
+      h3 {
+        margin: 0 0 8px;
+      }
+      .hint {
+        font-size: 12px;
+        color: #444;
+        margin-bottom: 10px;
+      }
+      .rules {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 8px 10px;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      .rule-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 6px 0;
+      }
+      .rule-row label {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.35;
+        cursor: pointer;
+      }
+      label.field {
         display: block;
-        margin: 8px 0 4px;
+        margin: 10px 0 4px;
+        font-size: 12px;
+      }
+      input[type="number"],
+      input[type="password"] {
+        width: 100%;
+        box-sizing: border-box;
       }
       button {
         margin-top: 10px;
         width: 100%;
         padding: 8px;
+        cursor: pointer;
+      }
+      #out {
+        font-size: 11px;
+        white-space: pre-wrap;
+        margin-top: 10px;
+        color: #333;
       }
     </style>
   </head>
   <body>
-    <h3>Iris 탭 모니터링</h3>
-    <p style="font-size: 12px; color: #444">
-      현재 탭을 허용 목록에 추가하면 요약 텍스트만 로컬 Iris로 전송됩니다.
+    <h3>Iris URL 모니터링</h3>
+    <p class="hint">
+      탭 ID가 아닌 <strong>사이트(URL) 규칙</strong>입니다. 체크한 사이트는 어떤
+      Chrome 탭·새 링크에서도 Iris로 요약이 전송됩니다.
     </p>
-    <label>로컬 포트</label>
+    <div class="rules" id="rulesBox"></div>
+    <label class="field">로컬 포트 (iris/.env IRIS_EXTENSION_PORT)</label>
     <input id="port" type="number" value="17777" />
-    <label>토큰 (.env 의 IRIS_EXTENSION_TOKEN)</label>
-    <input id="token" type="password" placeholder="선택" />
-    <button id="allow">현재 탭 허용</button>
-    <button id="revoke">현재 탭 제거</button>
-    <pre id="out" style="font-size: 11px; white-space: pre-wrap"></pre>
+    <label class="field">토큰 (IRIS_EXTENSION_TOKEN, 선택)</label>
+    <input id="token" type="password" placeholder="비우면 무토큰" />
+    <button id="save" type="button">설정 저장</button>
+    <pre id="out"></pre>
+    <script src="url_rules.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

@@ -98,6 +98,7 @@ class RouteLane(str, Enum):
     """한 턴 처리 레인."""
 
     CHAT_ONLY = "CHAT_ONLY"
+    HYBRID = "HYBRID"  # 검색 시도 후 부족분은 LLM 일반 지식으로 보완
     DIRECT_ACTION = "DIRECT_ACTION"
     FAST_TOOL = "FAST_TOOL"
     COMPUTER_USE = "COMPUTER_USE"
@@ -119,6 +120,7 @@ class RoutedTurn:
     risk_hint: str = "low"
     needs_user_confirm: bool = False
     clarification: str | None = None
+    knowledge_lane: str | None = None  # chat_only | search | hybrid (지식 답변 3단)
 
 
 def is_chat_only(text: str, kind: CommandKind) -> bool:

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from iris.assistant.dialogue_agent import DialogueAgent
 from iris.assistant.computer_use_agent import extract_user_question
@@ -16,8 +17,6 @@ from iris.assistant.orchestrator import AgentOrchestrator
 from iris.assistant.router_policy import (
     RouteLane,
     RoutedTurn,
-    is_ambiguous_for_fast_path,
-    is_chat_only,
     is_multi_turn_active,
     resolve_route_lane,
 )
@@ -25,8 +24,6 @@ from iris.assistant.safety_guard import quick_block_user_text
 from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind
 from iris.core.context_manager import DialogueStep, PendingComputerUseGoal
-from iris.core.intent_router import route_user_intent
-
 if TYPE_CHECKING:
     from iris.assistant.agent_adapter import IrisAssistant
     from iris.ai.gemma_client import GemmaClient
@@ -38,6 +35,32 @@ def _search_slot_query(routed: RoutedTurn) -> str | None:
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return None
+
+
+def _search_slot_queries(routed: RoutedTurn) -> list[str]:
+    """비교 등 — slots.queries 추가 검색어."""
+    raw = routed.slots.get("queries")
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _search_answer_shape(routed: RoutedTurn) -> str | None:
+    raw = routed.slots.get("answer_shape")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower()
+    return None
+
+
+def _build_search_delegate_meta(routed: RoutedTurn, *, hybrid: bool) -> str:
+    """SearchWorker·UI에 전달할 JSON 메타."""
+    meta: dict[str, Any] = {
+        "hybrid": hybrid,
+        "queries": _search_slot_queries(routed),
+        "answer_shape": _search_answer_shape(routed) or "",
+        "knowledge_lane": routed.knowledge_lane or "",
+    }
+    return json.dumps(meta, ensure_ascii=False)
 
 
 @dataclass
@@ -55,6 +78,7 @@ class TurnResult:
     search_intent_name: str | None = None
     # Phase 3: 라우터 slots.query → 웹 리서치 기본 검색어 (비어 있으면 기존 추출 로직)
     search_query: str | None = None
+    search_meta_json: str = ""  # hybrid·queries·answer_shape
     store_history: bool = False
 
     @property
@@ -112,39 +136,26 @@ class TurnCoordinator:
             if cu_result is not None:
                 return cu_result
 
-        # --- Fast / Slow path (하이브리드 라우팅, 장기 PAV 기본 유지) ---
-        # Slow path: 앱 실행·CU·검색·멀티턴·CRITICAL — Unified LLM Router 또는 규칙/Intent 폴백
-        # Fast path: 명확한 인사·잡담·능력 질문 — Unified Router LLM 스킵, DialogueAgent.chat 1회
-        # 애매한 발화(is_ambiguous_for_fast_path)는 항상 Slow path (false negative 방지)
+        # --- 라우팅: 기본은 Unified LLM Router (regex fast path 제거) ---
         routed_turn: RoutedTurn
-        if is_multi_turn_active(ctx):
-            kind = routed if routed is not None else route_user_intent(user_text)
-            routed_turn = resolve_route_lane(user_text, kind, ctx)
-        elif (
-            _chat_fast_path_enabled(self._assistant)
-            and not is_ambiguous_for_fast_path(user_text)
-            and is_chat_only(user_text, CommandKind.GENERAL_CHAT)
-        ):
-            push_activity_line(
-                "Router: chat fast path (rule) — skipping unified LLM."
-            )
-            logs.append("chat_fast_path")
-            routed_turn = RoutedTurn(
-                kind=CommandKind.GENERAL_CHAT,
-                lane=RouteLane.CHAT_ONLY,
-            )
-        elif _unified_llm_router_enabled(self._assistant):
+        if _unified_llm_router_enabled(self._assistant):
             routed_turn = route_user_turn(
                 user_text, ctx, self._gemma, assistant=self._assistant
             )
         elif _llm_intent_router_enabled(self._assistant):
-            kind = routed if routed is not None else route_user_intent(user_text)
+            fb = routed if routed is not None else CommandKind.GENERAL_CHAT
             routed_turn = route_with_llm(
-                user_text, ctx, self._gemma, fallback_kind=kind
+                user_text, ctx, self._gemma, fallback_kind=fb
             )
         else:
-            kind = routed if routed is not None else route_user_intent(user_text)
-            routed_turn = resolve_route_lane(user_text, kind, ctx)
+            push_activity_line(
+                "Router: LLM routers disabled — chat_only safe fallback."
+            )
+            logs.append("router_llm_disabled")
+            routed_turn = RoutedTurn(
+                kind=CommandKind.GENERAL_CHAT,
+                lane=RouteLane.CHAT_ONLY,
+            )
         lane = routed_turn.lane
         kind = routed_turn.kind
         logs.append(f"lane={lane.value} kind={kind.name}")
@@ -193,6 +204,23 @@ class TurnCoordinator:
                 delegate_search=True,
                 search_intent_name=kind.name,
                 search_query=slot_q,
+                search_meta_json=_build_search_delegate_meta(routed_turn, hybrid=False),
+            )
+
+        if lane is RouteLane.HYBRID:
+            slot_q = _search_slot_query(routed_turn)
+            push_activity_line("Lane HYBRID: search then LLM with hybrid prompt.")
+            return TurnResult(
+                turn_id=turn_id,
+                route=lane.value,
+                user_visible="",
+                early_ack=None,
+                executed=False,
+                logs=logs,
+                delegate_search=True,
+                search_intent_name=kind.name,
+                search_query=slot_q,
+                search_meta_json=_build_search_delegate_meta(routed_turn, hybrid=True),
             )
 
         if lane is RouteLane.CHAT_ONLY:
@@ -563,13 +591,6 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
-
-
-def _chat_fast_path_enabled(assistant: IrisAssistant) -> bool:
-    settings = assistant._settings
-    if settings is None:
-        return True
-    return bool(getattr(settings, "chat_fast_path_enabled", True))
 
 
 def _unified_llm_router_enabled(assistant: IrisAssistant) -> bool:

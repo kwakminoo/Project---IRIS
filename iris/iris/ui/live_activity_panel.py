@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtGui import QColor, QFont, QPalette, QTextCursor
 from PyQt6.QtWidgets import QFrame, QLabel, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
 
 from iris.core.activity_privacy import prepare_activity_line
@@ -36,19 +36,34 @@ class LiveActivityPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("LiveActivityPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setStyleSheet(
+            """
+            QWidget#LiveActivityPanel {
+                background: transparent;
+            }
+            """
+        )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 8, 0, 6)
         lay.setSpacing(4)
 
         hdr = QLabel("Live Activity / Internal Log")
+        hdr.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        hdr.setAutoFillBackground(False)
         hdr.setStyleSheet(
             "color: rgba(226,232,240,0.55); font-size: 11px; font-weight: 600;"
+            "background: transparent;"
         )
         lay.addWidget(hdr)
 
         self._editor = QPlainTextEdit()
         self._editor.setObjectName("LiveActivityLog")
+        self._editor.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._editor.setAutoFillBackground(False)
         self._editor.setReadOnly(True)
         self._editor.setUndoRedoEnabled(False)
         self._editor.setPlaceholderText("Idle.")
@@ -61,14 +76,26 @@ class LiveActivityPanel(QWidget):
         self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._editor.setFrameShape(QFrame.Shape.NoFrame)
+        transparent = QColor(0, 0, 0, 0)
+        editor_pal = self._editor.palette()
+        editor_pal.setColor(QPalette.ColorRole.Base, transparent)
+        editor_pal.setColor(QPalette.ColorRole.Window, transparent)
+        self._editor.setPalette(editor_pal)
         self._editor.setStyleSheet(
             """
             QPlainTextEdit#LiveActivityLog {
+                background: transparent;
                 background-color: transparent;
                 color: rgba(226, 232, 240, 0.68);
                 border: none;
                 outline: none;
                 padding: 0 2px 2px 2px;
+            }
+            QPlainTextEdit#LiveActivityLog QScrollBar:vertical,
+            QPlainTextEdit#LiveActivityLog QScrollBar:horizontal {
+                width: 0px;
+                height: 0px;
+                background: transparent;
             }
             """
         )

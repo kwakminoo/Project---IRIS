@@ -78,11 +78,12 @@ def test_route_steam_launch_not_search(tmp_path: Path) -> None:
 def test_route_movie_search() -> None:
     gemma = _FakeGemma(
         '{"intent":"search","lane":"search","goal":"최신 영화 정보",'
-        '"task_type":"unknown","slots":{"query":"요즘 영화"},'
+        '"task_type":"unknown","slots":{"query":"요즘 영화","search_topic":"movie"},'
         '"risk_hint":"low","needs_user_confirm":false,"confidence":0.8}'
     )
     routed = route_user_turn("요즘 영화 뭐 있어", DialogueContext(), gemma)  # type: ignore[arg-type]
     assert routed.lane is RouteLane.SEARCH
+    assert routed.kind is CommandKind.MOVIE_SEARCH
 
 
 def test_route_chat_only() -> None:
@@ -111,11 +112,9 @@ def test_route_computer_use_kakao() -> None:
 def test_fallback_on_llm_unavailable() -> None:
     gemma = _FakeGemma(FALLBACK_KO)
     text = "스팀 켜줘"
-    kind = legacy_classify_command(text)
-    expected = resolve_route_lane(text, kind, DialogueContext())
     routed = route_user_turn(text, DialogueContext(), gemma)  # type: ignore[arg-type]
-    assert routed.lane == expected.lane
-    assert routed.kind == expected.kind
+    assert routed.lane is RouteLane.CHAT_ONLY
+    assert routed.kind is CommandKind.GENERAL_CHAT
 
 
 def test_steam_legacy_classify_after_launch_pattern_fix() -> None:
@@ -147,6 +146,36 @@ def test_unified_router_system_includes_media_slots_rules() -> None:
     assert "media_action" in UNIFIED_ROUTER_SYSTEM
     assert "platform_hint" in UNIFIED_ROUTER_SYSTEM
     assert "search_query" in UNIFIED_ROUTER_SYSTEM
+
+
+def test_unified_router_system_knowledge_lane() -> None:
+    assert "knowledge_lane" in UNIFIED_ROUTER_SYSTEM
+    assert "hybrid" in UNIFIED_ROUTER_SYSTEM
+    assert "slots.queries" in UNIFIED_ROUTER_SYSTEM or "queries" in UNIFIED_ROUTER_SYSTEM
+
+
+def test_parse_knowledge_lane_syncs_lane() -> None:
+    raw = {
+        "intent": "search",
+        "lane": "chat_only",
+        "knowledge_lane": "search",
+        "goal": "GPT와 Gemini 차이",
+        "task_type": "knowledge",
+        "slots": {
+            "query": "GPT vs Gemini",
+            "queries": ["OpenAI GPT", "Google Gemini"],
+            "search_topic": "comparison",
+            "answer_shape": "comparison",
+        },
+        "risk_hint": "low",
+        "needs_user_confirm": False,
+        "confidence": 0.88,
+    }
+    payload = parse_unified_route_json(raw, "GPT랑 Gemini 차이")
+    assert payload is not None
+    assert payload.lane is RouteLane.SEARCH
+    assert payload.knowledge_lane == "search"
+    assert payload.slots.get("queries")
 
 
 def test_parse_media_play_youtube() -> None:

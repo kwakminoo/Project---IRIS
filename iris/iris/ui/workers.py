@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Sequence
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from iris.agent.needs_agent import research_hits_with_intent
+from iris.agent.needs_agent import research_hits_multi, research_hits_with_intent
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.ai.thinking_policy import LlmPurpose
 from iris.assistant.turn_coordinator import TurnCoordinator
@@ -35,7 +35,7 @@ class LlmWorker(QThread):
 
 
 class SearchWorker(QThread):
-    finished_hits = pyqtSignal(str, list, str)
+    finished_hits = pyqtSignal(str, list, str, str)  # query, hits, intent.name, meta_json
 
     def __init__(
         self,
@@ -43,21 +43,37 @@ class SearchWorker(QThread):
         intent: CommandKind = CommandKind.WEB_SEARCH,
         *,
         slot_query: str | None = None,
+        slot_queries: list[str] | None = None,
+        search_meta_json: str = "",
     ) -> None:
         super().__init__()
         self._query_text = query_text
         self._intent = intent
         self._slot_query = slot_query
+        self._slot_queries = slot_queries or []
+        self._search_meta_json = search_meta_json
 
     def run(self) -> None:
         push_activity_line(
             f"Worker: SearchWorker started intent={self._intent.name}."
         )
-        q, hits = research_hits_with_intent(
-            self._query_text, self._intent, slot_query=self._slot_query
-        )
+        try:
+            if self._slot_queries:
+                q, hits = research_hits_multi(
+                    self._query_text,
+                    self._intent,
+                    self._slot_queries,
+                    primary_query=self._slot_query,
+                )
+            else:
+                q, hits = research_hits_with_intent(
+                    self._query_text, self._intent, slot_query=self._slot_query
+                )
+        except Exception as exc:
+            push_activity_line(f"Worker: SearchWorker failed — {exc!s}")
+            q, hits = self._query_text, []
         push_activity_line(f"Worker: SearchWorker done hits_count={len(hits)}.")
-        self.finished_hits.emit(q, hits, self._intent.name)
+        self.finished_hits.emit(q, hits, self._intent.name, self._search_meta_json)
 
 
 class AppLauncherScanWorker(QThread):
@@ -83,7 +99,7 @@ class AgentWorker(QThread):
 
     # text, store_history, had_early_ack, spoken_followup(TTS용, ack 제외)
     finished_reply = pyqtSignal(str, bool, bool, str)
-    delegate_search = pyqtSignal(str, str, str)  # user_text, intent.name, slot_query(빈칸=미사용)
+    delegate_search = pyqtSignal(str, str, str, str)  # user_text, intent, slot_query, meta_json
     early_ack = pyqtSignal(str)  # DIRECT_ACTION 실행 전 (메인 스레드 QueuedConnection)
 
     def __init__(self, assistant: IrisAssistant, user_text: str) -> None:
@@ -103,7 +119,8 @@ class AgentWorker(QThread):
             push_activity_line("Worker: AgentWorker delegating to search path.")
             intent_name = result.search_intent_name or CommandKind.WEB_SEARCH.name
             slot_q = (result.search_query or "").strip()
-            self.delegate_search.emit(self._user_text, intent_name, slot_q)
+            meta = (result.search_meta_json or "").strip()
+            self.delegate_search.emit(self._user_text, intent_name, slot_q, meta)
             return
         if result.user_visible:
             push_activity_line(

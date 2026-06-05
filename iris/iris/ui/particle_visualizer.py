@@ -134,7 +134,7 @@ class ParticleVisualizer(QWidget):
         width, height = max(self.width(), 1), max(self.height(), 1)
         self._cx = width * 0.5
         self._cy = height * 0.5
-        self._core_r = min(width, height) * 0.36
+        self._core_r = min(width, height) * 0.38
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])

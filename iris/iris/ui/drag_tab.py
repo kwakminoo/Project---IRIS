@@ -29,6 +29,7 @@ class DragTab(QWidget):
         lay.setContentsMargins(12, 8, 12, 8)
         title = QLabel("Iris")
         title.setObjectName("DragTitle")
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(title)
         lay.addStretch(1)
 

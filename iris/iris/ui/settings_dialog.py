@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtWidgets import (
@@ -29,7 +29,9 @@ from iris.config.app_index import build_merged_app_paths
 from iris.ai.thinking_policy import normalize_thinking_mode
 from iris.config.settings import Settings
 from iris.storage.database import Database
+from iris.monitoring.browser_tab_monitor import BrowserTabMonitor
 from iris.ui.app_launcher_panel import AppLauncherPanel
+from iris.ui.chrome_extension_panel import ChromeExtensionPanel
 from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -84,6 +86,9 @@ class SettingsDialog(QDialog):
         *,
         db: Database | None = None,
         on_app_paths_changed: Callable[[], None] | None = None,
+        browser_monitor: Optional[BrowserTabMonitor] = None,
+        extension_server_active: Callable[[], bool] | None = None,
+        ensure_extension_server: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Iris 설정")
@@ -92,6 +97,10 @@ class SettingsDialog(QDialog):
         self._settings = settings
         self._db = db
         self._on_app_paths_changed = on_app_paths_changed
+        self._browser_monitor = browser_monitor
+        self._extension_server_active = extension_server_active or (lambda: False)
+        self._ensure_extension_server = ensure_extension_server or (lambda: False)
+        self._chrome_ext_panel: ChromeExtensionPanel | None = None
         self._models = self._initial_models(settings)
         self._microphones = list_microphone_options()
         self._app_paths = build_merged_app_paths(db)
@@ -128,6 +137,16 @@ class SettingsDialog(QDialog):
         self._populate_web_browsers(settings.default_web_browser)
         form.addRow("웹 기본 브라우저", self._browser_combo)
         self._browser_combo.setStyleSheet(_COMBO_STYLE)
+
+        if self._browser_monitor is not None:
+            self._chrome_ext_panel = ChromeExtensionPanel(
+                settings,
+                self._browser_monitor,
+                server_active=self._extension_server_active,
+                ensure_server=self._ensure_extension_server,
+                parent=self,
+            )
+            form.addRow("Chrome 확장", self._chrome_ext_panel)
 
         self._thinking_combo = QComboBox()
         self._populate_thinking_mode(settings.thinking_mode)
@@ -186,8 +205,12 @@ class SettingsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._restart_mic_preview()
+        if self._chrome_ext_panel is not None:
+            self._chrome_ext_panel.start_polling()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._chrome_ext_panel is not None:
+            self._chrome_ext_panel.stop_polling()
         # 시그널·스트림을 먼저 끊어 닫힌 뒤 sounddevice 콜백이 emit 하지 않게 함
         try:
             self._mic_preview.level.disconnect(self._mic_gauge.set_level)

@@ -19,6 +19,12 @@ Iris is a local-first personal AI assistant for Windows.
 - App launcher index / 앱 런처 (시작 메뉴·App Paths 스캔, 설치 완료 감지, 설정에서 수동 감지)
 - Risk-based automation / 위험도 기반 자동화
 
+## 웹 검색
+
+- 기본: SearXNG / DuckDuckGo HTML (`IRIS_SEARCH_PROVIDER=local`, 유료 검색 API 미사용)
+- SearXNG 자체 호스팅: [docs/searxng-setup-ko.md](../docs/searxng-setup-ko.md)
+- API 실패 시 Playwright Google SERP 폴백 (`IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1`)
+
 ## 앱 런처
 
 설정 창의 **앱 런처** 섹션에서 PC에 등록된 실행 파일 목록을 확인·수동 추가할 수 있습니다.
@@ -93,10 +99,13 @@ cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\IRIS\iris"
 - TTS 재생·처리 중에는 마이크 수집을 잠시 멈춰 스피커 에코를 줄입니다.
 - Barge-in(TTS 중 끊기)은 기본 꺼짐 (`BARGE_IN_ENABLED=false`)
 
-## Chrome 확장 (YouTube DOM 재생)
+## Chrome 확장 (URL 규칙 · YouTube DOM 등)
 
-유튜브에서 **검색 결과 탭**을 연 뒤, 확장 아이콘 → **현재 탭 허용**을 눌러 `allowedTabIds`에 등록하세요.
-Iris가 검색 URL을 연 뒤 확장이 `/watch?v=` 링크·제목만 수집하면 DOM 경로로 재생합니다 (미등록 시 UIA 클릭 폴백).
+확장 팝업에서 **사이트(URL) 규칙**을 켜세요 (예: YouTube 전체). 탭마다 허용할 필요 없습니다.
+Iris가 검색 URL을 연 뒤 확장이 `/watch?v=` 링크·제목을 수집하면 DOM 경로로 재생합니다.
+Netflix·Google·Naver 규칙도 동일 ingest를 사용합니다 (미디어 플로우는 플랫폼별 지원 범위 따름).
+
+자세한 설치: `docs/chrome-extension-setup-ko.md`
 
 ## 검증
 

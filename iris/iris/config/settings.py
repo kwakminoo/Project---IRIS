@@ -129,7 +129,7 @@ class Settings:
     voice_followup_seconds: float
     # TurnCoordinator 기본 경로 (Computer Use PAV). UI는 IRIS_MULTI_AGENT와 무관하게 Coordinator 사용
     multi_agent_enabled: bool
-    # 대화 fast path — 명확한 인사·잡담은 Unified Router LLM 스킵 (기본 on)
+    # (deprecated) chat fast path — TurnCoordinator에서 미사용, LLM 라우터만 사용
     chat_fast_path_enabled: bool
     # Unified LLM Router (자연어 전체 → intent/lane/slots). false면 llm_intent_router 또는 규칙만
     unified_llm_router_enabled: bool
@@ -249,7 +249,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         ),
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
         multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
-        chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", True),
+        chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", False),
         unified_llm_router_enabled=_env_bool("IRIS_UNIFIED_LLM_ROUTER", True),
         llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
         llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),

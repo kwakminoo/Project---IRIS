@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from iris.ai.gemma_client import FALLBACK_KO, ChatMessage
 from iris.ai.response_parser import extract_json_object
 from iris.ai.thinking_policy import LlmPurpose
-from iris.assistant.computer_use_agent import USER_QUESTION_PREFIX
 from iris.assistant.media_completion import (
     MediaExecutionPhase,
     MediaSuccessCriteria,
@@ -21,6 +20,7 @@ from iris.assistant.media_completion import (
     derive_success_criteria as resolve_media_contract,
     set_last_execution_hint,
 )
+from iris.assistant.media_play_user_reply import MediaPlayOutcome, media_reply_from_context
 from iris.assistant.media_verify import (
     _MAX_MECHANICAL_PERCEIVE_RETRY,
     format_media_verify_ok,
@@ -41,6 +41,7 @@ from iris.automation.youtube_dom import (
 from iris.config.settings import Settings
 from iris.core.activity_sink import push_activity_line
 from iris.monitoring import ocr_engine, screen_capture
+from iris.monitoring.sync_wait import wait_until
 
 if TYPE_CHECKING:
     from iris.assistant.computer_use_agent import ComputerUseAgent
@@ -49,7 +50,9 @@ if TYPE_CHECKING:
 _PLAY_CANDIDATE_MAX = 5
 _RANKER_AUTO_PLAY_MIN_CONFIDENCE = 0.45
 _PERCEIVE_LOAD_MAX_RETRIES = 3
-_YOUTUBE_DOM_POLL_RETRIES = 4
+# YouTube DOM — 확장 ingest 이벤트·조건 대기(고정 sleep 폴링 없음)
+_YOUTUBE_DOM_WAIT_TIMEOUT_SEC = 8.0
+_ADDRBAR_FOCUS_WAIT_SEC = 0.2
 _CANDIDATE_NAME_MAX_LEN = 240
 _PERCEIVE_DETAIL_MAX = 3500
 _PERCEIVE_MESSAGE_MAX = 1600
@@ -727,6 +730,56 @@ class MediaPlaybackFlow:
         self._registry = cu_agent._registry
         self._assistant = cu_agent._assistant
         self._last_resolved_window: ResolvedMediaWindow | None = None
+        # YouTube DOM 경로가 None으로 끝날 때 원인 — 레거시 실패 멘트에 반영
+        self._media_dom_fail_hint: str | None = None
+
+    def _consume_dom_fail_outcome(
+        self,
+        platform: str,
+        fallback: MediaPlayOutcome,
+    ) -> MediaPlayOutcome:
+        """유튜브 DOM 티어가 실패한 뒤 레거시 분기에서 더 구체적인 outcome 선택."""
+        if platform != "youtube":
+            return fallback
+        h = self._media_dom_fail_hint
+        if not h:
+            return fallback
+        table: dict[str, MediaPlayOutcome] = {
+            "no_browser_monitor": MediaPlayOutcome.YOUTUBE_DOM_SKIPPED_NO_MONITOR,
+            "dom_empty_poll": MediaPlayOutcome.YOUTUBE_DOM_EMPTY_AFTER_POLL,
+            "dom_parse_empty": MediaPlayOutcome.YOUTUBE_DOM_PARSE_EMPTY,
+            "dom_pick_fail": MediaPlayOutcome.YOUTUBE_DOM_PICK_FAIL,
+            "dom_open_watch_fail": MediaPlayOutcome.YOUTUBE_DOM_OPEN_WATCH_FAIL,
+            "dom_verify_fail_play": MediaPlayOutcome.YOUTUBE_DOM_VERIFY_FAIL_PLAY,
+        }
+        mapped = table.get(h)
+        self._media_dom_fail_hint = None
+        return mapped or fallback
+
+    def _finalize_media_reply(
+        self,
+        outcome: MediaPlayOutcome,
+        goal: str,
+        query: str,
+        platform: str,
+        action: str,
+        *,
+        tier_path: tuple[str, ...] | list[str],
+        metrics: dict[str, Any] | None = None,
+        log_tags: tuple[str, ...] | list[str] | None = None,
+    ) -> str:
+        """구조화 outcome → 로컬 LLM 멘트(폴백 포함)."""
+        return media_reply_from_context(
+            self._gemma,
+            goal=goal,
+            query=query,
+            platform=platform,
+            action=action,
+            outcome=outcome,
+            tier_path=list(tier_path),
+            metrics=dict(metrics or {}),
+            log_tags=list(log_tags or []),
+        )
 
     def run(self, goal: str, slots: dict[str, Any]) -> str:
         goal = goal.strip()
@@ -734,19 +787,72 @@ class MediaPlaybackFlow:
         action = str(slots.get("media_action") or "").strip().lower()
         query = str(slots.get("search_query") or "").strip()
         if not query or action not in {"search", "play"}:
-            return f"{USER_QUESTION_PREFIX} 어떤 곡·영상을 찾거나 재생할까요?"
+            return self._finalize_media_reply(
+                MediaPlayOutcome.QUERY_MISSING,
+                goal,
+                query,
+                platform,
+                action,
+                tier_path=("run",),
+                metrics={"slots_search_query": bool(query.strip())},
+                log_tags=("entry_validation",),
+            )
+        self._media_dom_fail_hint = None
         db = self._assistant._db
         db.insert_log("media_flow", "start", f"{platform}/{action} {query[:80]}")
         self._log(platform, action, "start")
         try:
             open_url = build_media_open_url(platform, query)
         except ValueError:
-            return f"{USER_QUESTION_PREFIX} 검색어를 알려주시겠어요?"
+            return self._finalize_media_reply(
+                MediaPlayOutcome.SEARCH_QUERY_NEEDED,
+                goal,
+                query,
+                platform,
+                action,
+                tier_path=("run", "build_open_url"),
+                log_tags=("value_error_media_url",),
+            )
         self._log(platform, action, "open")
-        open_res = self._run_tool("open_url", {"url": open_url}, summary=f"media open {platform}")
-        if not open_res.success:
-            db.insert_log("media_flow", "open_fail", open_res.message[:200])
-            return "미디어 페이지를 열지 못했습니다. 다시 요청해 주세요."
+        should_open_url = True
+        cached_pairs: list[tuple[str, str]] = []
+        ingest_baseline: int | None = None
+        monitor = self._browser_monitor()
+        if platform == "youtube" and action == "play" and monitor is not None:
+            try:
+                ingest_baseline = monitor.total_ingest_count()
+            except Exception:
+                ingest_baseline = 0
+            try:
+                cached = monitor.youtube_results_for_search(open_url)
+            except Exception:
+                cached = None
+            if cached:
+                cached_pairs = list(cached)
+                should_open_url = False
+        if should_open_url:
+            open_res = self._run_tool(
+                "open_url", {"url": open_url}, summary=f"media open {platform}"
+            )
+            if not open_res.success:
+                db.insert_log("media_flow", "open_fail", open_res.message[:200])
+                return self._finalize_media_reply(
+                    MediaPlayOutcome.OPEN_URL_FAIL,
+                    goal,
+                    query,
+                    platform,
+                    action,
+                    tier_path=("run", "open_url"),
+                    metrics={"tool_message_chars": len(open_res.message or "")},
+                    log_tags=("open_url_fail",),
+                )
+        else:
+            self._log(
+                platform,
+                action,
+                "open_skip_cached",
+                extra=f"youtube_dom_candidates={len(cached_pairs)}",
+            )
 
         contract = resolve_media_contract(slots=slots)
         criteria_str = contract.value if contract else criteria_value_from_slots(slots)
@@ -763,7 +869,15 @@ class MediaPlaybackFlow:
                 goal, platform, query, obs_blob, criteria=contract
             ):
                 clear_last_execution_hint(self._assistant)
-                msg = f"'{query}' 검색 결과를 열었습니다."
+                msg = self._finalize_media_reply(
+                    MediaPlayOutcome.SUCCESS_SEARCH_OPEN,
+                    goal,
+                    query,
+                    platform,
+                    action,
+                    tier_path=("search", "verify_ok"),
+                    log_tags=("search_complete",),
+                )
                 db.insert_log("media_flow", "complete", msg[:200])
                 self._log(platform, action, "complete")
                 self._save_session(
@@ -776,13 +890,25 @@ class MediaPlaybackFlow:
             db.insert_log("media_flow", "verify_fail", "search")
             set_last_execution_hint(self._assistant, "media:search:verify_fail")
             push_activity_line("skill=media_play gate=fail")
-            return (
-                "검색 페이지를 열었지만 결과 화면을 확인하지 못했습니다. "
-                "화면을 확인하시거나 다시 요청해 주세요."
+            return self._finalize_media_reply(
+                MediaPlayOutcome.SEARCH_VERIFY_FAIL,
+                goal,
+                query,
+                platform,
+                action,
+                tier_path=("search", "verify_fail"),
+                log_tags=("search_verify_fail",),
             )
         if platform == "youtube":
             dom_msg = self._run_youtube_dom_play_path(
-                goal, platform, query, db, open_url=open_url, criteria=contract
+                goal,
+                platform,
+                query,
+                db,
+                open_url=open_url,
+                criteria=contract,
+                ingest_baseline=ingest_baseline,
+                opened_search_url=should_open_url,
             )
             if dom_msg:
                 return dom_msg
@@ -803,27 +929,46 @@ class MediaPlaybackFlow:
         *,
         open_url: str = "",
         criteria: MediaSuccessCriteria | None = None,
+        ingest_baseline: int | None = None,
+        opened_search_url: bool = True,
     ) -> str | None:
         """Tier 1: 확장 DOM → watch open_url → verify. 실패 시 None(legacy 폴백)."""
         monitor = self._browser_monitor()
         if monitor is None:
+            self._media_dom_fail_hint = "no_browser_monitor"
             return None
         contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
+        ingest_age_sec: float | None = None
+        if hasattr(monitor, "last_ingest_age_seconds"):
+            try:
+                ingest_age_sec = monitor.last_ingest_age_seconds()
+            except Exception:
+                ingest_age_sec = None
+        self._log(platform, "play", "dom_wait")
+        after_count = ingest_baseline if opened_search_url else None
         raw_pairs: list[tuple[str, str]] | None = None
-        for attempt in range(_YOUTUBE_DOM_POLL_RETRIES):
+        if hasattr(monitor, "wait_for_youtube_search_results"):
+            raw_pairs = monitor.wait_for_youtube_search_results(
+                open_url,
+                timeout_sec=_YOUTUBE_DOM_WAIT_TIMEOUT_SEC,
+                after_ingest_count=after_count,
+            )
+        else:
             raw_pairs = monitor.youtube_results_for_search(open_url)
-            if raw_pairs:
-                break
-            if attempt > 0:
-                self._log(platform, "play", f"dom_poll_{attempt}")
+        if raw_pairs:
+            self._log(platform, "play", "dom_wait_ok")
+        else:
+            self._log(platform, "play", "dom_wait_timeout")
         if not raw_pairs:
             db.insert_log("youtube_dom", "empty", f"query={query[:60]}")
+            self._media_dom_fail_hint = "dom_empty_poll"
             return None
         dom_candidates = parse_youtube_search_results(
             [{"title": t, "url": u} for t, u in raw_pairs]
         )
         if not dom_candidates:
             db.insert_log("youtube_dom", "parse_empty", f"pairs={len(raw_pairs)}")
+            self._media_dom_fail_hint = "dom_parse_empty"
             return None
         db.insert_log(
             "youtube_dom",
@@ -851,6 +996,7 @@ class MediaPlaybackFlow:
         )
         if not picked:
             db.insert_log("youtube_dom", "pick_fail", f"candidates={len(dom_candidates)}")
+            self._media_dom_fail_hint = "dom_pick_fail"
             return None
         vid = extract_video_id(picked.url)
         db.insert_log(
@@ -859,14 +1005,17 @@ class MediaPlaybackFlow:
             f"videoId={vid} title={picked.title[:80]} url={picked.url[:120]}",
         )
         self._log(platform, "play", "dom_open_watch")
-        watch_res = self._run_tool(
-            "open_url",
-            {"url": picked.url},
-            summary="media dom watch",
-        )
-        if not watch_res.success:
-            db.insert_log("youtube_dom", "open_watch_fail", watch_res.message[:120])
-            return None
+        navigated = self._navigate_current_tab_to_url(platform, picked.url)
+        if not navigated:
+            watch_res = self._run_tool(
+                "open_url",
+                {"url": picked.url},
+                summary="media dom watch",
+            )
+            if not watch_res.success:
+                db.insert_log("youtube_dom", "open_watch_fail", watch_res.message[:120])
+                self._media_dom_fail_hint = "dom_open_watch_fail"
+                return None
         obs_after = self._perceive(platform, open_url=picked.url, for_play=True)
         for mech_try in range(_MAX_MECHANICAL_PERCEIVE_RETRY + 1):
             if criteria_satisfied(
@@ -877,7 +1026,20 @@ class MediaPlaybackFlow:
                 observation_blob=obs_after,
             ):
                 clear_last_execution_hint(self._assistant)
-                msg = f"'{query}' 재생을 시작했습니다."
+                self._media_dom_fail_hint = None
+                msg = self._finalize_media_reply(
+                    MediaPlayOutcome.SUCCESS_PLAY_DOM,
+                    goal,
+                    query,
+                    platform,
+                    "play",
+                    tier_path=("youtube_dom", "open_watch", "mechanical_play_ok"),
+                    metrics={
+                        "video_id": vid or "",
+                        "last_ingest_age_sec": ingest_age_sec,
+                    },
+                    log_tags=("dom_play_complete",),
+                )
                 db.insert_log("media_flow", "complete", f"dom|{msg[:120]}")
                 self._log(platform, "play", "complete_dom")
                 self._save_session(
@@ -912,7 +1074,20 @@ class MediaPlaybackFlow:
         )
         if verify and verify.achieved:
             clear_last_execution_hint(self._assistant)
-            msg = f"'{query}' 재생을 시작했습니다."
+            self._media_dom_fail_hint = None
+            msg = self._finalize_media_reply(
+                MediaPlayOutcome.SUCCESS_PLAY_DOM_LLM,
+                goal,
+                query,
+                platform,
+                "play",
+                tier_path=("youtube_dom", "open_watch", "llm_verify_ok"),
+                metrics={
+                    "video_id": vid or "",
+                    "vision_used": verify_vision_used,
+                },
+                log_tags=("dom_play_llm_complete",),
+            )
             db.insert_log("media_flow", "complete", f"dom_llm|{vid}")
             self._log(platform, "play", "complete_dom_llm")
             self._save_session(
@@ -923,7 +1098,69 @@ class MediaPlaybackFlow:
             )
             return msg
         db.insert_log("youtube_dom", "verify_fail", vid or "unknown")
+        self._media_dom_fail_hint = "dom_verify_fail_play"
         return None
+
+    def _navigate_current_tab_to_url(self, platform: str, url: str) -> bool:
+        """open_url 대신 현재 탭 주소창으로 이동(새 탭 노출 감소)."""
+        if not url:
+            return False
+
+        target = resolve_media_target(platform)
+        wins = window_controller.list_visible_windows()
+        chosen_hwnd = 0
+        for w in wins:
+            title = (w.title or "").lower()
+            if target.window_title_sub.lower() in title:
+                chosen_hwnd = int(getattr(w, "hwnd", 0) or 0)
+                break
+        if chosen_hwnd <= 0 and target.alt_title_subs:
+            for alt in target.alt_title_subs:
+                for w in wins:
+                    title = (w.title or "").lower()
+                    if alt.lower() in title:
+                        chosen_hwnd = int(getattr(w, "hwnd", 0) or 0)
+                        break
+                if chosen_hwnd > 0:
+                    break
+        # YouTube 창을 특정하지 못하면 다른 앱에 Ctrl+L이 들어갈 수 있어
+        # 안전하게 실패 후 open_url fallback으로 넘깁니다.
+        if chosen_hwnd <= 0:
+            return False
+        window_controller.focus_window_by_hwnd(chosen_hwnd)
+
+        def _foreground_is_target() -> bool:
+            if chosen_hwnd <= 0:
+                return True
+            try:
+                import win32gui  # type: ignore
+
+                return int(win32gui.GetForegroundWindow() or 0) == chosen_hwnd
+            except Exception:
+                return True
+
+        wait_until(_foreground_is_target, timeout_sec=_ADDRBAR_FOCUS_WAIT_SEC)
+
+        hk1 = self._run_tool(
+            "send_hotkey",
+            {"keys": ["ctrl", "l"]},
+            summary="media dom addrbar ctrl+l",
+        )
+        if not hk1.success:
+            return False
+        it = self._run_tool(
+            "type_text",
+            {"text": url},
+            summary="media dom addrbar url",
+        )
+        if not it.success:
+            return False
+        hk2 = self._run_tool(
+            "send_hotkey",
+            {"keys": ["enter"]},
+            summary="media dom addrbar enter",
+        )
+        return hk2.success
 
     def _run_play_path(
         self,
@@ -938,15 +1175,13 @@ class MediaPlaybackFlow:
         """play — perceive → ranker(상위 N 자동 선택) → click → verify (의도적 sleep 없음)."""
         contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
         self._log(platform, "play", "perceive_loop")
-        obs_blob, candidates, gate_ready = self._perceive_for_play(
-            platform, query, open_url=open_url, criteria=contract
+        obs_blob, candidates, gate_ready, last_raw_n, last_filt_n = (
+            self._perceive_for_play(
+                platform, query, open_url=open_url, criteria=contract
+            )
         )
         degraded = (not gate_ready) and len(candidates) >= 1
         if not candidates:
-            question = (
-                "검색 결과가 아직 보이지 않습니다. "
-                "잠시 후 다시 요청하시거나 재생할 영상 제목을 알려주세요."
-            )
             db.insert_log(
                 "media_flow",
                 "gate_fail",
@@ -960,7 +1195,24 @@ class MediaPlaybackFlow:
             )
             set_last_execution_hint(self._assistant, "media:pre_rank:no_candidates")
             push_activity_line("skill=media_play gate=fail")
-            return f"{USER_QUESTION_PREFIX} {question}"
+            outcome = self._consume_dom_fail_outcome(
+                platform, MediaPlayOutcome.LEGACY_GATE_NO_CANDIDATES
+            )
+            return self._finalize_media_reply(
+                outcome,
+                goal,
+                query,
+                platform,
+                "play",
+                tier_path=("legacy_uia", "pre_rank_gate_fail"),
+                metrics={
+                    "filtered_candidates": len(candidates),
+                    "raw_candidates_hint": last_raw_n,
+                    "last_filt_candidates": last_filt_n,
+                    "gate_ready": gate_ready,
+                },
+                log_tags=("perceive_gate_fail",),
+            )
         if degraded:
             set_last_execution_hint(self._assistant, "media:pre_rank:degraded")
             self._log(platform, "play", "degraded", extra=f"candidates={len(candidates)}")
@@ -1035,18 +1287,36 @@ class MediaPlaybackFlow:
 
         if not click_name:
             low_conf = rank is not None and rank.confidence < _RANKER_AUTO_PLAY_MIN_CONFIDENCE
-            if low_conf or not rank or not rank.pick_name:
-                question = (rank.reason if rank and rank.reason else "") or (
-                    f"'{query}'와 가장 비슷한 결과를 찾지 못했습니다. "
-                    "재생할 제목을 조금 더 구체적으로 말씀해 주세요."
-                )
-            else:
-                question = (
-                    f"'{query}' 검색 결과에서 클릭할 항목을 화면에서 찾지 못했습니다. "
-                    "다시 요청해 주세요."
-                )
-            db.insert_log("media_flow", "ask_user", question[:200])
-            return f"{USER_QUESTION_PREFIX} {question}"
+            log_tags_extra: tuple[str, ...] = ()
+            metrics: dict[str, Any] = {"low_conf_ranker": low_conf}
+            if rank:
+                metrics["rank_confidence"] = rank.confidence
+                rn = (rank.reason or "").strip()
+                if rn:
+                    metrics["ranker_hint"] = rn[:120]
+            if rank and rank.pick_name:
+                log_tags_extra = ("ranker_null_pick_after_resolve",)
+
+            outcome = self._consume_dom_fail_outcome(
+                platform, MediaPlayOutcome.LEGACY_RANK_ASK_USER
+            )
+            return self._finalize_media_reply(
+                outcome,
+                goal,
+                query,
+                platform,
+                "play",
+                tier_path=(
+                    "legacy_uia",
+                    "rank_no_click",
+                    *(("low_confidence",) if low_conf else ()),
+                ),
+                metrics={
+                    **metrics,
+                    "candidates_kept": len(candidates),
+                },
+                log_tags=("rank_pick_unresolved", *log_tags_extra),
+            )
 
         db.insert_log(
             "media_flow",
@@ -1067,9 +1337,18 @@ class MediaPlaybackFlow:
             click_ok = self._play_keyboard_fallback(platform)
         if not click_ok:
             db.insert_log("media_flow", "click_fail", click_name[:120])
-            return (
-                f"'{click_name}' 항목을 클릭하지 못했습니다. "
-                "화면에서 직접 선택하시거나 다시 요청해 주세요."
+            outcome = self._consume_dom_fail_outcome(
+                platform, MediaPlayOutcome.LEGACY_CLICK_FAIL
+            )
+            return self._finalize_media_reply(
+                outcome,
+                goal,
+                query,
+                platform,
+                "play",
+                tier_path=("legacy_uia", "uia_click_fail"),
+                metrics={"attempted_click_name_chars": len(click_name)},
+                log_tags=("click_fail",),
             )
         obs_after = self._perceive(platform, open_url=open_url)
         for mech_try in range(_MAX_MECHANICAL_PERCEIVE_RETRY + 1):
@@ -1081,7 +1360,15 @@ class MediaPlaybackFlow:
                 observation_blob=obs_after,
             ):
                 clear_last_execution_hint(self._assistant)
-                msg = f"'{query}' 재생을 시작했습니다."
+                msg = self._finalize_media_reply(
+                    MediaPlayOutcome.SUCCESS_PLAY_LEGACY,
+                    goal,
+                    query,
+                    platform,
+                    "play",
+                    tier_path=("legacy_uia", "mechanical_play_ok"),
+                    log_tags=("legacy_play_complete",),
+                )
                 db.insert_log("media_flow", "complete", msg[:200])
                 self._log(platform, "play", "complete")
                 self._save_session(
@@ -1117,7 +1404,16 @@ class MediaPlaybackFlow:
         )
         if verify and verify.achieved:
             clear_last_execution_hint(self._assistant)
-            msg = f"'{query}' 재생을 시작했습니다."
+            msg = self._finalize_media_reply(
+                MediaPlayOutcome.SUCCESS_PLAY_LEGACY_LLM,
+                goal,
+                query,
+                platform,
+                "play",
+                tier_path=("legacy_uia", "llm_verify_ok"),
+                metrics={"vision_used": verify_vision_used},
+                log_tags=("legacy_play_llm_complete",),
+            )
             db.insert_log("media_flow", "complete", f"llm|{verify.evidence[:120]}")
             self._log(platform, "play", "complete_llm")
             self._save_session(
@@ -1127,18 +1423,24 @@ class MediaPlaybackFlow:
                 media_action="play",
             )
             return msg
-        reason = ""
-        if verify and verify.missing:
-            reason = verify.missing
-        elif verify and verify.evidence:
-            reason = verify.evidence
         db.insert_log("media_flow", "verify_fail", "play")
         set_last_execution_hint(self._assistant, "media:play:not_confirmed")
         push_activity_line("skill=media_play gate=fail")
-        tail = f" ({reason})" if reason else ""
-        return (
-            "재생 화면을 확인하지 못했습니다. "
-            f"브라우저에서 재생 상태를 확인하시거나 다시 요청해 주세요.{tail}"
+        outcome = self._consume_dom_fail_outcome(
+            platform, MediaPlayOutcome.LEGACY_VERIFY_FAIL_PLAY
+        )
+        return self._finalize_media_reply(
+            outcome,
+            goal,
+            query,
+            platform,
+            "play",
+            tier_path=("legacy_uia", "play_verify_fail"),
+            metrics={
+                "vision_used": verify_vision_used,
+                "verify_missing_len": len((verify.missing if verify else "") or ""),
+            },
+            log_tags=("verify_play_fail",),
         )
 
     def _perceive_for_play(
@@ -1148,12 +1450,14 @@ class MediaPlaybackFlow:
         *,
         open_url: str = "",
         criteria: MediaSuccessCriteria | None = None,
-    ) -> tuple[str, list[str], bool]:
+    ) -> tuple[str, list[str], bool, int, int]:
         """타깃 perceive — 의도적 대기 제거, 실패 시 sleep 없이 perceive만 재시도."""
         contract = criteria or MediaSuccessCriteria.PLAYBACK_CONFIRMED
         self._last_resolved_window = None
         obs = ""
         candidates: list[str] = []
+        last_raw_n = 0
+        last_filt_n = 0
         db = self._assistant._db
         gate_ready = False
         for attempt in range(_PERCEIVE_LOAD_MAX_RETRIES):
@@ -1162,6 +1466,7 @@ class MediaPlaybackFlow:
                 self._log(platform, "play", f"perceive_retry_{attempt}")
             obs = self._perceive(platform, open_url=open_url, for_play=True)
             raw_candidates = extract_result_candidates(obs)
+            last_raw_n = len(raw_candidates)
             candidates = filter_video_title_candidates(
                 filter_media_candidates(
                     raw_candidates,
@@ -1172,6 +1477,7 @@ class MediaPlaybackFlow:
                 platform=platform,
                 search_query=query,
             )
+            last_filt_n = len(candidates)
             ready = criteria_satisfied(
                 contract,
                 MediaExecutionPhase.PRE_RANK,
@@ -1202,8 +1508,8 @@ class MediaPlaybackFlow:
                 extra=f"candidates={len(candidates)}",
             )
             if ready:
-                return obs, candidates, True
-        return obs, candidates, gate_ready
+                return obs, candidates, True, last_raw_n, last_filt_n
+        return obs, candidates, gate_ready, last_raw_n, last_filt_n
 
     def _verify_search(
         self,
