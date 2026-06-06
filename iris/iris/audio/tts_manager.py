@@ -13,8 +13,10 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QMetaObject, Qt, pyqtSignal, pyqtSlot
 
+from iris.audio.audio_file_fx import apply_voice_fx_to_file
 from iris.audio.audio_player import AudioPlayer
 from iris.audio.fallback_tts_engine import FallbackTTSEngine
+from iris.audio.supertonic_engine import SupertonicEngine
 from iris.audio.voice_fx import apply_voice_fx
 from iris.audio.xtts_engine import XTTSEngine, is_xtts_installed, resolve_reference_wav
 from iris.config.settings import Settings
@@ -77,6 +79,7 @@ class TTSManager(QObject):
         if self._player.parent() is None:
             self._player.setParent(self)
         self._fallback = FallbackTTSEngine(settings)
+        self._supertonic = SupertonicEngine(settings)
         self._xtts = XTTSEngine(settings, _APP_ROOT)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -124,6 +127,9 @@ class TTSManager(QObject):
         self.status_changed.emit(status)
 
     def _refresh_initial_status(self) -> None:
+        if self._settings.tts_provider == "supertonic":
+            self._set_status(TtsStatus.IDLE)
+            return
         if self._settings.tts_provider != "xtts":
             self._set_status(TtsStatus.IDLE)
             return
@@ -195,8 +201,57 @@ class TTSManager(QObject):
                 on_synthesis_start()
             self._set_status(TtsStatus.SYNTHESIZING)
 
+            want_supertonic = self._settings.tts_provider == "supertonic"
             want_xtts = self._settings.tts_provider == "xtts"
             notice: str | None = None
+
+            if want_supertonic:
+                fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="iris_supertonic_")
+                os.close(fd)
+                out = Path(tmp)
+                fx_block = preset.get("fx") if self._settings.tts_enable_voice_fx else None
+                use_fx = bool(fx_block and fx_block.get("enabled"))
+                ok = self._supertonic.synthesize_to_wav(text, out, speed=preset_speed)
+                if self._stop.is_set() or token != self.playback_gen:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    QMetaObject.invokeMethod(
+                        self,
+                        "_defer_invoke_done",
+                        Qt.ConnectionType.QueuedConnection,
+                    )
+                    return
+                if ok and out.is_file() and out.stat().st_size > 0:
+                    play_path = out
+                    if use_fx:
+                        fd_fx, tmp_fx = tempfile.mkstemp(suffix=".wav", prefix="iris_supertonic_fx_")
+                        os.close(fd_fx)
+                        out_fx = Path(tmp_fx)
+                        if apply_voice_fx_to_file(
+                            out,
+                            out_fx,
+                            fx_block,
+                            global_enabled=self._settings.tts_enable_voice_fx,
+                        ):
+                            try:
+                                out.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            play_path = out_fx
+                        else:
+                            try:
+                                out_fx.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                    if playback_start:
+                        playback_start()
+                    self._speaking = True
+                    self._player.play_file.emit(token, str(play_path))
+                    return
+                notice = self._supertonic.load_error or "Supertonic synthesis failed"
+                self._set_status(TtsStatus.TTS_ERROR, notice)
 
             if want_xtts and is_xtts_installed():
                 ref = resolve_reference_wav(self._settings, _APP_ROOT)
@@ -276,10 +331,33 @@ class TTSManager(QObject):
                         )
                         return
                     if ok and out_mp3.is_file() and out_mp3.stat().st_size > 0:
+                        fx_block = preset.get("fx") if self._settings.tts_enable_voice_fx else None
+                        use_fx = bool(fx_block and fx_block.get("enabled"))
+                        play_path = out_mp3
+                        if use_fx:
+                            fd_fx, tmp_fx = tempfile.mkstemp(suffix=".wav", prefix="iris_edge_fx_")
+                            os.close(fd_fx)
+                            out_fx = Path(tmp_fx)
+                            if apply_voice_fx_to_file(
+                                out_mp3,
+                                out_fx,
+                                fx_block,
+                                global_enabled=self._settings.tts_enable_voice_fx,
+                            ):
+                                try:
+                                    out_mp3.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                play_path = out_fx
+                            else:
+                                try:
+                                    out_fx.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
                         if playback_start:
                             playback_start()
                         self._speaking = True
-                        self._player.play_file.emit(token, str(out_mp3))
+                        self._player.play_file.emit(token, str(play_path))
                         return
                 except Exception:
                     try:

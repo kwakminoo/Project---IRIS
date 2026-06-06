@@ -40,13 +40,32 @@ def _apply_phrase_map(text: str) -> str:
 def _soften_formal_korean(text: str) -> str:
     """남은 경어체를 과하지 않게 구어체에 가깝게."""
     t = text
-    t = re.sub(r"습니다\.", "어요.", t)
-    t = re.sub(r"습니다\b", "어요", t)
-    t = re.sub(r"입니다\.", "이에요.", t)
-    t = re.sub(r"입니다\b", "이에요", t)
     t = re.sub(r"하겠습니다\.", "할게요.", t)
     t = re.sub(r"하겠습니다\b", "할게요", t)
+    t = re.sub(r"했습니다\.", "했어요.", t)
+    t = re.sub(r"했습니다\b", "했어요", t)
+    t = re.sub(r"합니다\.", "해요.", t)
+    t = re.sub(r"합니다\b", "해요", t)
+    t = re.sub(r"됩니다\.", "돼요.", t)
+    t = re.sub(r"됩니다\b", "돼요", t)
+    t = re.sub(r"([가-힣A-Za-z0-9]+)입니다(\.)?", _replace_imnida, t)
     return t
+
+
+def _replace_imnida(match: re.Match[str]) -> str:
+    stem = match.group(1)
+    suffix = "." if match.group(2) else ""
+    ending = "이에요" if _has_final_consonant(stem[-1]) else "예요"
+    return f"{stem}{ending}{suffix}"
+
+
+def _has_final_consonant(ch: str) -> bool:
+    if not ch:
+        return False
+    code = ord(ch)
+    if 0xAC00 <= code <= 0xD7A3:
+        return (code - 0xAC00) % 28 != 0
+    return True
 
 
 def _split_sentences(text: str) -> list[str]:
