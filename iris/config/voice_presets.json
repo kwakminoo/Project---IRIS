@@ -1,26 +1,30 @@
 {
   "iris_default": {
     "description": "차분하고 명확한 기본 아이리스 음성",
-    "speed": 0.98,
+    "speed": 1.0,
     "fx": {
       "enabled": true,
-      "reverb": 0.045,
-      "chorus": 0.08,
-      "robotic_texture": 0.82,
-      "presence": 0.13,
-      "ai_resonance": 0.36
+      "reverb": 0.04,
+      "chorus": 0.065,
+      "robotic_texture": 1.0,
+      "presence": 0.22,
+      "ai_resonance": 0.56,
+      "cold_tone": 0.21,
+      "metallic_echo": 0.31
     }
   },
   "iris_jarvis": {
     "description": "자비스 스타일의 약한 기계 질감이 있는 음성",
-    "speed": 0.96,
+    "speed": 1.0,
     "fx": {
       "enabled": true,
-      "reverb": 0.055,
-      "chorus": 0.10,
-      "robotic_texture": 0.88,
-      "presence": 0.14,
-      "ai_resonance": 0.42
+      "reverb": 0.045,
+      "chorus": 0.075,
+      "robotic_texture": 1.08,
+      "presence": 0.24,
+      "ai_resonance": 0.62,
+      "cold_tone": 0.25,
+      "metallic_echo": 0.36
     }
   },
   "iris_clean": {

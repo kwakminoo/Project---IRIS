@@ -81,12 +81,36 @@ def _soften_brightness(audio: np.ndarray, amount: float = 0.08) -> np.ndarray:
     return np.clip(audio * (1.0 - amount) + softened * amount, -1.0, 1.0)
 
 
+def _cold_tone(audio: np.ndarray, amount: float = 0.12) -> np.ndarray:
+    """Reduce warmth and add a clean, clipped assistant edge."""
+    if amount <= 0 or audio.size < 3:
+        return audio
+    low_mid = np.copy(audio)
+    low_mid[1:] = low_mid[:-1] * 0.72 + low_mid[1:] * 0.28
+    high_detail = audio - low_mid
+    cooled = audio * (1.0 - amount * 0.16) + high_detail * amount * 0.95
+    return np.clip(cooled, -1.0, 1.0)
+
+
 def _ai_resonance(audio: np.ndarray, amount: float = 0.18, sample_rate: int = 24000) -> np.ndarray:
     """Add a clean synthetic assistant resonance without noisy distortion."""
     if amount <= 0 or audio.size < 4:
         return audio
     out = audio * (1.0 - amount * 0.10)
     for delay_ms, gain in ((4.0, 0.20), (8.0, -0.12)):
+        shift = max(1, int(sample_rate * delay_ms / 1000))
+        delayed = np.zeros_like(audio)
+        delayed[shift:] = audio[:-shift]
+        out += delayed * amount * gain
+    return np.clip(out, -1.0, 1.0)
+
+
+def _metallic_echo(audio: np.ndarray, amount: float = 0.16, sample_rate: int = 24000) -> np.ndarray:
+    """Short synthetic reflections without long room reverb."""
+    if amount <= 0 or audio.size < 4:
+        return audio
+    out = audio * (1.0 - amount * 0.08)
+    for delay_ms, gain in ((9.0, 0.22), (18.0, -0.13), (29.0, 0.10), (41.0, 0.055)):
         shift = max(1, int(sample_rate * delay_ms / 1000))
         delayed = np.zeros_like(audio)
         delayed[shift:] = audio[:-shift]
@@ -102,9 +126,10 @@ def _robotic_texture(audio: np.ndarray, amount: float, sample_rate: int = 24000)
     carrier_low = np.sin(2.0 * np.pi * 44.0 * t).astype(np.float32)
     carrier_high = np.sin(2.0 * np.pi * 88.0 * t).astype(np.float32)
     shimmer = np.sin(2.0 * np.pi * 176.0 * t).astype(np.float32)
+    fine_edge = np.sin(2.0 * np.pi * 264.0 * t).astype(np.float32)
     movement = 0.90 + 0.10 * np.sin(2.0 * np.pi * 8.0 * t).astype(np.float32)
-    ring = audio * (carrier_low * 0.46 + carrier_high * 0.30 + shimmer * 0.10)
-    modulated = (audio * (1.0 - amount * 0.22) + ring * amount * 0.30) * movement
+    ring = audio * (carrier_low * 0.46 + carrier_high * 0.32 + shimmer * 0.12 + fine_edge * 0.06)
+    modulated = (audio * (1.0 - amount * 0.24) + ring * amount * 0.34) * movement
     return np.clip(modulated, -1.0, 1.0)
 
 
@@ -144,12 +169,14 @@ def apply_voice_fx(
 
     a = _smooth_edges(a, sample_rate)
     a = _low_cut(a, 0.08)
-    a = _warm_body(a, 0.13)
-    a = _soften_brightness(a, 0.10)
+    a = _warm_body(a, 0.05)
+    a = _soften_brightness(a, 0.05)
+    a = _cold_tone(a, float(fx.get("cold_tone", 0.0)))
     a = _soft_reverb(a, reverb, sample_rate)
     a = _subtle_chorus(a, chorus, sample_rate)
     a = _high_presence(a, presence)
     a = _robotic_texture(a, robotic, sample_rate)
     a = _ai_resonance(a, float(fx.get("ai_resonance", 0.22)), sample_rate)
-    a = _soften_brightness(a, 0.10)
+    a = _metallic_echo(a, float(fx.get("metallic_echo", 0.0)), sample_rate)
+    a = _soften_brightness(a, 0.04)
     return _smooth_edges(_ensure_mono_float(a), sample_rate)
