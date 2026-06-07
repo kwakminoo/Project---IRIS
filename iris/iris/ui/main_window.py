@@ -80,7 +80,12 @@ def _apply_dark_theme(w: QWidget) -> None:
     w.setPalette(pal)
     w.setStyleSheet(
         """
-        QWidget { background-color: #0b1220; color: #e2e8f0; font-size: 13px; }
+        QWidget {
+            background-color: #0b1220;
+            color: #e2e8f0;
+            font-family: "Noto Sans KR", "Segoe UI Variable", "Segoe UI", "Malgun Gothic";
+            font-size: 13px;
+        }
         QTextEdit, QListWidget, QLineEdit {
             background-color: #111827; border: 1px solid #334155; border-radius: 6px;
         }
@@ -99,16 +104,19 @@ def _apply_dark_theme(w: QWidget) -> None:
             border: 1px solid #1e293b;
             border-radius: 8px;
         }
+        QFrame#StatusHeader QLabel {
+            background-color: transparent;
+        }
         QFrame#WorkspacePanel {
             background-color: #0b1220;
             border: none;
         }
         QLabel#StatusPill {
-            background-color: #111827;
-            border: 1px solid #243247;
-            border-radius: 7px;
-            padding: 5px 9px;
-            color: #cbd5e1;
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            color: #dbeafe;
         }
         QLabel#BackendStatus { color: #dbeafe; }
         QLabel#TtsStatus { color: #cbd5e1; }
@@ -117,8 +125,49 @@ def _apply_dark_theme(w: QWidget) -> None:
             margin: 8px 2px;
             border-radius: 2px;
         }
+        QScrollBar:vertical {
+            background: #0b1220;
+            width: 14px;
+            margin: 2px;
+            border-radius: 7px;
+        }
+        QScrollBar:horizontal {
+            background: #0b1220;
+            height: 14px;
+            margin: 2px;
+            border-radius: 7px;
+        }
+        QScrollBar::handle:vertical,
+        QScrollBar::handle:horizontal {
+            background: #334155;
+            border: 1px solid #475569;
+            border-radius: 7px;
+            min-height: 36px;
+            min-width: 36px;
+        }
+        QScrollBar::handle:vertical:hover,
+        QScrollBar::handle:horizontal:hover {
+            background: #3b82f6;
+            border-color: #60a5fa;
+        }
+        QScrollBar::add-line,
+        QScrollBar::sub-line,
+        QScrollBar::add-page,
+        QScrollBar::sub-page {
+            background: transparent;
+            border: none;
+            width: 0px;
+            height: 0px;
+        }
         QPushButton#WinCtrl {
-            background-color: #1e293b; padding: 2px 0; min-height: 0;
+            background-color: #1e293b;
+            padding: 0;
+            min-width: 34px;
+            max-width: 34px;
+            min-height: 28px;
+            max-height: 28px;
+            font-size: 14px;
+            font-weight: 600;
         }
         QPushButton#WinCtrl:hover { background-color: #334155; }
         QPushButton#WinCtrl:pressed { background-color: #475569; }
