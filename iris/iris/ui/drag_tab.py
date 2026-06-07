@@ -1,22 +1,24 @@
-"""드래그 가능한 상단 탭 영역."""
+"""Draggable top chrome with stable window controls."""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 
 def _win_ctrl_button(text: str, tooltip: str) -> QPushButton:
     btn = QPushButton(text)
     btn.setObjectName("WinCtrl")
     btn.setToolTip(tooltip)
-    btn.setFixedSize(36, 28)
+    btn.setFixedSize(34, 28)
+    btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     return btn
 
 
 class DragTab(QWidget):
-    """프레임리스 창 드래그·창 제어 버튼."""
+    """Frameless title bar with drag handling and window controls."""
 
     settings_clicked = pyqtSignal()
     minimize_clicked = pyqtSignal()
@@ -25,39 +27,31 @@ class DragTab(QWidget):
     def __init__(self, parent_window: QWidget) -> None:
         super().__init__()
         self._win = parent_window
+        self.setMinimumHeight(44)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
-        title = QLabel("Iris")
+        lay.setSpacing(8)
+
+        title = QLabel("IRIS")
         title.setObjectName("DragTitle")
         title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(title)
         lay.addStretch(1)
 
-        # 우측: [ − ][ □ ][ ✕ ] 가로 한 줄, 설정(⚙)은 ✕ 아래
         ctrl_row = QHBoxLayout()
+        ctrl_row.setContentsMargins(0, 0, 0, 0)
         ctrl_row.setSpacing(4)
+        ctrl_row.setSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
+
+        self._btn_settings = _win_ctrl_button("⚙", "설정")
         self._btn_min = _win_ctrl_button("−", "창 내리기")
         self._btn_max = _win_ctrl_button("□", "전체 화면")
-        self._btn_close = _win_ctrl_button("✕", "닫기")
-        self._btn_settings = _win_ctrl_button("⚙", "설정")
-        align_top = Qt.AlignmentFlag.AlignTop
-        ctrl_row.addWidget(self._btn_min, alignment=align_top)
-        ctrl_row.addWidget(self._btn_max, alignment=align_top)
+        self._btn_close = _win_ctrl_button("×", "닫기")
 
-        close_stack = QVBoxLayout()
-        close_stack.setSpacing(2)
-        close_stack.setContentsMargins(0, 0, 0, 0)
-        close_stack.addWidget(
-            self._btn_close,
-            alignment=Qt.AlignmentFlag.AlignHCenter,
-        )
-        close_stack.addWidget(
-            self._btn_settings,
-            alignment=Qt.AlignmentFlag.AlignHCenter,
-        )
-        close_wrap = QWidget()
-        close_wrap.setLayout(close_stack)
-        ctrl_row.addWidget(close_wrap, alignment=align_top)
+        for btn in (self._btn_settings, self._btn_min, self._btn_max, self._btn_close):
+            ctrl_row.addWidget(btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         lay.addLayout(ctrl_row)
 
@@ -68,7 +62,7 @@ class DragTab(QWidget):
         self._drag_pos = None
 
     def set_maximized(self, maximized: bool) -> None:
-        """전체화면/복원 버튼 표시 갱신."""
+        """Update maximize/restore button state."""
         if maximized:
             self._btn_max.setText("❐")
             self._btn_max.setToolTip("창 복원")

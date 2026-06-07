@@ -16,7 +16,9 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from pathlib import Path
@@ -92,6 +94,11 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Iris 설정")
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
         self.setMinimumWidth(560)
         self.setMinimumHeight(640)
         self._settings = settings
@@ -108,10 +115,73 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(12)
+        self.setStyleSheet(
+            """
+            QDialog, QWidget {
+                font-family: "Noto Sans KR", "Segoe UI Variable", "Segoe UI", "Malgun Gothic";
+                font-size: 13px;
+            }
+            """
+        )
 
         title = QLabel("설정")
         title.setObjectName("PanelTitle")
         root.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            """
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: #0b1220;
+                width: 14px;
+                margin: 2px;
+                border-radius: 7px;
+            }
+            QScrollBar:horizontal {
+                background: #0b1220;
+                height: 14px;
+                margin: 2px;
+                border-radius: 7px;
+            }
+            QScrollBar::handle:vertical,
+            QScrollBar::handle:horizontal {
+                background: #334155;
+                border: 1px solid #475569;
+                border-radius: 7px;
+                min-height: 36px;
+                min-width: 36px;
+            }
+            QScrollBar::handle:vertical:hover,
+            QScrollBar::handle:horizontal:hover {
+                background: #3b82f6;
+                border-color: #60a5fa;
+            }
+            QScrollBar::add-line,
+            QScrollBar::sub-line,
+            QScrollBar::add-page,
+            QScrollBar::sub-page {
+                background: transparent;
+                border: none;
+                width: 0px;
+                height: 0px;
+            }
+            """
+        )
+        content = QWidget()
+        content.setMinimumWidth(760)
+        content_lay = QVBoxLayout(content)
+        content_lay.setContentsMargins(0, 0, 0, 0)
+        content_lay.setSpacing(12)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -176,7 +246,7 @@ class SettingsDialog(QDialog):
         self._tts_info.setWordWrap(True)
         form.addRow("음성(TTS)", self._tts_info)
 
-        root.addLayout(form)
+        content_lay.addLayout(form)
 
         if self._db is not None:
             self._app_launcher = AppLauncherPanel(
@@ -184,16 +254,18 @@ class SettingsDialog(QDialog):
                 on_paths_changed=self._notify_app_paths_changed,
                 parent=self,
             )
-            root.addWidget(self._app_launcher)
+            content_lay.addWidget(self._app_launcher)
 
         self._device_help = QLabel(self._microphone_help_text())
         self._device_help.setWordWrap(True)
-        root.addWidget(self._device_help)
+        content_lay.addWidget(self._device_help)
 
         self._model_list = QListWidget()
         self._model_list.setMaximumHeight(100)
         self._refresh_model_list()
-        root.addWidget(self._model_list)
+        content_lay.addWidget(self._model_list)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
