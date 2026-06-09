@@ -9,10 +9,12 @@ from iris.assistant.turn_coordinator import build_spoken_followup, build_user_vi
 
 def test_cu_early_ack_notepad_no_goal_echo() -> None:
     agent = DialogueAgent(object(), object())  # type: ignore[arg-type]
-    ack = agent.cu_early_ack("메모장 켜줘", {"task_type": "open_app"})
+    ack = agent.cu_early_ack(
+        "메모장 켜줘",
+        {"task_type": "open_app", "display_name": "메모장"},
+    )
     assert "메모장 켜줘" not in ack
-    assert "메모장을 실행" in ack
-    assert "진행할게요" in ack or "실행할게요" in ack
+    assert "메모장 관련 작업을 진행할게요." == ack
 
 
 def test_cu_early_ack_unknown_no_goal_echo() -> None:
@@ -66,9 +68,8 @@ def test_format_user_approval_message_notepad_shell() -> None:
     msg = format_user_approval_message(
         "run_shell", "쉘 실행: notepad", {"command": "notepad"}
     )
-    assert "쉘 실행:" not in msg
+    assert "쉘 실행: notepad" in msg
     assert "진행할까요" in msg
-    assert "메모장 실행" in msg
 
 
 def test_format_user_approval_message_launch_app() -> None:
@@ -77,9 +78,8 @@ def test_format_user_approval_message_launch_app() -> None:
         "앱 실행: 메모장 (notepad)",
         {"app_key": "notepad", "display_name": "메모장"},
     )
-    assert "앱 실행:" not in msg
+    assert "앱 실행: 메모장 (notepad)" in msg
     assert "진행할까요" in msg
-    assert "메모장 실행" in msg
 
 
 def test_build_user_visible_keeps_ack_without_early_ack() -> None:

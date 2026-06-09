@@ -108,6 +108,7 @@ class TurnCoordinator:
         *,
         routed: CommandKind | None = None,
         on_early_ack: Callable[[str], None] | None = None,
+        on_user_notify: Callable[[str], None] | None = None,
     ) -> TurnResult:
         turn_id = uuid.uuid4().hex[:12]
         logs: list[str] = []
@@ -278,6 +279,7 @@ class TurnCoordinator:
                 routed_turn,
                 logs,
                 on_early_ack=on_early_ack,
+                on_user_notify=on_user_notify,
             )
 
         if lane is RouteLane.FAST_TOOL:
@@ -349,28 +351,49 @@ class TurnCoordinator:
         if cls.decision is not FollowupDecision.APPROVE:
             return None
 
-        # CRITICAL 대기 스텝: 승인 후 1스텝만 실행 (CU 루프 재시작 금지)
+        # CRITICAL 대기 스텝: 승인 후 CU 루프 재개 (full_plan ctx 복원·checkpoint verify·계속)
         if pending.has_pending_tool:
             push_activity_line(
-                f"CU follow-up: approved pending tool={pending.pending_tool_name!r}."
+                f"CU follow-up: approved pending tool={pending.pending_tool_name!r} — resuming loop."
             )
-            tool_name = pending.pending_tool_name
-            params = dict(pending.pending_tool_params)
-            preview = pending.pending_tool_preview
+            goal = pending.goal
+            slots = dict(pending.slots)
+            risk_hint = pending.risk_hint
+            resume_pending = PendingComputerUseGoal(
+                goal=goal,
+                risk_hint=risk_hint,
+                prompt=pending.prompt,
+                slots=slots,
+                pending_tool_name=pending.pending_tool_name,
+                pending_tool_params=dict(pending.pending_tool_params),
+                pending_tool_preview=pending.pending_tool_preview,
+                cu_mode=pending.cu_mode,
+                executed_through_index=pending.executed_through_index,
+                pending_plan_index=pending.pending_plan_index,
+                pending_checkpoint_id=pending.pending_checkpoint_id,
+                plan_id=pending.plan_id,
+                full_plan_snapshot=dict(pending.full_plan_snapshot),
+                cu_observations=list(pending.cu_observations),
+            )
             self._assistant.ctx.clear_pending_cu()
-            body = self._assistant.run_pending_cu_tool(
-                tool_name,
-                params,
-                summary=preview or pending.goal,
+            reply = self._assistant.run_computer_use_resume(resume_pending)
+            user_visible, executed, extra_logs = _finalize_cu_reply(
+                self._assistant.ctx,
+                goal=goal,
+                slots=slots,
+                reply=reply,
+                risk_hint=risk_hint,
             )
-            logs.append("pending_cu_tool_executed")
-            user_visible = body if body.startswith("Iris:") else f"Iris: {body}"
+            logs.extend(extra_logs)
+            logs.append("pending_cu_resume_loop")
+            if not user_visible.startswith("Iris:"):
+                user_visible = f"Iris: {user_visible}"
             return TurnResult(
                 turn_id=turn_id,
                 route=RouteLane.COMPUTER_USE.value,
                 user_visible=user_visible,
                 early_ack=None,
-                executed=True,
+                executed=executed,
                 logs=logs + ["pending_cu_approved"],
                 store_history=True,
             )
@@ -380,7 +403,10 @@ class TurnCoordinator:
         self._assistant.ctx.clear_pending_cu()
         push_activity_line("CU follow-up: approved — resuming PAV loop.")
         reply = self._assistant.run_computer_use_loop(
-            user_text, goal=goal, slots=slots or None
+            user_text,
+            goal=goal,
+            slots=slots or None,
+            on_user_notify=None,
         )
         user_visible, executed, extra_logs = _finalize_cu_reply(
             self._assistant.ctx,
@@ -410,6 +436,7 @@ class TurnCoordinator:
         logs: list[str],
         *,
         on_early_ack: Callable[[str], None] | None = None,
+        on_user_notify: Callable[[str], None] | None = None,
     ) -> TurnResult:
         """CU 레인 — early_ack 후 goal/slots로 PAV 루프 (ORCHESTRATED ≠ PC 미디어 스킬)."""
         ctx = self._assistant.ctx
@@ -430,6 +457,7 @@ class TurnCoordinator:
             goal=cu_goal,
             slots=slots or None,
             routed=routed_turn.kind,
+            on_user_notify=on_user_notify,
         )
         user_visible, executed, extra_logs = _finalize_cu_reply(
             ctx,

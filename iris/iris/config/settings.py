@@ -145,7 +145,14 @@ class Settings:
     # Computer Use Phase B: UIA / VLM 하이브리드 인식
     computer_use_uia_enabled: bool
     computer_use_vlm_enabled: bool
+    computer_use_vlm_on_verify: bool  # checkpoint verify·repair VLM
+    computer_use_vlm_on_planner: bool  # full/step planner VLM
     computer_use_vision_model: str  # 비우면 gemma_model_name
+    computer_use_input_notify_delay_seconds: float  # 키보드·마우스 충돌 안내 후 대기
+    computer_use_full_plan_enabled: bool  # 초기 Perceive 후 전체 plans[] 1회 작성
+    type_input_verify_enabled: bool  # typewrite·unicode 경로만 검증
+    type_input_max_retries: int  # 검증 불일치 시 재시도 상한 (0~1)
+    type_input_visible_interval: float  # 글자 간격(초) — 보이는 입력
     # Phase 3: 멀티턴 프리셋 매칭에 Gemma 1회 (실패 시 modes/* regex 폴백)
     phase3_mode_preset_llm: bool
     # Ollama think: off | default | on (IRIS_THINKING_MODE)
@@ -209,7 +216,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         tts_enable_speech_formatter=_env_bool("TTS_ENABLE_SPEECH_FORMATTER", True),
         tts_enable_voice_fx=_env_bool("TTS_ENABLE_VOICE_FX", True),
         tts_max_spoken_sentences=_env_int("TTS_MAX_SPOKEN_SENTENCES", 3),
-        supertonic_voice=os.getenv("SUPERTONIC_VOICE", "F5").strip(),
+        supertonic_voice=os.getenv("SUPERTONIC_VOICE", "Lily").strip(),
         supertonic_language=os.getenv("SUPERTONIC_LANGUAGE", "ko").strip(),
         supertonic_total_steps=_env_int("SUPERTONIC_TOTAL_STEPS", 8),
         xtts_model_name=os.getenv(
@@ -262,7 +269,18 @@ def load_settings(env_path: Path | None = None) -> Settings:
         default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),
         computer_use_uia_enabled=_env_bool("COMPUTER_USE_UIA_ENABLED", True),
         computer_use_vlm_enabled=_env_bool("COMPUTER_USE_VLM_ENABLED", False),
+        computer_use_vlm_on_verify=_env_bool("COMPUTER_USE_VLM_ON_VERIFY", True),
+        computer_use_vlm_on_planner=_env_bool("COMPUTER_USE_VLM_ON_PLANNER", False),
         computer_use_vision_model=os.getenv("COMPUTER_USE_VISION_MODEL", "").strip(),
+        computer_use_input_notify_delay_seconds=_env_float(
+            "COMPUTER_USE_INPUT_NOTIFY_DELAY_SECONDS", 2.0
+        ),
+        computer_use_full_plan_enabled=_env_bool("COMPUTER_USE_FULL_PLAN_ENABLED", True),
+        type_input_verify_enabled=_env_bool("TYPE_INPUT_VERIFY_ENABLED", True),
+        type_input_max_retries=min(
+            1, max(0, _env_int("TYPE_INPUT_MAX_RETRIES", 1))
+        ),
+        type_input_visible_interval=_env_float("TYPE_INPUT_VISIBLE_INTERVAL", 0.03),
         phase3_mode_preset_llm=_env_bool("IRIS_PHASE3_MODE_PRESET_LLM", True),
         thinking_mode=_normalize_thinking_mode_env(
             os.getenv("IRIS_THINKING_MODE", "default")

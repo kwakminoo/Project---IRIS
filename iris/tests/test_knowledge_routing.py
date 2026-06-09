@@ -26,10 +26,10 @@ from iris.assistant.router_policy import RouteLane
 from iris.ai.gemma_client import ChatMessage
 from iris.assistant.turn_coordinator import TurnCoordinator
 from iris.core.command_router import CommandKind
-from tests.test_turn_coordinator import _FakeGemma, _make_assistant
+from tests.support.fakes import FakeGemma, make_routing_assistant
 
 
-class _HybridRouterGemma(_FakeGemma):
+class _HybridRouterGemma(FakeGemma):
     def chat(self, messages: Sequence[ChatMessage], purpose: object = None) -> str:
         self.calls.append(list(messages))
         if messages and "Unified Router" in messages[0].content:
@@ -75,12 +75,16 @@ def test_format_hybrid_without_hits() -> None:
 
 
 def test_research_hits_multi_merges() -> None:
-    h1 = [SearchHit(title="one", url="https://one.test", snippet="1")]
-    h2 = [SearchHit(title="two", url="https://two.test", snippet="2")]
+    substantive = "충분히 긴 본문 스니펫 " * 6
+    h1 = [SearchHit(title="one", url="https://one.test", snippet=substantive)]
+    h2 = [SearchHit(title="two", url="https://two.test", snippet=substantive)]
 
     with patch(
         "iris.agent.needs_agent.research_for_intent",
         side_effect=[(h1, "a"), (h1, "a"), (h2, "b")],
+    ) as mock_research, patch(
+        "iris.agent.needs_agent.playwright_research_fallback",
+        return_value=([], ""),
     ):
         label, merged = research_hits_multi(
             "비교 질문",
@@ -90,11 +94,98 @@ def test_research_hits_multi_merges() -> None:
         )
     assert "main" in label
     assert len(merged) == 2
+    assert mock_research.call_count == 3
+    for _args, kwargs in mock_research.call_args_list:
+        assert kwargs.get("allow_playwright_fallback") is False
+
+
+def test_research_hits_multi_caps_queries() -> None:
+    substantive = "충분히 긴 본문 스니펫 " * 8
+
+    def _hits_for_query(query: str) -> tuple[list[SearchHit], str]:
+        return [
+            SearchHit(
+                title=query,
+                url=f"https://{query.replace(' ', '-')}.test",
+                snippet=substantive,
+                source_label="duckduckgo",
+            )
+        ], "duckduckgo"
+
+    with patch(
+        "iris.agent.needs_agent.research_for_intent",
+        side_effect=lambda q, *_a, **_k: _hits_for_query(q),
+    ) as mock_research, patch(
+        "iris.agent.needs_agent.playwright_research_fallback"
+    ) as mock_pw:
+        _label, merged = research_hits_multi(
+            "비교",
+            CommandKind.WEB_SEARCH,
+            ["q2", "q3", "q4", "q5"],
+            primary_query="q1",
+        )
+    assert mock_research.call_count == 3
+    assert len(merged) == 3
+    mock_pw.assert_not_called()
+
+
+def test_research_hits_multi_playwright_once_when_poor() -> None:
+    pw_hit = [
+        SearchHit(
+            title="pw",
+            url="https://pw.example",
+            snippet="Playwright로 가져온 충분히 긴 본문 스니펫 " * 4,
+            source_label="playwright_google",
+        )
+    ]
+
+    with patch(
+        "iris.agent.needs_agent.research_for_intent",
+        return_value=([], ""),
+    ), patch(
+        "iris.agent.needs_agent.playwright_research_fallback",
+        return_value=(pw_hit, "playwright_google"),
+    ) as mock_pw:
+        _label, merged = research_hits_multi(
+            "A vs B",
+            CommandKind.WEB_SEARCH,
+            ["query b"],
+            primary_query="query a",
+        )
+    mock_pw.assert_called_once()
+    assert len(merged) == 1
+    assert merged[0].url == "https://pw.example"
+
+
+def test_research_hits_multi_skips_playwright_when_good() -> None:
+    substantive = "충분히 긴 본문 스니펫 " * 8
+    hits = [
+        SearchHit(
+            title=f"t{i}",
+            url=f"https://site{i}.example/a",
+            snippet=substantive,
+            source_label="duckduckgo",
+        )
+        for i in range(4)
+    ]
+
+    with patch(
+        "iris.agent.needs_agent.research_for_intent",
+        return_value=(hits, "duckduckgo"),
+    ), patch("iris.agent.needs_agent.playwright_research_fallback") as mock_pw:
+        _label, merged = research_hits_multi(
+            "A vs B",
+            CommandKind.WEB_SEARCH,
+            ["query b"],
+            primary_query="query a",
+        )
+    mock_pw.assert_not_called()
+    assert len(merged) >= 4
 
 
 def test_hybrid_lane_delegate_search(tmp_path) -> None:
     gemma = _HybridRouterGemma()
-    assistant = _make_assistant(tmp_path, gemma)
+    assistant = make_routing_assistant(tmp_path, gemma)
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
 
     result = coord.run_turn("AI 시장 전망 알려줘")

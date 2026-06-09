@@ -23,7 +23,10 @@ _FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 def _cu_vlm_settings(**overrides: object) -> SimpleNamespace:
     base = {
         "computer_use_vlm_enabled": True,
+        "computer_use_vlm_on_planner": True,
+        "computer_use_vlm_on_verify": True,
         "computer_use_vision_model": "gemma4:26b",
+        "computer_use_full_plan_enabled": False,
         "gemma_model_name": "gemma4:e2b",
         "gemma_backend": "ollama",
     }
@@ -79,6 +82,8 @@ def _make_assistant(
     *,
     settings: object | None = None,
 ) -> IrisAssistant:
+    if settings is None:
+        settings = SimpleNamespace(computer_use_full_plan_enabled=False)
     db = Database(path=tmp_path / "cu.db")
     executor = ActionExecutor(db, {})
     return IrisAssistant(db, executor, gemma, {}, settings=settings)  # type: ignore[arg-type]
@@ -282,7 +287,10 @@ def test_simple_notepad_launch_skips_planner(tmp_path: Path) -> None:
     registry.run = mock_run  # type: ignore[method-assign]
 
     agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
-    msg = agent.run("메모장 켜줘")
+    msg = agent.run(
+        "메모장 켜줘",
+        slots={"task_type": "open_app", "app_key": "notepad", "display_name": "메모장"},
+    )
 
     assert "실행" in msg
     mock_run.assert_called_once()
@@ -312,6 +320,11 @@ def test_approval_required_sets_pending_tool(tmp_path: Path) -> None:
     assert pending is not None
     assert pending.pending_tool_name == "run_shell"
     assert pending.pending_tool_params.get("command") == "echo hi"
+    assert pending.cu_mode == "step_planner"
+    assert pending.pending_plan_index >= 0
+    assert pending.cu_observations
+    sess = assistant.memory.load_task_session()
+    assert any("pending:run_shell" in a for a in (sess.get("approvals") or []))
 
 
 def test_planner_chat_with_images_when_vlm_on(tmp_path: Path) -> None:
@@ -344,6 +357,36 @@ def test_planner_chat_with_images_when_vlm_on(tmp_path: Path) -> None:
     assert user_msg.images and len(user_msg.images) == 1
     assert "screenshot_attached=yes" in user_msg.content
     assert "첨부 화면이 현재 PC 상태입니다" in user_msg.content
+
+
+def test_planner_skips_vision_when_only_verify_vlm_on(tmp_path: Path) -> None:
+    """VLM 마스터 on + planner off — step planner는 chat만."""
+    gemma = _VisionStepGemma(
+        [
+            '{"tool": "step_complete", "params": {}, "reason": "끝."}',
+        ]
+    )
+    settings = _cu_vlm_settings(
+        computer_use_vlm_on_planner=False,
+        computer_use_vlm_on_verify=True,
+    )
+    assistant = _make_assistant(tmp_path, gemma, settings=settings)
+    registry = assistant._executor.tool_registry
+    registry.run = MagicMock(  # type: ignore[method-assign]
+        side_effect=[
+            AutomationToolResult(True, "창", "Notepad"),
+            _perceive_ok(),
+        ]
+    )
+    with patch(
+        "iris.assistant.computer_use_agent.capture_planner_screenshot",
+        return_value=(_FAKE_PNG, "640x480"),
+    ):
+        agent = ComputerUseAgent(assistant, gemma, registry, max_steps=5)  # type: ignore[arg-type]
+        agent.run("메모장 확인")
+
+    assert len(gemma.vision_calls) == 0
+    assert len(gemma.calls) >= 1
 
 
 def test_planner_chat_only_when_vlm_off(tmp_path: Path) -> None:

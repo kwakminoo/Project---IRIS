@@ -194,6 +194,17 @@ class Database:
                 added_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS integration_endpoints (
+                name TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'api',
+                base_url TEXT NOT NULL DEFAULT '',
+                command TEXT NOT NULL DEFAULT '',
+                auth_header TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
             )
             self._conn.commit()
@@ -821,3 +832,94 @@ class Database:
             if str(row["exe_path"]) != exe_path:
                 self.upsert_app_launcher_entry(app_key, display_name, exe_path, source)
         return len(new_names), new_names
+
+    def list_integration_endpoints(self) -> list[sqlite3.Row]:
+        return list(
+            self._execute(
+                "SELECT * FROM integration_endpoints ORDER BY name COLLATE NOCASE ASC"
+            ).fetchall()
+        )
+
+    def get_integration_endpoint(self, name: str) -> sqlite3.Row | None:
+        return self._execute(
+            "SELECT * FROM integration_endpoints WHERE name=?",
+            (name.strip(),),
+        ).fetchone()
+
+    def upsert_integration_endpoint(
+        self,
+        name: str,
+        *,
+        kind: str,
+        base_url: str = "",
+        command: str = "",
+        auth_header: str = "",
+        enabled: bool = True,
+        notes: str = "",
+    ) -> None:
+        ts = datetime.utcnow().isoformat()
+        key = name.strip()
+        row = self.get_integration_endpoint(key)
+        if row:
+            self._execute(
+                """
+                UPDATE integration_endpoints
+                SET kind=?, base_url=?, command=?, auth_header=?, enabled=?, notes=?, updated_at=?
+                WHERE name=?
+                """,
+                (
+                    kind.strip().lower(),
+                    base_url.strip(),
+                    command.strip(),
+                    auth_header.strip(),
+                    1 if enabled else 0,
+                    notes.strip(),
+                    ts,
+                    key,
+                ),
+            )
+        else:
+            self._execute(
+                """
+                INSERT INTO integration_endpoints
+                (name, kind, base_url, command, auth_header, enabled, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    kind.strip().lower(),
+                    base_url.strip(),
+                    command.strip(),
+                    auth_header.strip(),
+                    1 if enabled else 0,
+                    notes.strip(),
+                    ts,
+                    ts,
+                ),
+            )
+        self._commit()
+
+    def delete_integration_endpoint(self, name: str) -> bool:
+        cur = self._execute(
+            "DELETE FROM integration_endpoints WHERE name=?",
+            (name.strip(),),
+        )
+        self._commit()
+        return cur.rowcount > 0
+
+    def test_integration_endpoint(self, name: str) -> tuple[bool, str]:
+        """연동 테스트 — ping 또는 tools/list."""
+        row = self.get_integration_endpoint(name)
+        if row is None:
+            return False, "등록되지 않은 연동입니다."
+        from iris.integrations.integration_client import IntegrationClient
+
+        client = IntegrationClient.from_row(dict(row))
+        if row["kind"] == "api":
+            ok, msg, _detail = client.call("health", {})
+            if not ok:
+                ok2, msg2, _ = client.call("", {})
+                return ok2, msg2
+            return ok, msg
+        ok, msg, _ = client.call("ping", {})
+        return ok, msg

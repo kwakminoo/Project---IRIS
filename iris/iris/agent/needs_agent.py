@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Literal, Sequence
 
@@ -11,8 +12,10 @@ from iris.agent.search_providers import (
     assess_research_quality,
     failure_user_message,
     is_research_failure,
+    playwright_research_fallback,
     research_for_intent,
 )
+from iris.core.activity_sink import push_activity_line
 from iris.agent.web_agent import SearchHit, extract_query_from_text
 from iris.core.command_router import CommandKind
 
@@ -124,6 +127,10 @@ CHAT_ONLY_KNOWLEDGE_INSTRUCTION = """[지식 답변 모드 — CHAT_ONLY]
 
 GEMMA_SOURCE_ONLY_INSTRUCTION = SEARCH_ANSWER_INSTRUCTION
 
+# 다중 검색 — 쿼리 상한·HTTP 병렬 워커 수
+MAX_MULTI_SEARCH_QUERIES = 3
+SEARCH_PARALLEL_WORKERS = 3
+
 AnswerMode = Literal[
     "search",
     "hybrid",
@@ -168,6 +175,109 @@ def research_hits_with_intent(
     return q, hits
 
 
+def _build_multi_query_list(
+    queries: Sequence[str],
+    *,
+    primary_query: str | None = None,
+) -> list[str]:
+    """primary + 추가 queries — 중복 제거·상한 적용."""
+    run_list: list[str] = []
+    if primary_query and str(primary_query).strip():
+        run_list.append(str(primary_query).strip())
+    for q in queries:
+        s = str(q).strip()
+        if s and s not in run_list:
+            run_list.append(s)
+    if len(run_list) > MAX_MULTI_SEARCH_QUERIES:
+        dropped = run_list[MAX_MULTI_SEARCH_QUERIES :]
+        run_list = run_list[:MAX_MULTI_SEARCH_QUERIES]
+        push_activity_line(
+            f"Search: multi-query capped at {MAX_MULTI_SEARCH_QUERIES} "
+            f"(dropped {len(dropped)})."
+        )
+    return run_list
+
+
+def _merge_search_hits(
+    merged: list[SearchHit],
+    seen_urls: set[str],
+    hits: Sequence[SearchHit],
+) -> None:
+    """URL 기준 dedupe 병합."""
+    for h in hits:
+        url_key = (h.url or "").strip()
+        if url_key and url_key in seen_urls:
+            continue
+        if url_key:
+            seen_urls.add(url_key)
+        merged.append(h)
+
+
+def _fetch_http_only(query: str, intent: CommandKind, *, max_pages: int) -> list[SearchHit]:
+    """서브쿼리 1건 — DuckDuckGo/Open-Meteo 등 HTTP만 (Playwright 금지)."""
+    hits, _ = research_for_intent(
+        query,
+        intent,
+        max_pages=max_pages,
+        allow_playwright_fallback=False,
+    )
+    return hits
+
+
+def _parallel_http_research(
+    run_list: list[str],
+    intent: CommandKind,
+    *,
+    max_pages: int,
+) -> list[SearchHit]:
+    """다중 쿼리 HTTP 수집 — Playwright 없이 병렬."""
+    workers = min(SEARCH_PARALLEL_WORKERS, len(run_list))
+    push_activity_line(
+        f"Search: multi-query parallel HTTP fetch queries={len(run_list)} workers={workers}."
+    )
+    merged: list[SearchHit] = []
+    seen_urls: set[str] = set()
+
+    if workers <= 1:
+        for q in run_list:
+            _merge_search_hits(merged, seen_urls, _fetch_http_only(q, intent, max_pages=max_pages))
+        return merged
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_fetch_http_only, q, intent, max_pages=max_pages): q for q in run_list
+        }
+        for fut in as_completed(futures):
+            try:
+                batch = fut.result()
+            except Exception as exc:
+                push_activity_line(f"Search: parallel sub-query failed — {exc!s}")
+                continue
+            _merge_search_hits(merged, seen_urls, batch)
+    return merged
+
+
+def _maybe_playwright_after_merge(
+    merged: list[SearchHit],
+    seen_urls: set[str],
+    representative_query: str,
+    *,
+    max_pages: int,
+) -> None:
+    """합산 품질이 partial 이하일 때만 Playwright 1회."""
+    quality = assess_research_quality(merged)
+    if quality.tier == "good":
+        return
+    pw_hits, _ = playwright_research_fallback(
+        representative_query,
+        max_pages=max_pages,
+        log_prefix=(
+            "Search: aggregate quality below good — Playwright Google fallback (once per turn)."
+        ),
+    )
+    _merge_search_hits(merged, seen_urls, pw_hits)
+
+
 def research_hits_multi(
     user_text: str,
     intent: CommandKind,
@@ -176,29 +286,25 @@ def research_hits_multi(
     max_pages: int = 5,
     primary_query: str | None = None,
 ) -> tuple[str, List[SearchHit]]:
-    run_list: list[str] = []
-    if primary_query and str(primary_query).strip():
-        run_list.append(str(primary_query).strip())
-    for q in queries:
-        s = str(q).strip()
-        if s and s not in run_list:
-            run_list.append(s)
+    run_list = _build_multi_query_list(queries, primary_query=primary_query)
     if not run_list:
         return research_hits_with_intent(user_text, intent, max_pages=max_pages)
 
-    merged: list[SearchHit] = []
-    seen_urls: set[str] = set()
-    for q in run_list:
+    if len(run_list) == 1:
+        q = run_list[0]
         hits, _ = research_for_intent(q, intent, max_pages=max_pages)
-        for h in hits:
-            url_key = (h.url or "").strip()
-            if url_key and url_key in seen_urls:
-                continue
-            if url_key:
-                seen_urls.add(url_key)
-            merged.append(h)
+        return q, hits
 
-    label = run_list[0] if len(run_list) == 1 else " | ".join(run_list[:4])
+    merged = _parallel_http_research(run_list, intent, max_pages=max_pages)
+    seen_urls = {(h.url or "").strip() for h in merged if (h.url or "").strip()}
+    _maybe_playwright_after_merge(
+        merged,
+        seen_urls,
+        run_list[0],
+        max_pages=max_pages,
+    )
+
+    label = " | ".join(run_list[:4])
     return label, merged
 
 

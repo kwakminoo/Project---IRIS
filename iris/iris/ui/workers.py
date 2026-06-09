@@ -101,6 +101,7 @@ class AgentWorker(QThread):
     finished_reply = pyqtSignal(str, bool, bool, str)
     delegate_search = pyqtSignal(str, str, str, str)  # user_text, intent, slot_query, meta_json
     early_ack = pyqtSignal(str)  # DIRECT_ACTION 실행 전 (메인 스레드 QueuedConnection)
+    user_notify = pyqtSignal(str)  # 키보드·단축키 충돌 안내 (TTS)
 
     def __init__(self, assistant: IrisAssistant, user_text: str) -> None:
         super().__init__()
@@ -114,7 +115,14 @@ class AgentWorker(QThread):
         def _emit_early_ack(ack: str) -> None:
             self.early_ack.emit(ack)
 
-        result = coordinator.run_turn(self._user_text, on_early_ack=_emit_early_ack)
+        def _emit_user_notify(msg: str) -> None:
+            self.user_notify.emit(msg)
+
+        result = coordinator.run_turn(
+            self._user_text,
+            on_early_ack=_emit_early_ack,
+            on_user_notify=_emit_user_notify,
+        )
         if result.delegate_search:
             push_activity_line("Worker: AgentWorker delegating to search path.")
             intent_name = result.search_intent_name or CommandKind.WEB_SEARCH.name

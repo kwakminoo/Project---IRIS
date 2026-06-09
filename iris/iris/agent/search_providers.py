@@ -1,4 +1,4 @@
-"""검색 API·Open-Meteo·TMDB — SearXNG/DDG HTML·Playwright Google SERP (유료 API 미사용)."""
+"""검색 API·Open-Meteo·TMDB — DuckDuckGo·Playwright Google SERP (유료 API 미사용)."""
 
 from __future__ import annotations
 
@@ -19,8 +19,14 @@ _HTTP_TIMEOUT = 20.0
 _DDG_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
+_DDG_HTML_HEADERS = {
+    "User-Agent": _DDG_UA,
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://html.duckduckgo.com/",
+}
 
 # Open-Meteo WMO weather_code → 한국어 (요약용)
 _WMO_KO: dict[int, str] = {
@@ -217,69 +223,63 @@ def fetch_tmdb_hits(query: str, *, max_results: int = 5) -> List[SearchHit]:
     return hits
 
 
-def _searxng_engines_param() -> str:
-    """P2 — 단일 Google 엔진 의존 완화. SEARXNG_ENGINES로 다변화(쉼표 구분)."""
-    raw = os.getenv("SEARXNG_ENGINES", "google,bing,duckduckgo,wikipedia").strip()
-    engines = [e.strip() for e in raw.split(",") if e.strip()]
-    return ",".join(engines) if engines else "google,bing,duckduckgo"
-
-
-def fetch_searxng_hits(query: str, *, max_results: int = 6) -> List[SearchHit]:
-    base = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
-    if not base:
-        return []
+def _load_ddgs_class():
+    """ddgs(권장) 또는 duckduckgo_search 패키지."""
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-            resp = client.get(
-                f"{base}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "engines": _searxng_engines_param(),
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        return [_provider_error_hit("SearXNG 실패", str(exc))]
+        from ddgs import DDGS
+
+        return DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+
+            return DDGS
+        except ImportError:
+            return None
+
+
+def _fetch_duckduckgo_via_ddgs_lib(query: str, *, max_results: int) -> List[SearchHit]:
+    """DuckDuckGo — ddgs 라이브러리(봇 차단 우회, API 키 불필요)."""
+    ddgs_cls = _load_ddgs_class()
+    if ddgs_cls is None:
+        return []
 
     hits: List[SearchHit] = []
-    for item in data.get("results") or []:
-        title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or "").strip()
-        content = str(item.get("content") or "").strip()
+    try:
+        with ddgs_cls() as ddgs:
+            rows = list(ddgs.text(query, max_results=max_results))
+    except Exception as exc:
+        return [_provider_error_hit("DuckDuckGo 조회 실패", str(exc))]
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        url = str(row.get("href") or row.get("url") or "").strip()
+        body = str(row.get("body") or row.get("snippet") or "").strip()
         if not url:
             continue
         hits.append(
             SearchHit(
                 title=title[:200] or url[:80],
                 url=url,
-                snippet=(content or str(item.get("snippet") or ""))[:480],
-                source_label="searxng",
+                snippet=body[:480],
+                source_label="duckduckgo",
             )
         )
     return hits[:max_results]
 
 
-def fetch_duckduckgo_hits(query: str, *, max_results: int = 6) -> List[SearchHit]:
-    """키/도커 없이 동작하는 기본 웹 검색(HTML 결과 파싱)."""
-    q = (query or "").strip()
-    if not q:
-        return []
-    try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
-            resp = client.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": q},
-                headers={"User-Agent": _DDG_UA},
-            )
-            resp.raise_for_status()
-            html = resp.text
-    except Exception as exc:
-        return [_provider_error_hit("DuckDuckGo 조회 실패", str(exc))]
+def _html_looks_like_bot_block(html: str, status_code: int) -> bool:
+    """DDG HTML이 검색 결과 대신 봇 차단 페이지인지."""
+    if status_code == 202:
+        return True
+    low = html.lower()
+    return "anomaly.js" in low or "result__a" not in low and "botnet" in low
 
-    hits: List[SearchHit] = []
-    # result title/url
+
+def _parse_duckduckgo_html(html: str, *, max_results: int) -> List[SearchHit]:
+    """레거시 HTML 파싱 — ddgs 미설치·라이브러리 실패 시 폴백."""
     pattern = re.compile(
         r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
         re.IGNORECASE | re.DOTALL,
@@ -289,8 +289,8 @@ def fetch_duckduckgo_hits(query: str, *, max_results: int = 6) -> List[SearchHit
         html,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    matches = pattern.findall(html)
-    for idx, (href, raw_title) in enumerate(matches[:max_results]):
+    hits: List[SearchHit] = []
+    for idx, (href, raw_title) in enumerate(pattern.findall(html)[:max_results]):
         title = re.sub(r"<[^>]+>", "", raw_title)
         title = re.sub(r"\s+", " ", title).strip()
         snippet_raw = snippets[idx] if idx < len(snippets) else ""
@@ -309,39 +309,108 @@ def fetch_duckduckgo_hits(query: str, *, max_results: int = 6) -> List[SearchHit
     return hits
 
 
-def _web_search_provider_order() -> list[str]:
-    """웹 검색 엔진 순서 — SearXNG(자체) → DuckDuckGo HTML(키 불필요)."""
-    provider = os.getenv("IRIS_SEARCH_PROVIDER", "local").strip().lower()
-    _default = ["searxng", "duckduckgo_html"]
-    if provider in ("local", "auto", ""):
-        return list(_default)
-    if provider == "searxng":
-        return ["searxng", "duckduckgo_html"]
-    if provider == "duckduckgo":
-        return ["duckduckgo_html", "searxng"]
-    # 레거시 brave/tavily 값은 무시하고 무료 경로만 사용
-    return list(_default)
+def _fetch_duckduckgo_via_html(query: str, *, max_results: int) -> List[SearchHit]:
+    """DuckDuckGo HTML — POST 폼 제출(구형 파서, 봇 차단 시 빈 결과)."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+            resp = client.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": q, "b": ""},
+                headers=_DDG_HTML_HEADERS,
+            )
+            resp.raise_for_status()
+            html = resp.text
+            status = resp.status_code
+    except Exception as exc:
+        return [_provider_error_hit("DuckDuckGo HTML 조회 실패", str(exc))]
+
+    if _html_looks_like_bot_block(html, status):
+        return []
+
+    return _parse_duckduckgo_html(html, max_results=max_results)
+
+
+def fetch_duckduckgo_hits(query: str, *, max_results: int = 6) -> List[SearchHit]:
+    """
+    DuckDuckGo 웹 검색 — 기본: ddgs 라이브러리, 폴백: HTML POST 파싱.
+    html.duckduckgo.com GET은 봇 차단(HTTP 202)으로 더 이상 동작하지 않음.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    lib_hits = _fetch_duckduckgo_via_ddgs_lib(q, max_results=max_results)
+    if lib_hits:
+        if lib_hits[0].source_label == "provider_error":
+            push_activity_line(f"Search: DuckDuckGo lib failed — {lib_hits[0].snippet[:80]}")
+        else:
+            push_activity_line(f"Search: DuckDuckGo ok ({len(lib_hits)} hits).")
+            return lib_hits
+
+    html_hits = _fetch_duckduckgo_via_html(q, max_results=max_results)
+    if html_hits:
+        push_activity_line(f"Search: DuckDuckGo HTML ok ({len(html_hits)} hits).")
+        return html_hits
+
+    ddgs_cls = _load_ddgs_class()
+    if ddgs_cls is None:
+        return [
+            _provider_error_hit(
+                "DuckDuckGo 패키지 없음",
+                "pip install ddgs 후 Iris를 재시작하세요. "
+                "(html.duckduckgo.com은 봇 차단으로 직접 파싱이 거의 실패합니다.)",
+            )
+        ]
+    if lib_hits and lib_hits[0].source_label == "provider_error":
+        return lib_hits
+
+    return [
+        _provider_error_hit(
+            "DuckDuckGo 결과 없음",
+            "DuckDuckGo가 봇 차단 페이지를 반환했거나 결과가 비었습니다. "
+            "잠시 후 재시도하거나 IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1을 확인하세요.",
+        )
+    ]
 
 
 def fetch_web_api_hits(query: str, *, max_results: int = 6) -> tuple[List[SearchHit], str]:
-    """SearXNG → DDG HTML 순으로 시도 (유료 검색 API 미사용)."""
-    for name in _web_search_provider_order():
-        if name == "duckduckgo_html":
-            hits = fetch_duckduckgo_hits(query, max_results=max_results)
-            label = "duckduckgo_html"
-        else:
-            hits = fetch_searxng_hits(query, max_results=max_results)
-            label = "searxng"
-        if not hits:
-            continue
-        if hits[0].source_label == "provider_error":
-            continue
-        return hits, label
-    return [], ""
+    """DuckDuckGo 웹 검색 (유료 API 미사용)."""
+    hits = fetch_duckduckgo_hits(query, max_results=max_results)
+    if not hits:
+        return [], ""
+    if hits[0].source_label == "provider_error":
+        return [], ""
+    label = hits[0].source_label or "duckduckgo"
+    return hits, label
 
 
 def _playwright_fallback_enabled() -> bool:
     return _env_bool("IRIS_SEARCH_PLAYWRIGHT_FALLBACK", True)
+
+
+def playwright_research_fallback(
+    query: str,
+    *,
+    max_pages: int = 5,
+    log_prefix: str = "Search: DuckDuckGo empty — Playwright Google fallback.",
+) -> tuple[List[SearchHit], str]:
+    """Playwright Google SERP — 턴당 1회 호출 권장."""
+    q = (query or "").strip() or "Iris"
+    if not _playwright_fallback_enabled():
+        return [
+            _provider_error_hit(
+                "웹 검색 불가",
+                "DuckDuckGo 검색이 실패했고 Playwright 폴백이 꺼져 있습니다(IRIS_SEARCH_PLAYWRIGHT_FALLBACK=0).",
+            )
+        ], "none"
+
+    push_activity_line(log_prefix)
+    from iris.agent.web_agent import fetch_research_hits as pw_fetch
+
+    return pw_fetch(q, max_pages=max_pages), "playwright_google"
 
 
 def research_for_intent(
@@ -349,6 +418,7 @@ def research_for_intent(
     intent: CommandKind,
     *,
     max_pages: int = 5,
+    allow_playwright_fallback: bool = True,
 ) -> tuple[List[SearchHit], str]:
     """의도별 API 리서치. 반환: (hits, provider_name)."""
     q = (query or "").strip() or "Iris"
@@ -361,26 +431,17 @@ def research_for_intent(
         hits = fetch_tmdb_hits(q, max_results=max(5, max_pages))
         return hits, "tmdb"
 
-    # NEWS / WEB / CURRENT_INFO — 웹 검색 API
+    # NEWS / WEB / CURRENT_INFO — DuckDuckGo
     news_bias = intent is CommandKind.NEWS_SEARCH
     web_q = f"{q} news" if news_bias and "뉴스" not in q else q
     hits, provider = fetch_web_api_hits(web_q, max_results=max(6, max_pages))
     if hits:
         return hits, provider
 
-    # SearXNG/DDG HTML이 모두 실패하면, 설정이 켜져 있을 때만 Playwright SERP 폴백 수행
-    if _playwright_fallback_enabled():
-        push_activity_line("Search: API empty — Playwright Google fallback.")
-        from iris.agent.web_agent import fetch_research_hits as pw_fetch
+    if not allow_playwright_fallback:
+        return [], ""
 
-        return pw_fetch(q, max_pages=max_pages), "playwright_google"
-
-    return [
-        _provider_error_hit(
-            "웹 검색 불가",
-            "웹 검색 수집 엔진(SearXNG/DDG HTML) 모두 실패했고, Playwright 폴백이 꺼져 있습니다(IRIS_SEARCH_PLAYWRIGHT_FALLBACK=0).",
-        )
-    ], "none"
+    return playwright_research_fallback(q, max_pages=max_pages)
 
 
 def _snippet_is_substantive(snippet: str) -> bool:
@@ -390,11 +451,13 @@ def _snippet_is_substantive(snippet: str) -> bool:
     low = sn.lower()
     bad = (
         "pip install playwright",
+        "pip install ddgs",
         "검색 페이지를 확인해 주세요",
         "[api 오류]",
         "api 키",
         "tmdb_api_key",
         "bearer",
+        "봇 차단",
     )
     return not any(b in low for b in bad)
 
@@ -436,9 +499,9 @@ def _hard_failure_reason(hits: List[SearchHit]) -> str | None:
 
     if all(h.source_label in ("provider_error", "error") for h in hits):
         detail = (hits[0].snippet or hits[0].title or "")[:120]
-        if "키" in detail or "API" in detail:
-            return "검색 API 키가 설정되지 않았거나 조회에 실패했습니다"
-        return "검색 API 조회 실패"
+        if "키" in detail or "API" in detail or "패키지" in detail:
+            return "검색 설정이 올바르지 않거나 조회에 실패했습니다"
+        return "검색 조회 실패"
 
     if not _substantive_hits(hits):
         return "가져온 페이지에 답변에 쓸 본문이 없습니다"
@@ -526,8 +589,8 @@ def failure_user_message(reason_ko: str) -> str:
         "지금은 검색 결과를 불러오지 못했어요.\n"
         f"원인: {reason_ko}\n"
         "다음을 확인해 주세요.\n"
-        "1) .env — 날씨는 Open-Meteo(키 불필요), 영화는 TMDB_API_KEY, "
-        "웹은 SearXNG(SEARXNG_BASE_URL) 또는 DuckDuckGo HTML(추가 설정 없음)\n"
-        "2) IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1 이면 Playwright Google SERP 폴백\n"
-        "3) 인터넷 연결 · Iris 활동 로그의 Search: … 줄"
+        "1) pip install ddgs — DuckDuckGo 검색 패키지(필수)\n"
+        "2) .env — 날씨는 Open-Meteo(키 불필요), 영화는 TMDB_API_KEY\n"
+        "3) IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1 이면 Playwright Google SERP 폴백\n"
+        "4) 인터넷 연결 · Iris 활동 로그의 Search: … 줄"
     )

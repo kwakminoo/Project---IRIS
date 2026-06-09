@@ -2,12 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
-# 한글 IME 활성 시 pyautogui.typewrite는 라틴 키가 한글로 변환됨
-_HANGUL_RE = re.compile(r"[가-힣]")
-_URL_LIKE_RE = re.compile(r"^https?://", re.I)
-
 
 def send_hotkey_approved(keys: list[str], approved: bool) -> tuple[bool, str]:
     """승인된 경우에만 단축키 조합 (예: ctrl+f)."""
@@ -22,17 +16,6 @@ def send_hotkey_approved(keys: list[str], approved: bool) -> tuple[bool, str]:
         return True, "+".join(str(k) for k in keys)
     except Exception as e:
         return False, str(e)
-
-
-def _should_paste_instead_of_typewrite(text: str) -> bool:
-    """URL·ASCII 텍스트는 IME 영향 없는 붙여넣기 경로를 사용."""
-    t = (text or "").strip()
-    if not t:
-        return False
-    if _URL_LIKE_RE.match(t) or "://" in t:
-        return True
-    # 한글이 없는 라틴/기호 문자열 — 주소창 URL 등
-    return _HANGUL_RE.search(t) is None
 
 
 def _clipboard_get_text() -> str:
@@ -87,20 +70,28 @@ def paste_text_approved(text: str, approved: bool) -> tuple[bool, str]:
         return False, str(e)
 
 
-def type_text_approved(text: str, approved: bool) -> tuple[bool, str]:
-    """승인된 경우에만 입력."""
+def type_text_approved(
+    text: str,
+    approved: bool,
+    *,
+    interval: float = 0.03,
+    verify_enabled: bool = True,
+    max_retries: int = 1,
+) -> tuple[bool, str]:
+    """승인된 경우에만 입력 — IME·UIA 사전 처리, 검증/재시도 최소."""
     if not approved:
         return False, "승인 필요"
-    payload = str(text or "")
-    if not payload:
-        return False, "text가 비어 있습니다."
-    # YouTube watch URL 등 — 한글 IME가 켜져 있어도 정확히 입력
-    if _should_paste_instead_of_typewrite(payload):
-        return paste_text_approved(payload, approved=True)
-    try:
-        import pyautogui  # type: ignore
+    from iris.automation.text_input_controller import type_text_smart
 
-        pyautogui.typewrite(payload, interval=0.01)
-        return True, "typewrite"
-    except Exception as e:
-        return False, str(e)
+    outcome = type_text_smart(
+        text,
+        interval=interval,
+        verify_enabled=verify_enabled,
+        max_retries=max_retries,
+    )
+    detail = outcome.message
+    if outcome.verified:
+        detail = f"{detail}|ok"
+    if outcome.retried:
+        detail = f"{detail}|retried"
+    return outcome.success, f"{outcome.mode}:{detail}"

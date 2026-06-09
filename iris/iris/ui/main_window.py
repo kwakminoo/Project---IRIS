@@ -48,10 +48,10 @@ from iris.config.settings import load_settings
 from iris.core.activity_sink import push_activity_line, register_activity_sink
 from iris.core.command_router import CommandKind
 from iris.core.intent_router import route_user_intent
-from iris.core.context_manager import PendingMonitoringAction
 from iris.core.state_machine import AppState, StateMachine
+from iris.assistant.dialogue_agent import DialogueAgent
 from iris.monitoring import BrowserTabMonitor, MonitorManager, TerminalLogRegistry
-from iris.monitoring.dialogue_bridge import monitoring_proposal_message
+from iris.monitoring.proactive_suggestion import dispatch_proactive_monitor_event
 from iris.monitoring.notification_policy import NotificationPolicy
 from iris.monitoring.target_registry import TargetRegistry
 from iris.memory.memory_manager import commit_turn_pair, strip_iris_prefix
@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
+        self._dialogue = DialogueAgent(self._assistant, self._gemma)
         self._install_watcher = AppInstallWatcher(self)
         self._install_watcher.install_complete.connect(self._on_install_complete)
         self._maybe_run_initial_app_scan()
@@ -495,6 +496,7 @@ class MainWindow(QMainWindow):
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
+        self._dialogue = DialogueAgent(self._assistant, self._gemma)
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._rebuild_voice_input()
         self._refresh_model_label()
@@ -577,37 +579,21 @@ class MainWindow(QMainWindow):
         self._notes.try_add_alert(
             target_id, category, title, message, focus_hint, event_id=event_id
         )
-        proposal = monitoring_proposal_message(category, title, recommended, message)
-        self._assistant.memory.add_long_term_summary(
-            "monitor", proposal[:240], source_hint=title[:80]
+        result = dispatch_proactive_monitor_event(
+            self._assistant,
+            self._dialogue,
+            title=title,
+            message=message,
+            category=category,
+            target_id=target_id,
+            focus_hint=focus_hint,
+            recommended=recommended,
+            event_id=event_id,
         )
-        self._assistant.memory.save_task_session(
-            current_goal=f"모니터링: {title}",
-            observations=[proposal[:200]],
-        )
-        if category in (
-            "APPROVAL_WAITING",
-            "ERROR_DETECTED",
-            "TASK_STALLED",
-            "RESPONSE_READY",
-            "USER_ACTION_REQUIRED",
-            "GENERATION_FAILED",
-        ):
-            self._chat.append_message("Iris", proposal)
-        if category in ("APPROVAL_WAITING", "USER_ACTION_REQUIRED"):
-            sug = "y"
-            if "n" in (recommended or "").lower() and "y" not in (recommended or "").lower():
-                sug = ""
-            pm = PendingMonitoringAction(
-                event_id=event_id,
-                target_id=target_id,
-                focus_hint=focus_hint,
-                suggested_input=sug,
-                category=category,
-                natural_language=proposal,
-            )
-            if self._assistant.set_monitor_pending(pm):
-                pass  # proposal already in chat
+        if result is None:
+            return
+        if result.show_in_chat:
+            self._chat.append_message("Iris", result.proposal)
 
     def _on_state_changed(self, s: object) -> None:
         if isinstance(s, AppState):
@@ -764,6 +750,10 @@ class MainWindow(QMainWindow):
             self._on_agent_early_ack,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._agent_worker.user_notify.connect(
+            self._on_agent_user_notify,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._agent_worker.start()
 
     @pyqtSlot(str)
@@ -784,6 +774,24 @@ class MainWindow(QMainWindow):
         else:
             spoken = ack
         self._speak(spoken, on_complete=self._on_early_ack_tts_done)
+
+    @pyqtSlot(str)
+    def _on_agent_user_notify(self, msg: str) -> None:
+        """키보드·단축키·마우스 사용 전 충돌 방지 안내."""
+        body = msg.strip()
+        if not body:
+            return
+        self._db.insert_log("assistant_user_notify", body, None)
+        self._chat.append_message_typed("Iris", body)
+        if self._settings.tts_enable_speech_formatter:
+            spoken = format_speech(
+                body,
+                infer_speech_tone(from_llm=False, reply_text=body),
+                max_sentences=min(3, self._settings.tts_max_spoken_sentences),
+            )
+        else:
+            spoken = body
+        self._speak(spoken)
 
     def _on_early_ack_tts_done(self) -> None:
         """ack TTS 종료 — 워커 실행 중이면 EXECUTING, follow-up 대기."""

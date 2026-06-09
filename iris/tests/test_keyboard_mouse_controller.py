@@ -1,33 +1,35 @@
-"""keyboard_mouse_controller — URL 붙여넣기 경로."""
+"""keyboard_mouse_controller — smart type 경로."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from iris.automation import keyboard_mouse_controller as kmc
+from iris.automation.text_input_controller import TypeTextOutcome
 
 
-def test_should_paste_for_watch_url() -> None:
+@patch("iris.automation.text_input_controller.type_text_smart")
+def test_type_text_url_uses_smart_typewrite(mock_smart) -> None:
     url = "https://www.youtube.com/watch?v=abc111"
-    assert kmc._should_paste_instead_of_typewrite(url) is True
+    mock_smart.return_value = TypeTextOutcome(True, "typewrite", "typewrite", verified=True)
+    ok, reason = kmc.type_text_approved(url, approved=True)
+    assert ok is True
+    assert reason.startswith("typewrite:")
+    mock_smart.assert_called_once()
 
 
-def test_should_not_paste_for_hangul() -> None:
-    assert kmc._should_paste_instead_of_typewrite("아이유 라일락") is False
+def test_paste_text_approved_still_available_for_explicit_call() -> None:
+    from unittest.mock import MagicMock
 
-
-@patch("iris.automation.keyboard_mouse_controller._clipboard_set_text")
-@patch("iris.automation.keyboard_mouse_controller._clipboard_get_text", return_value="saved")
-def test_type_text_url_uses_clipboard_paste(
-    mock_get: MagicMock,
-    mock_set: MagicMock,
-) -> None:
-    url = "https://www.youtube.com/watch?v=abc111"
+    text = "https://example.com"
     fake_gui = MagicMock()
     with patch.dict("sys.modules", {"pyautogui": fake_gui}):
-        ok, mode = kmc.type_text_approved(url, approved=True)
+        with patch(
+            "iris.automation.keyboard_mouse_controller._clipboard_get_text",
+            return_value="saved",
+        ):
+            with patch("iris.automation.keyboard_mouse_controller._clipboard_set_text"):
+                ok, mode = kmc.paste_text_approved(text, approved=True)
     assert ok is True
     assert mode == "paste"
-    mock_set.assert_any_call(url)
-    mock_set.assert_any_call("saved")
     fake_gui.hotkey.assert_called_once_with("ctrl", "v")

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from iris.agent.needs_agent import CHAT_ONLY_KNOWLEDGE_INSTRUCTION
 from iris.ai.gemma_client import ChatMessage
 from iris.ai.thinking_policy import LlmPurpose
+from iris.assistant.tool_user_reply import format_cu_early_ack
 from iris.core.command_router import CommandKind
 
 if TYPE_CHECKING:
@@ -58,51 +59,8 @@ class DialogueAgent:
         return self._with_iris_prefix(raw)
 
     def cu_early_ack(self, goal: str, slots: dict | None = None) -> str:
-        """Computer Use 실행 전 짧은 확인 — 사용자 goal 원문을 반복하지 않음."""
-        slot = slots or {}
-        # Phase 3 — 라우터가 준 display_name이 있으면 템플릿 1줄로 통일
-        disp_raw = slot.get("display_name")
-        if isinstance(disp_raw, str) and disp_raw.strip():
-            return f"{disp_raw.strip()} 관련 작업을 진행할게요."
-        # Unified Router 미디어 — success_criteria와 일치하는 ack (완료 과장 금지)
-        media_action = str(slot.get("media_action") or "").strip().lower()
-        if media_action in {"search", "play"}:
-            sq_raw = slot.get("search_query") or slot.get("query") or slot.get("title")
-            q = sq_raw.strip()[:40] if isinstance(sq_raw, str) and sq_raw.strip() else None
-            sc = str(slot.get("success_criteria") or "").strip().lower()
-            if sc in {"", "search_results_visible"} and media_action == "search":
-                if q:
-                    return f"'{q}' 검색 결과를 열게요."
-                return "검색 결과를 열게요."
-            if sc in {"", "playback_confirmed", "play_confirmed"} or media_action == "play":
-                if q:
-                    return f"'{q}' 찾아서 재생을 시도할게요."
-                return "찾아서 재생을 시도할게요."
-        g = (goal or "").strip()
-        hint = " ".join(
-            str(slot.get(k) or "")
-            for k in ("app_hint", "app_key", "display_name", "query", "search_query", "title")
-        )
-        combined = f"{g} {hint}".strip()
-        task_type = str(slot.get("task_type") or "").strip().lower()
-
-        query = slot.get("query") or slot.get("search_query") or slot.get("title")
-        if isinstance(query, str) and query.strip():
-            q = query.strip()[:40]
-            if re.search(r"유튜브|youtube", combined, re.I):
-                return f"유튜브에서 '{q}' 검색·재생을 진행할게요."
-        if re.search(r"유튜브|youtube", combined, re.I):
-            return "유튜브에서 요청하신 재생을 진행할게요."
-        if re.search(r"카톡|카카오", combined, re.I):
-            return "카카오톡에서 요청을 진행할게요."
-
-        if task_type == "open_app" or re.search(r"메모장|notepad", combined, re.I):
-            if re.search(r"메모장|notepad", combined, re.I):
-                return "메모장을 실행할게요."
-        matched = match_action_ack(combined)
-        if matched:
-            return matched
-        return "요청하신 작업을 진행할게요."
+        """Computer Use 실행 전 짧은 안내 — slots·preview 기반 (goal 원문 echo 금지)."""
+        return format_cu_early_ack(goal, slots)
 
     def ack(
         self,
@@ -130,6 +88,41 @@ class DialogueAgent:
         if kind is CommandKind.MONITORING_STATUS:
             return "모니터링 상태를 확인할게요."
         return "요청을 처리할게요."
+
+    def monitor_proposal(
+        self,
+        category: str,
+        target_title: str,
+        recommended_action: str = "",
+        *,
+        alert_message: str = "",
+    ) -> str:
+        """모니터링 이벤트 → 사용자에게 먼저 말 걸 제안문 (Iris: 접두사 없음)."""
+        from iris.monitoring.dialogue_bridge import monitoring_proposal_message
+
+        return monitoring_proposal_message(
+            category,
+            target_title,
+            recommended_action,
+            alert_message,
+        )
+
+    def proactive_monitor_message(
+        self,
+        category: str,
+        target_title: str,
+        recommended_action: str = "",
+        *,
+        alert_message: str = "",
+    ) -> str:
+        """TTS·로그용 — monitor_proposal + Iris 접두사."""
+        body = self.monitor_proposal(
+            category,
+            target_title,
+            recommended_action,
+            alert_message=alert_message,
+        )
+        return self._with_iris_prefix(body)
 
     @staticmethod
     def _with_iris_prefix(text: str) -> str:

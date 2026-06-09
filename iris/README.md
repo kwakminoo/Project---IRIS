@@ -21,9 +21,9 @@ Iris is a local-first personal AI assistant for Windows.
 
 ## 웹 검색
 
-- 기본: SearXNG / DuckDuckGo HTML (`IRIS_SEARCH_PROVIDER=local`, 유료 검색 API 미사용)
-- SearXNG 자체 호스팅: [docs/searxng-setup-ko.md](../docs/searxng-setup-ko.md)
-- API 실패 시 Playwright Google SERP 폴백 (`IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1`)
+- 기본: DuckDuckGo (`ddgs` 패키지, `pip install -r requirements.txt`에 포함, API 키·Docker 불필요)
+- DuckDuckGo 실패 시 Playwright Google SERP 폴백 (`IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1`)
+- 참고: `html.duckduckgo.com` 직접 HTML 파싱은 봇 차단(HTTP 202)으로 동작하지 않아 `ddgs` 라이브러리를 사용합니다.
 
 ## 앱 런처
 

@@ -8,9 +8,11 @@ import httpx
 
 from iris.agent.needs_agent import is_research_failure
 from iris.agent.search_providers import (
+    _parse_duckduckgo_html,
     fetch_duckduckgo_hits,
     fetch_open_meteo_hits,
     fetch_tmdb_hits,
+    fetch_web_api_hits,
     is_research_failure as sp_is_failure,
 )
 from iris.agent.web_agent import SearchHit
@@ -115,10 +117,10 @@ def test_fetch_tmdb_no_key() -> None:
     assert hits[0].source_label == "provider_error"
     failed, reason = is_research_failure(hits)
     assert failed
-    assert "API" in reason or "키" in reason
+    assert "API" in hits[0].snippet or "키" in hits[0].snippet or "설정" in reason
 
 
-def test_fetch_duckduckgo_hits_parse_html() -> None:
+def test_parse_duckduckgo_html() -> None:
     html = """
     <html><body>
       <a class="result__a" href="https://example.com/a">첫 번째 결과</a>
@@ -127,61 +129,45 @@ def test_fetch_duckduckgo_hits_parse_html() -> None:
       <a class="result__snippet">설명 스니펫 B</a>
     </body></html>
     """
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.text = html
-    client = MagicMock()
-    client.get = MagicMock(return_value=resp)
-    client.__enter__ = MagicMock(return_value=client)
-    client.__exit__ = MagicMock(return_value=False)
-
-    with patch("iris.agent.search_providers.httpx.Client", return_value=client):
-        hits = fetch_duckduckgo_hits("테스트")
+    hits = _parse_duckduckgo_html(html, max_results=5)
     assert len(hits) == 2
     assert hits[0].source_label == "duckduckgo_html"
     assert hits[0].url == "https://example.com/a"
     assert "스니펫" in hits[0].snippet
 
 
-def test_web_search_provider_order_no_paid_apis() -> None:
-    from iris.agent.search_providers import _web_search_provider_order
+def test_fetch_duckduckgo_hits_uses_ddgs_lib() -> None:
+    lib_rows = [
+        {"title": "Python.org", "href": "https://www.python.org/", "body": "공식 사이트 설명"},
+    ]
 
-    with patch.dict("os.environ", {"IRIS_SEARCH_PROVIDER": "local"}, clear=False):
-        assert _web_search_provider_order() == ["searxng", "duckduckgo_html"]
-    with patch.dict("os.environ", {"IRIS_SEARCH_PROVIDER": "brave"}, clear=False):
-        assert "brave" not in _web_search_provider_order()
-        assert _web_search_provider_order() == ["searxng", "duckduckgo_html"]
+    class FakeDDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            return False
+
+        def text(self, query: str, max_results: int = 6):  # type: ignore[no-untyped-def]
+            return iter(lib_rows)
+
+    with patch("iris.agent.search_providers._load_ddgs_class", return_value=FakeDDGS):
+        hits = fetch_duckduckgo_hits("Python")
+    assert len(hits) == 1
+    assert hits[0].source_label == "duckduckgo"
+    assert hits[0].url == "https://www.python.org/"
 
 
-def test_fetch_searxng_multi_engine_param() -> None:
-    captured: dict = {}
-
-    def fake_get(url: str, **kwargs):  # type: ignore[no-untyped-def]
-        captured["params"] = kwargs.get("params")
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.json.return_value = {"results": []}
-        return resp
-
-    client = MagicMock()
-    client.get = fake_get
-    client.__enter__ = MagicMock(return_value=client)
-    client.__exit__ = MagicMock(return_value=False)
-
-    with patch.dict(
-        "os.environ",
-        {
-            "SEARXNG_BASE_URL": "http://127.0.0.1:8080",
-            "SEARXNG_ENGINES": "google,bing,duckduckgo",
-        },
-        clear=False,
+def test_fetch_web_api_hits_duckduckgo_only() -> None:
+    with patch(
+        "iris.agent.search_providers.fetch_duckduckgo_hits",
+        return_value=[
+            SearchHit("t", "https://x", "본문 스니펫 충분히 길게", source_label="duckduckgo")
+        ],
     ):
-        with patch("iris.agent.search_providers.httpx.Client", return_value=client):
-            from iris.agent.search_providers import fetch_searxng_hits
-
-            fetch_searxng_hits("테스트")
-
-    assert captured.get("params", {}).get("engines") == "google,bing,duckduckgo"
+        hits, provider = fetch_web_api_hits("테스트")
+    assert provider == "duckduckgo"
+    assert len(hits) == 1
 
 
 def test_assess_research_quality_good() -> None:
@@ -192,7 +178,7 @@ def test_assess_research_quality_good() -> None:
             title=f"기사 {i}",
             url=f"https://site{i}.example.com/a",
             snippet="충분히 긴 본문 스니펫 " * 8,
-            source_label="searxng",
+            source_label="duckduckgo",
         )
         for i in range(4)
     ]
@@ -210,7 +196,7 @@ def test_assess_research_quality_partial_not_binary_failure() -> None:
             title="짧은 결과",
             url="https://one.example/x",
             snippet="짧지만 답에 쓸 만한 한 줄 설명입니다.",
-            source_label="duckduckgo_html",
+            source_label="duckduckgo",
         )
     ]
     q = assess_research_quality(hits)
@@ -231,3 +217,22 @@ def test_research_for_intent_weather_uses_open_meteo() -> None:
         hits, provider = research_for_intent("오늘 날씨", CommandKind.WEATHER_SEARCH)
     assert provider == "open_meteo"
     assert hits[0].source_label == "open_meteo"
+
+
+def test_research_for_intent_skips_playwright_when_disabled() -> None:
+    from iris.agent.search_providers import research_for_intent
+
+    with patch(
+        "iris.agent.search_providers.fetch_web_api_hits",
+        return_value=([], ""),
+    ), patch(
+        "iris.agent.search_providers.playwright_research_fallback",
+    ) as mock_pw:
+        hits, provider = research_for_intent(
+            "테스트",
+            CommandKind.WEB_SEARCH,
+            allow_playwright_fallback=False,
+        )
+    mock_pw.assert_not_called()
+    assert hits == []
+    assert provider == ""

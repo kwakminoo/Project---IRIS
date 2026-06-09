@@ -21,6 +21,7 @@ from iris.config.app_index import resolve_app_candidates_for_llm
 from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind
 from iris.assistant.media_completion import normalize_routed_media_slots
+from iris.assistant.action_skills import clarify_missing_skill_slots
 from iris.core.context_manager import DialogueContext
 
 if TYPE_CHECKING:
@@ -67,10 +68,8 @@ pending_cu가 있으면 approve_followup|reject_followup|clarify|unrelated.
 - slots.search_topic: general | weather | news | movie | current_info | comparison | definition
 - slots.answer_shape: definition | comparison | summary | how_to | list
 - 비교(comparison)일 때 queries는 최소 2개, 각 대상을 분리해 검색 가능하게 작성
-=== 검색 수집 정책(P2 MULTI-ENGINE) — 운영용 참고 문구 ===
-- 웹 검색 수집 엔진 우선순위(앞 성공하면 종료):
-  Brave Search API → Tavily API → SearXNG(엔진 다변화) → DuckDuckGo HTML → Playwright Google SERP(폴백, IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1일 때만)
-- SearXNG 규칙: SEARXNG_ENGINES 기본값을 google,bing,duckduckgo,wikipedia로 유지하고, keep_only도 google 단독이 아니게 유지하세요.
+=== 검색 수집 정책 — 운영용 참고 문구 ===
+- 웹 검색 우선순위: DuckDuckGo(ddgs 패키지) → Playwright Google SERP(폴백, IRIS_SEARCH_PLAYWRIGHT_FALLBACK=1일 때만)
 - Router slots.query / slots.queries에는 위 백엔드로 전달될 검색어만 담습니다. (LLM 답변 프롬프트/검증 문구가 아님)
 미디어 슬롯 (변경 없음):
 - task_type=media_play, platform_hint, media_action, search_query, success_criteria 등 기존 규칙 준수.
@@ -80,10 +79,13 @@ JSON 스키마(엄격):
   "lane": "chat_only|search|hybrid|direct_action|computer_use|fast_tool|multi_turn",
   "knowledge_lane": "chat_only|search|hybrid",
   "goal": "한국어 실행·답변 목표 한 문장",
-  "task_type": "open_app|media_play|send_message|file|window|multi_step|knowledge|unknown",
+  "task_type": "open_app|compose_text|media_play|send_message|file|window|multi_step|knowledge|unknown",
   "slots": {
     "app_key": "",
     "display_name": "",
+    "text_to_type": "",
+    "message_text": "",
+    "recipient": "",
     "query": "",
     "queries": [],
     "search_topic": "general|weather|news|movie|current_info|comparison|definition",
@@ -400,6 +402,19 @@ def _payload_to_routed_turn(
 
     if lane is RouteLane.COMPUTER_USE:
         cu_common = {**common, "goal": payload.goal or user_text.strip()}
+        slot_clarify = clarify_missing_skill_slots(payload.task_type, slots)
+        if slot_clarify:
+            clarify_common = {
+                k: v for k, v in common.items() if k not in ("clarification", "goal")
+            }
+            return RoutedTurn(
+                kind=CommandKind.GENERAL_CHAT,
+                lane=RouteLane.CHAT_ONLY,
+                goal=slot_clarify,
+                slots=slots,
+                clarification=slot_clarify,
+                **clarify_common,
+            )
         return RoutedTurn(
             kind=kind if kind is CommandKind.COMPUTER_USE else CommandKind.COMPUTER_USE,
             lane=RouteLane.COMPUTER_USE,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Dict, Sequence
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
@@ -18,6 +19,7 @@ from iris.core.context_manager import (
     DialogueContext,
     DialogueStep,
     PendingAutomationTool,
+    PendingComputerUseGoal,
     PendingMonitoringAction,
     PendingPlan,
     PendingUserAction,
@@ -28,7 +30,8 @@ from iris.modes import creative_mode, game_mode, work_mode
 from iris.storage.database import Database
 
 
-_LAUNCH_SPECS: list[tuple[re.Pattern[str], str, str]] = [
+# deprecated: Unified Router slots 없을 때 offline fallback용 regex hint
+_APP_HINT_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"메모장|notepad", re.IGNORECASE), "notepad", "메모장"),
     (re.compile(r"커서|\bCursor\b", re.IGNORECASE), "code", "Cursor"),
     (re.compile(r"크롬|\bChrome\b", re.IGNORECASE), "chrome", "Chrome"),
@@ -45,9 +48,17 @@ def _resolve_launch_target(
     text: str,
     app_paths: Dict[str, str] | None = None,
     db: Database | None = None,
+    *,
+    slots: dict | None = None,
 ) -> tuple[str | None, str | None]:
-    """(app_key, 표시 이름). 경로 유무와 무관하게 의도 키를 추출."""
-    for pat, key, disp in _LAUNCH_SPECS:
+    """(app_key, 표시 이름). Router slots.app_key가 있으면 Tier1, regex는 offline fallback만."""
+    if slots:
+        key = str(slots.get("app_key") or "").strip()
+        if key:
+            disp = str(slots.get("display_name") or "").strip() or display_name_for_key(key, db)
+            return key, disp
+        return None, None
+    for pat, key, disp in _APP_HINT_PATTERNS:
         if pat.search(text):
             return key, disp
     if app_paths:
@@ -119,7 +130,7 @@ class IrisAssistant:
         *,
         summary: str = "",
     ) -> str:
-        """승인된 CRITICAL 도구 1스텝 실행 (CU 루프 재시작 없음)."""
+        """승인된 CRITICAL 도구 1스텝만 실행 (레거시·테스트용)."""
         from iris.assistant.computer_use_agent import (
             ComputerUseAgent,
             format_pending_tool_user_message,
@@ -145,6 +156,30 @@ class IrisAssistant:
         )
         return format_pending_tool_user_message(tool_name, result, disp)
 
+    def run_computer_use_resume(
+        self,
+        pending: PendingComputerUseGoal,
+        *,
+        on_user_notify: Callable[[str], None] | None = None,
+    ) -> str:
+        """CRITICAL 승인 후 CU 루프 재개 — checkpoint verify 후 루프 계속."""
+        from iris.assistant.computer_use_agent import ComputerUseAgent
+
+        if not hasattr(self, "_computer_use_agent"):
+            self._computer_use_agent = ComputerUseAgent(
+                self,
+                self._gemma,
+                self._executor.tool_registry,
+                max_steps=20,
+            )
+        body = self._computer_use_agent.resume_after_critical_approval(
+            pending,
+            on_user_notify=on_user_notify,
+        )
+        if body.startswith("Iris:"):
+            return body
+        return f"Iris: {body}"
+
     def run_computer_use_loop(
         self,
         text: str,
@@ -152,6 +187,7 @@ class IrisAssistant:
         goal: str | None = None,
         slots: dict | None = None,
         routed: CommandKind | None = None,
+        on_user_notify: Callable[[str], None] | None = None,
     ) -> str:
         """Perceive → Plan → Act → Verify multi-step Computer Use 루프 (음성·텍스트 공용)."""
         from iris.assistant.computer_use_agent import ComputerUseAgent
@@ -165,7 +201,9 @@ class IrisAssistant:
                 self._executor.tool_registry,
                 max_steps=20,
             )
-        body = self._computer_use_agent.run(cu_goal, slots=slots)
+        body = self._computer_use_agent.run(
+            cu_goal, slots=slots, on_user_notify=on_user_notify
+        )
         if body.startswith("Iris:"):
             return body
         return f"Iris: {body}"

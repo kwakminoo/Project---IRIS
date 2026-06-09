@@ -33,6 +33,7 @@ from iris.config.settings import Settings
 from iris.storage.database import Database
 from iris.monitoring.browser_tab_monitor import BrowserTabMonitor
 from iris.ui.app_launcher_panel import AppLauncherPanel
+from iris.ui.integrations_panel import IntegrationsPanel
 from iris.ui.chrome_extension_panel import ChromeExtensionPanel
 from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
@@ -249,6 +250,8 @@ class SettingsDialog(QDialog):
         content_lay.addLayout(form)
 
         if self._db is not None:
+            self._integrations = IntegrationsPanel(self._db, parent=self)
+            content_lay.addWidget(self._integrations)
             self._app_launcher = AppLauncherPanel(
                 self._db,
                 on_paths_changed=self._notify_app_paths_changed,

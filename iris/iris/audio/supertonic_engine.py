@@ -8,6 +8,35 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from iris.config.settings import Settings
 
+# HF Space 표시명 → SDK 코드 (https://huggingface.co/spaces/Supertone/supertonic-3)
+_SUPERTONIC_VOICE_ALIASES: dict[str, str] = {
+    "alex": "M1",
+    "james": "M2",
+    "robert": "M3",
+    "sam": "M4",
+    "daniel": "M5",
+    "sarah": "F1",
+    "lily": "F2",
+    "jessica": "F3",
+    "olivia": "F4",
+    "emily": "F5",
+}
+_SUPERTONIC_VOICE_CODES = {*(f"M{i}" for i in range(1, 6)), *(f"F{i}" for i in range(1, 6))}
+
+
+def resolve_supertonic_voice_name(raw: str) -> str:
+    """표시 이름(Lily) 또는 코드(F2)를 Supertonic SDK voice_name으로 정규화."""
+    key = (raw or "Lily").strip()
+    if not key:
+        return "F2"
+    code = key.upper()
+    if code in _SUPERTONIC_VOICE_CODES:
+        return code
+    alias = _SUPERTONIC_VOICE_ALIASES.get(key.lower())
+    if alias:
+        return alias
+    return code
+
 
 class SupertonicEngine:
     """Small wrapper around the optional Supertonic Python SDK."""
@@ -50,9 +79,8 @@ class SupertonicEngine:
             from supertonic import TTS
 
             self._tts = TTS(auto_download=True)
-            self._voice_style = self._tts.get_voice_style(
-                voice_name=self._settings.supertonic_voice
-            )
+            voice_code = resolve_supertonic_voice_name(self._settings.supertonic_voice)
+            self._voice_style = self._tts.get_voice_style(voice_name=voice_code)
             self._load_error = None
             return True
         except Exception as exc:

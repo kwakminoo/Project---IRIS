@@ -19,17 +19,8 @@ from iris.assistant.agent_adapter import IrisAssistant
 from iris.assistant.computer_use_agent import ComputerUseAgent
 from iris.automation.action_executor import ActionExecutor
 from iris.automation.tool_types import AutomationToolResult
-from iris.config.settings import Settings, load_settings
 from iris.storage.database import Database
-
-
-def _minimal_settings(tmp_path: Path, **kwargs: object) -> Settings:
-    from dataclasses import replace
-
-    p = tmp_path / "test.env"
-    p.write_text("", encoding="utf-8")
-    base = load_settings(p)
-    return replace(base, **kwargs)  # type: ignore[arg-type]
+from tests.conftest import load_test_settings
 
 
 @patch("iris.assistant.openclaw_adapter.subprocess.run")
@@ -59,7 +50,7 @@ def test_hermes_backend_unavailable_when_cli_missing(mock_run: MagicMock) -> Non
 
 
 def test_tier4_delegate_active_respects_none(tmp_path: Path) -> None:
-    s = _minimal_settings(
+    s = load_test_settings(
         tmp_path,
         external_agent_fallback_enabled=True,
         external_agent_backend="none",
@@ -68,7 +59,7 @@ def test_tier4_delegate_active_respects_none(tmp_path: Path) -> None:
 
 
 def test_build_external_backend_openclaw(tmp_path: Path) -> None:
-    s = _minimal_settings(tmp_path, external_agent_backend="openclaw")
+    s = load_test_settings(tmp_path, external_agent_backend="openclaw")
     b = build_external_backend(s)
     assert b is not None
     assert b.backend_id == "openclaw"
@@ -89,7 +80,12 @@ class _MockT4:
 
 
 class _G:
-    def chat(self, messages: list[object]) -> str:
+    def chat(
+        self,
+        messages: list[object],
+        purpose: object = None,
+        **kwargs: object,
+    ) -> str:
         c0 = getattr(messages[0], "content", "") if messages else ""
         if "내부 보조 실행 로그" in c0:
             return "Iris가 요청을 마쳤습니다."
@@ -106,7 +102,7 @@ def _perceive_result() -> AutomationToolResult:
 
 def test_max_steps_triggers_fallback_when_enabled(tmp_path: Path) -> None:
     """로컬 max_steps 초과 시 Tier4(mock) 호출 — raw 로그는 사용자 메시지에 없음."""
-    settings = _minimal_settings(
+    settings = load_test_settings(
         tmp_path,
         external_agent_fallback_enabled=True,
         external_agent_backend="openclaw",
@@ -142,7 +138,7 @@ def test_max_steps_triggers_fallback_when_enabled(tmp_path: Path) -> None:
 
 
 def test_max_steps_no_fallback_when_disabled(tmp_path: Path) -> None:
-    settings = _minimal_settings(
+    settings = load_test_settings(
         tmp_path,
         external_agent_fallback_enabled=False,
         external_agent_backend="openclaw",

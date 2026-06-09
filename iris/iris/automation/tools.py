@@ -25,7 +25,10 @@ from iris.automation.tool_types import (
 )
 from iris.config.settings import Settings
 from iris.monitoring import ocr_engine, screen_capture
-from iris.monitoring.target_hints import list_monitor_target_hints, match_monitor_hint
+from iris.monitoring.target_hints import (
+    build_perceive_monitor_hint_json,
+    list_monitor_target_hints,
+)
 from iris.monitoring.vlm_adapter import StubVlmAdapter
 
 
@@ -97,9 +100,7 @@ def build_perception_observation(ctx: AutomationToolContext) -> PerceptionObserv
                 pass
 
     hints = list_monitor_target_hints(ctx.database)
-    obs.monitor_hint = match_monitor_hint(hints, title_sub or active)
-    if obs.monitor_hint:
-        obs.summary = f"{obs.monitor_hint}\n{obs.summary}"[:2000]
+    obs.monitor_hint = build_perceive_monitor_hint_json(hints, title_sub or active)
 
     titles = window_controller.list_window_titles()
     if titles:
@@ -292,7 +293,20 @@ class TypeTextTool(AutomationTool):
         guard = evaluate(ActionRequest(summary=f"type text {text[:80]}", approved=ctx.approved))
         if not guard.allowed:
             return AutomationToolResult(False, guard.reason)
-        ok, reason = keyboard_mouse_controller.type_text_approved(text, approved=True)
+        interval = 0.03
+        verify = True
+        max_retries = 1
+        if ctx.settings is not None:
+            interval = float(getattr(ctx.settings, "type_input_visible_interval", 0.03) or 0.03)
+            verify = bool(getattr(ctx.settings, "type_input_verify_enabled", True))
+            max_retries = int(getattr(ctx.settings, "type_input_max_retries", 1) or 1)
+        ok, reason = keyboard_mouse_controller.type_text_approved(
+            text,
+            approved=True,
+            interval=interval,
+            verify_enabled=verify,
+            max_retries=max_retries,
+        )
         return AutomationToolResult(ok, "입력 완료" if ok else "입력 실패", reason)
 
 
@@ -450,6 +464,40 @@ class UiaClickTool(AutomationTool):
         return AutomationToolResult(ok, "UIA 클릭" if ok else "UIA 클릭 실패", reason)
 
 
+class CallIntegrationTool(AutomationTool):
+    name = "call_integration"
+    description = "등록된 외부 API·MCP 연동 호출 (Tier 1)"
+    risk_level = RiskLevel.MEDIUM_RISK
+
+    def preview(self, ctx: AutomationToolContext) -> str:
+        name = str(ctx.params.get("integration_name") or "")
+        action = str(ctx.params.get("action") or "")
+        return f"연동 호출: {name} / {action[:80]}"
+
+    def execute(self, ctx: AutomationToolContext) -> AutomationToolResult:
+        name = str(ctx.params.get("integration_name") or "").strip()
+        action = str(ctx.params.get("action") or "").strip()
+        if not name:
+            return AutomationToolResult(False, "integration_name이 필요합니다.")
+        if not action:
+            return AutomationToolResult(False, "action이 필요합니다.")
+        if ctx.database is None:
+            return AutomationToolResult(False, "DB가 없어 연동을 조회할 수 없습니다.")
+        row = ctx.database.get_integration_endpoint(name)
+        if row is None:
+            return AutomationToolResult(
+                False,
+                f"연동 '{name}'이 없습니다. 설정에서 API/MCP를 등록하세요.",
+            )
+        from iris.integrations.integration_client import IntegrationClient
+
+        raw_params = ctx.params.get("params")
+        call_params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        client = IntegrationClient.from_row(dict(row))
+        ok, msg, detail = client.call(action, call_params)
+        return AutomationToolResult(ok, msg, detail)
+
+
 class SendHotkeyTool(AutomationTool):
     name = "send_hotkey"
     description = "단축키 조합 (예: ctrl+f)"
@@ -479,6 +527,7 @@ class SendHotkeyTool(AutomationTool):
 def all_automation_tools() -> List[AutomationTool]:
     return [
         GetSystemInfoTool(),
+        CallIntegrationTool(),
         ListOpenWindowsTool(),
         LaunchAppTool(),
         FocusWindowTool(),
