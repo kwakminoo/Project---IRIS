@@ -271,6 +271,28 @@ Tables:
 
 ---
 
+## 10.1 Voice Pipeline (Jarvis turn-taking) / 음성 파이프라인
+
+Path: `iris/audio/`
+
+| Module | Role |
+|--------|------|
+| `voice_session.py` | Half-duplex 상태머신 — IDLE/CAPTURING/TRANSCRIBING/PROCESSING/SPEAKING/BARGE_LISTEN |
+| `continuous_listen.py` | 단일 마이크 InputStream + RMS VAD + barge-in RMS (별도 스트림 없음) |
+| `stt_engine.py` | faster-whisper + `SttResult` no-speech gate (segment metadata) |
+| `vad_calibrator.py` | 시작 시 노이즈 플로어 측정 → speech/silence RMS |
+| `echo_cancellation.py` | AEC 선택 적용 (미설치 시 half-duplex만) |
+| `voice_gate.py` | 호출어·follow-up 윈도우 (TTS 중 타이머 정지) |
+
+Policy:
+
+- **듣지 말아야 할 때**: `VoiceSessionController.should_accept_capture()` — TTS/처리/변환 중 및 `VOICE_RESUME_DELAY_MS` tail 동안 discard.
+- **들은 뒤 버릴 때**: Whisper `no_speech_prob` / `avg_logprob` — 문자열 블랙리스트 없음.
+- **Barge-in**: `BARGE_LISTEN` 상태에서만 RMS 감시 → TTS `stop()` + 새 발화 수집.
+- **Follow-up**: 호출어 1회 후 `VOICE_FOLLOWUP_SECONDS`(기본 8초) — TTS 중 타이머 pause/resume.
+
+---
+
 ## 11. Main Flow / 메인 흐름
 
 ### 11.1 Computer Use Agent Loop (default) / Computer Use 루프 (기본)

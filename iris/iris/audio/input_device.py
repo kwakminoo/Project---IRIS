@@ -57,6 +57,30 @@ class PhysicalInputDevice:
     name: str
 
 
+@dataclass(frozen=True)
+class ScannedInputDevice:
+    """프로브를 통과한 실제 녹음 가능 입력 장치."""
+
+    index: int
+    name: str
+    is_system_default: bool
+
+
+@dataclass(frozen=True)
+class MicrophoneScanResult:
+    """설정 창 마이크 목록 재스캔 결과."""
+
+    default_index: int | None
+    default_name: str | None
+    devices: tuple[ScannedInputDevice, ...]
+    scan_error: str = ""
+
+
+def default_input_device_index(sd: Any) -> int | None:
+    """Windows/sounddevice 기본 입력 장치 인덱스."""
+    return _default_input_index(sd)
+
+
 def _default_input_index(sd: Any) -> int | None:
     default_device = getattr(sd, "default", None)
     raw = getattr(default_device, "device", None)
@@ -123,6 +147,71 @@ def list_physical_input_devices(sd: Any) -> list[PhysicalInputDevice]:
         if is_physical_microphone_info(info, index):
             options.append(PhysicalInputDevice(index=index, name=_device_name(info, index)))
     return options
+
+
+def probe_input_device(
+    sd: Any,
+    index: int,
+    *,
+    sample_rate: int = 16000,
+    blocksize: int = 1600,
+) -> tuple[bool, str]:
+    """InputStream을 짧게 열어 실제 녹음 가능 여부를 확인한다."""
+    try:
+        with sd.InputStream(
+            device=index,
+            channels=1,
+            samplerate=sample_rate,
+            blocksize=blocksize,
+            dtype="float32",
+        ):
+            pass
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def scan_available_input_devices(
+    sd: Any,
+    *,
+    sample_rate: int = 16000,
+    probe: bool = True,
+) -> MicrophoneScanResult:
+    """
+    설정 창용 — 물리 마이크 후보 중 프로브 통과 장치만 반환.
+    Windows 기본 입력 인덱스·이름도 함께 수집한다.
+    """
+    try:
+        default_index = default_input_device_index(sd)
+    except Exception as exc:
+        return MicrophoneScanResult(None, None, (), str(exc))
+
+    default_name: str | None = None
+    if default_index is not None:
+        try:
+            default_name = _device_name(sd.query_devices(default_index, "input"), default_index)
+        except Exception:
+            default_name = None
+
+    available: list[ScannedInputDevice] = []
+    for physical in list_physical_input_devices(sd):
+        if probe:
+            ok, _ = probe_input_device(sd, physical.index, sample_rate=sample_rate)
+            if not ok:
+                continue
+        available.append(
+            ScannedInputDevice(
+                index=physical.index,
+                name=physical.name,
+                is_system_default=physical.index == default_index,
+            )
+        )
+
+    return MicrophoneScanResult(
+        default_index=default_index,
+        default_name=default_name,
+        devices=tuple(available),
+    )
 
 
 def resolve_input_device(sd: Any, configured_device: int | None) -> tuple[InputDeviceChoice | None, str]:

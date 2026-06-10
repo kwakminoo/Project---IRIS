@@ -38,19 +38,24 @@ def test_is_ambiguous_for_fast_path() -> None:
     assert is_ambiguous_for_fast_path("https://example.com 열어")
 
 
-def test_greeting_uses_unified_router_chat_only(tmp_path: Path) -> None:
+def test_greeting_uses_frontier_chat_only(tmp_path: Path) -> None:
     gemma = RoutingGemma(chat_reply="반가워요!")
     assistant = make_routing_assistant(tmp_path, gemma)
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
 
-    result = coord.run_turn("안녕")
+    with patch("iris.assistant.turn_coordinator.route_user_turn") as mock_route:
+        result = coord.run_turn("안녕")
 
+    mock_route.assert_not_called()
     assert result.route == RouteLane.CHAT_ONLY.value
-    assert "반가워요" in result.user_visible
-    router_calls = [
-        c for c in gemma.calls if c and "Unified Router" in c[0].content
+    assert result.delegate_frontier_stream is True
+    assert result.frontier_reply == "반가워요!"
+    assert result.delegate_dialogue_stream is False
+    assert result.user_visible == ""
+    frontier_calls = [
+        c for c in gemma.calls if c and "Frontier" in c[0].content
     ]
-    assert len(router_calls) == 1
+    assert len(frontier_calls) == 1
 
 
 def test_ambiguous_uses_unified_router(tmp_path: Path) -> None:
@@ -66,6 +71,9 @@ def test_ambiguous_uses_unified_router(tmp_path: Path) -> None:
     )
 
     with patch(
+        "iris.assistant.turn_coordinator.run_frontier_turn",
+        return_value=None,
+    ), patch(
         "iris.assistant.turn_coordinator.route_user_turn",
         return_value=routed,
     ) as mock_route:
@@ -89,8 +97,10 @@ def test_chat_only_no_planner(tmp_path: Path) -> None:
     result = coord.run_turn("안녕")
 
     assert result.route == RouteLane.CHAT_ONLY.value
-    assert "반가워요" in result.user_visible
+    assert result.delegate_frontier_stream is True
+    assert result.user_visible == ""
     assert not result.delegate_search
+    assert not result.delegate_dialogue_stream
     planner_calls = [c for c in gemma.calls if c and "실행 계획기" in c[0].content]
     assert len(planner_calls) == 0
 

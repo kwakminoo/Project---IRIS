@@ -430,6 +430,22 @@ def _payload_to_routed_turn(
     )
 
 
+def envelope_route_to_routed_turn(
+    route_dict: Mapping[str, Any],
+    user_text: str,
+    catalog: list[dict[str, str]],
+    *,
+    fallback_kind: CommandKind = CommandKind.GENERAL_CHAT,
+) -> RoutedTurn | None:
+    """Frontier route 블록 → RoutedTurn (Unified Router 파서 재사용)."""
+    payload = parse_unified_route_json(route_dict, user_text)
+    if payload is None:
+        return None
+    return _payload_to_routed_turn(
+        payload, user_text, catalog, fallback_kind=fallback_kind
+    )
+
+
 def route_user_turn(
     user_text: str,
     ctx: DialogueContext,

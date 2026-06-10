@@ -23,7 +23,11 @@ from PyQt6.QtWidgets import (
 
 from pathlib import Path
 
-from iris.audio.input_device import list_physical_input_devices, resolve_input_device
+from iris.audio.input_device import (
+    MicrophoneScanResult,
+    resolve_input_device,
+    scan_available_input_devices,
+)
 from iris.audio.mic_preview import MicLevelPreview
 from iris.audio.xtts_engine import is_xtts_installed, resolve_reference_wav
 from iris.automation.web_browser import list_installed_browser_options, normalize_browser_key
@@ -51,12 +55,6 @@ QComboBox {
 
 
 @dataclass(frozen=True)
-class MicrophoneOption:
-    index: int
-    name: str
-
-
-@dataclass(frozen=True)
 class IrisSettingsSelection:
     model_name: str
     model_names: tuple[str, ...]
@@ -64,19 +62,6 @@ class IrisSettingsSelection:
     speech_rms: float
     default_web_browser: str
     thinking_mode: str  # off | default | on
-
-
-def list_microphone_options() -> list[MicrophoneOption]:
-    """sounddevice가 현재 PC에서 인식한 물리 마이크 후보만 수집한다."""
-    try:
-        import sounddevice as sd
-    except Exception:
-        return []
-
-    return [
-        MicrophoneOption(index=device.index, name=device.name)
-        for device in list_physical_input_devices(sd)
-    ]
 
 
 class SettingsDialog(QDialog):
@@ -110,7 +95,7 @@ class SettingsDialog(QDialog):
         self._ensure_extension_server = ensure_extension_server or (lambda: False)
         self._chrome_ext_panel: ChromeExtensionPanel | None = None
         self._models = self._initial_models(settings)
-        self._microphones = list_microphone_options()
+        self._scan_result: MicrophoneScanResult | None = None
         self._app_paths = build_merged_app_paths(db)
 
         root = QVBoxLayout(self)
@@ -225,7 +210,6 @@ class SettingsDialog(QDialog):
         self._thinking_combo.setStyleSheet(_COMBO_STYLE)
 
         self._mic_combo = QComboBox()
-        self._populate_microphones(settings.always_listen_input_device)
         form.addRow("입력 마이크", self._mic_combo)
         self._mic_combo.setStyleSheet(_COMBO_STYLE)
 
@@ -259,9 +243,10 @@ class SettingsDialog(QDialog):
             )
             content_lay.addWidget(self._app_launcher)
 
-        self._device_help = QLabel(self._microphone_help_text())
+        self._device_help = QLabel("")
         self._device_help.setWordWrap(True)
         content_lay.addWidget(self._device_help)
+        self._rescan_microphones(settings.always_listen_input_device)
 
         self._model_list = QListWidget()
         self._model_list.setMaximumHeight(100)
@@ -279,6 +264,8 @@ class SettingsDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # 창을 열 때마다 장치 재스캔 — USB 연결·Windows 기본 입력 변경 반영
+        self._rescan_microphones(self._selected_input_device())
         self._restart_mic_preview()
         if self._chrome_ext_panel is not None:
             self._chrome_ext_panel.start_polling()
@@ -381,19 +368,70 @@ class SettingsDialog(QDialog):
             idx = 0
         self._browser_combo.setCurrentIndex(max(0, idx))
 
-    def _populate_microphones(self, selected_device: int | None) -> None:
-        self._mic_combo.clear()
-        if not self._microphones:
-            self._mic_combo.addItem("사용 가능한 물리 마이크 없음", None)
-            self._mic_combo.setEnabled(False)
+    def _rescan_microphones(self, preferred_device: int | None) -> None:
+        """마이크 목록 재스캔 — 프로브 통과 장치만 콤보에 표시."""
+        try:
+            import sounddevice as sd
+        except Exception:
+            self._scan_result = MicrophoneScanResult(
+                None,
+                None,
+                (),
+                "sounddevice 미설치",
+            )
+            self._populate_microphones(preferred_device)
+            self._device_help.setText(self._microphone_help_text())
             return
-        self._mic_combo.setEnabled(True)
-        for opt in self._microphones:
-            self._mic_combo.addItem(f"{opt.name}  (장치 {opt.index})", opt.index)
-        if selected_device is not None:
-            idx = self._mic_combo.findData(selected_device)
-            if idx >= 0:
-                self._mic_combo.setCurrentIndex(idx)
+
+        self._scan_result = scan_available_input_devices(
+            sd,
+            sample_rate=self._settings.always_listen_sample_rate,
+        )
+        self._populate_microphones(preferred_device)
+        self._device_help.setText(self._microphone_help_text())
+
+    def _populate_microphones(self, selected_device: int | None) -> None:
+        result = self._scan_result
+        self._mic_combo.blockSignals(True)
+        try:
+            self._mic_combo.clear()
+            if result is None or not result.devices:
+                label = "사용 가능한 마이크 없음"
+                if result and result.scan_error:
+                    label = f"{label} — {result.scan_error}"
+                self._mic_combo.addItem(label, None)
+                self._mic_combo.setEnabled(False)
+                return
+
+            self._mic_combo.setEnabled(True)
+            default_open = any(
+                dev.index == result.default_index for dev in result.devices
+            )
+            if result.default_name:
+                default_label = f"Windows 기본 — {result.default_name}"
+                if result.default_index is not None:
+                    default_label += f" (장치 {result.default_index})"
+                if not default_open:
+                    default_label += " · 열기 실패"
+            else:
+                default_label = "Windows 기본 입력 장치"
+            self._mic_combo.addItem(default_label, None)
+
+            for dev in result.devices:
+                prefix = "★ " if dev.is_system_default else ""
+                self._mic_combo.addItem(
+                    f"{prefix}{dev.name}  (장치 {dev.index})",
+                    dev.index,
+                )
+
+            if selected_device is not None:
+                idx = self._mic_combo.findData(selected_device)
+                if idx >= 0:
+                    self._mic_combo.setCurrentIndex(idx)
+                    return
+            self._mic_combo.setCurrentIndex(0)
+        finally:
+            self._mic_combo.blockSignals(False)
 
     def _tts_summary_text(self) -> str:
         s = self._settings
@@ -430,11 +468,39 @@ class SettingsDialog(QDialog):
             self._on_app_paths_changed()
 
     def _microphone_help_text(self) -> str:
+        result = self._scan_result
+        if result is None:
+            return "마이크 목록을 아직 스캔하지 못했습니다."
+        if result.scan_error and not result.devices:
+            return f"마이크 스캔 실패: {result.scan_error}"
+
+        lines = [f"스캔 결과: 녹음 가능 {len(result.devices)}개"]
+        if result.default_name:
+            idx = result.default_index
+            suffix = f" (장치 {idx})" if idx is not None else ""
+            lines.append(f"Windows 기본 입력: {result.default_name}{suffix}")
+
+        selected = self._selected_input_device()
+        if selected is None:
+            lines.append("Iris 선택: Windows 기본 입력을 따릅니다.")
+        else:
+            name = next(
+                (dev.name for dev in result.devices if dev.index == selected),
+                None,
+            )
+            if name:
+                lines.append(f"Iris 선택: {name} (장치 {selected})")
+            else:
+                lines.append(f"Iris 선택: 장치 {selected}")
+
         try:
             import sounddevice as sd
         except Exception:
-            return "sounddevice를 사용할 수 없어 마이크 목록을 불러오지 못했습니다."
-        choice, reason = resolve_input_device(sd, self._settings.always_listen_input_device)
+            return "\n".join(lines)
+
+        choice, reason = resolve_input_device(sd, selected)
         if choice is None:
-            return f"현재 선택된 마이크 확인 실패: {reason}"
-        return f"현재 입력 장치: {choice.name} (장치 {choice.device})"
+            lines.append(f"실행 검증 실패: {reason}")
+        else:
+            lines.append(f"실행 검증: {choice.name} (장치 {choice.device})")
+        return "\n".join(lines)

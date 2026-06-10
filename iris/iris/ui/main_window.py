@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QDateTime, QEvent, Qt, QTimer, pyqtSlot
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
+from iris.ai.stream_sentence import find_first_sentence_end
 from iris.assistant.agent_adapter import IrisAssistant
 from iris.assistant.external_agent_adapter import external_backend_status_line
 from iris.agent.needs_agent import (
@@ -33,14 +35,16 @@ from iris.agent.needs_agent import (
 from iris.agent.search_providers import ResearchQuality
 from iris.assistant.tool_layer import is_search_intent
 from iris.automation.action_executor import ActionExecutor
-from iris.audio.barge_in import BargeInController
+from iris.audio.barge_in import BargeInMonitor
 from iris.audio.continuous_listen import ContinuousListenController
+from iris.audio.audio_duration import estimate_speech_duration_ms
 from iris.audio.speech_formatter import format_speech, infer_speech_tone
 from iris.audio.stt_engine import SttEngine
 from iris.audio.system_sounds import SystemSoundPlayer
 from iris.audio.tts_engine import TtsEngine
 from iris.audio.tts_manager import TtsStatus
 from iris.audio.voice_gate import VoiceCommandGate
+from iris.audio.voice_session import VoiceSessionController, VoiceSessionState
 from iris.config.app_index import build_merged_app_paths
 from iris.config.app_install_watcher import AppInstallWatcher
 from iris.config.env_store import update_env_values
@@ -215,22 +219,13 @@ class MainWindow(QMainWindow):
         self._bridge = UiBridge(self)
         self._bridge.barge_in.connect(self._barge_slot)
         self._bridge.tts_finished.connect(self._tts_done_slot)
-        self._barge = BargeInController(
-            self._tts,
-            ui_hook=lambda: self._bridge.barge_in.emit(),
-            input_device=self._settings.always_listen_input_device,
-        )
-        self._continuous_listen = ContinuousListenController(self._settings, self._stt, self)
-        self._continuous_listen.utterance_ready.connect(self._on_voice_utterance)
-        self._continuous_listen.listen_failed.connect(self._on_listen_failed)
-        self._continuous_listen.speech_started.connect(self._on_speech_started)
-        self._continuous_listen.stt_started.connect(self._on_stt_started)
-        self._continuous_listen.utterance_failed.connect(self._on_utterance_failed)
         self._voice_gate = VoiceCommandGate(
             wake_words=self._settings.voice_wake_words,
             require_wake_word=self._settings.voice_require_wake_word,
             followup_seconds=self._settings.voice_followup_seconds,
         )
+        self._voice_stt_reject_streak = 0
+        self._init_voice_pipeline()
         self._state = StateMachine()
         self._state.state_changed.connect(self._on_state_changed)
         self._system_sounds = SystemSoundPlayer(self)
@@ -245,6 +240,14 @@ class MainWindow(QMainWindow):
         self._early_ack_tts_done = True
         self._final_reply_received = False
         self._skip_followup_tts = False
+        # 스트리밍 DIALOGUE_CHAT — 첫 문장 TTS·후속 TTS 분리
+        self._stream_buffer = ""
+        self._stream_tts_first_done = False
+        self._stream_tts_spoken_len = 0
+        self._stream_store_history = False
+        self._stream_reply_ready = False
+        self._stream_add_iris_prefix = False
+        self._stream_final_visible = ""
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -418,28 +421,48 @@ class MainWindow(QMainWindow):
             daemon=True,
         ).start()
 
-    def _rebuild_voice_input(self) -> None:
-        """마이크 설정 변경 후 음성 입력 컨트롤러를 재구성한다."""
-        self._continuous_listen.stop()
-        self._stt = SttEngine(self._settings)
-        self._barge = BargeInController(
-            self._tts,
-            ui_hook=lambda: self._bridge.barge_in.emit(),
-            input_device=self._settings.always_listen_input_device,
+    def _init_voice_pipeline(self) -> None:
+        """음성 세션·상시 듣기·barge-in 파이프라인 구성."""
+        self._voice_session = VoiceSessionController(
+            self._settings,
+            on_followup_pause=self._voice_gate.pause_followup_timer,
+            on_followup_resume=self._voice_gate.resume_followup_timer,
+            parent=self,
         )
-        self._continuous_listen = ContinuousListenController(self._settings, self._stt, self)
+        self._voice_session.state_changed.connect(self._on_voice_session_state)
+        self._voice_session.barge_in_detected.connect(self._bridge.barge_in.emit)
+        self._barge = BargeInMonitor(
+            self._tts,
+            grace_ms=self._settings.barge_in_grace_ms,
+        )
+        self._continuous_listen = ContinuousListenController(
+            self._settings,
+            self._stt,
+            self._voice_session,
+            barge=self._barge,
+            parent=self,
+        )
         self._continuous_listen.utterance_ready.connect(self._on_voice_utterance)
         self._continuous_listen.listen_failed.connect(self._on_listen_failed)
         self._continuous_listen.speech_started.connect(self._on_speech_started)
         self._continuous_listen.stt_started.connect(self._on_stt_started)
-        self._continuous_listen.utterance_failed.connect(self._on_utterance_failed)
-        self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
-        self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
+        self._continuous_listen.utterance_rejected.connect(self._on_utterance_rejected)
+
+    def _rebuild_voice_input(self) -> None:
+        """마이크 설정 변경 후 음성 입력 컨트롤러를 재구성한다."""
+        if hasattr(self, "_continuous_listen"):
+            self._continuous_listen.stop()
+        self._stt = SttEngine(self._settings)
         self._voice_gate = VoiceCommandGate(
             wake_words=self._settings.voice_wake_words,
             require_wake_word=self._settings.voice_require_wake_word,
             followup_seconds=self._settings.voice_followup_seconds,
         )
+        self._voice_stt_reject_streak = 0
+        self._init_voice_pipeline()
+        self._voice_session.set_barge_in_enabled(self._settings.barge_in_enabled)
+        self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
+        self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
         if self._settings.always_listen_enabled:
             self._continuous_listen.start()
         self._warmup_stt_async()
@@ -544,8 +567,14 @@ class MainWindow(QMainWindow):
         )
         self._apply_runtime_settings()
 
+    @pyqtSlot(object)
+    def _on_voice_session_state(self, state: object) -> None:
+        if isinstance(state, VoiceSessionState):
+            push_activity_line(f"VoiceSession: state {state.value.upper()}.")
+
     @pyqtSlot()
     def _barge_slot(self) -> None:
+        self._voice_session.enter_listening()
         self._state.set_state(AppState.LISTENING)
         if self._settings.barge_in_enabled:
             self._notes.add_note("Barge-in: 음성 감지로 TTS 중단")
@@ -559,7 +588,6 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _tts_done_slot(self) -> None:
         self._state.reset_to_idle()
-        self._resume_voice_input()
 
     @pyqtSlot()
     def _on_targets_changed(self) -> None:
@@ -604,16 +632,15 @@ class MainWindow(QMainWindow):
             self._backend_status.setText(external_backend_status_line(self._settings))
 
     def _pause_voice_input(self) -> None:
-        if self._settings.always_listen_enabled:
-            self._continuous_listen.pause()
+        self._voice_session.on_agent_processing_started()
 
     def _resume_voice_input(self) -> None:
-        if self._settings.always_listen_enabled and self._state.state not in (
+        if self._state.state not in (
             AppState.PROCESSING,
             AppState.EXECUTING,
             AppState.RESPONDING,
         ):
-            self._continuous_listen.resume()
+            self._voice_session.on_agent_processing_finished()
 
     @pyqtSlot()
     def _on_speech_started(self) -> None:
@@ -629,16 +656,15 @@ class MainWindow(QMainWindow):
         push_activity_line("STT: stream decode started (silence-boundary).")
         self._chat.set_user_listening_status("인식 중…")
 
-    @pyqtSlot()
-    def _on_utterance_failed(self) -> None:
-        push_activity_line("STT: utterance empty — no usable transcript.")
+    @pyqtSlot(str)
+    def _on_utterance_rejected(self, reason: str) -> None:
+        """no-speech·저신뢰 — 채팅 오염 없이 조용히 무시 (연속 실패 시만 안내)."""
         self._chat.cancel_user_listening()
-        self._chat.append_message(
-            "Iris",
-            "음성을 인식하지 못했습니다. 조용한 환경에서 다시 말씀해 주세요.",
-        )
         self._state.reset_to_idle()
-        self._resume_voice_input()
+        self._voice_stt_reject_streak += 1
+        if "low_logprob" in reason and self._voice_stt_reject_streak >= 2:
+            self._chat.append_message("Iris", "잘 못 들었어요. 다시 말씀해 주세요.")
+            self._voice_stt_reject_streak = 0
 
     @pyqtSlot(str)
     def _on_listen_failed(self, message: str) -> None:
@@ -650,6 +676,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_voice_utterance(self, text: str) -> None:
         push_activity_line("STT: utterance ready (accepted for gating pipeline).")
+        self._voice_stt_reject_streak = 0
         if self._state.state in (AppState.PROCESSING, AppState.EXECUTING, AppState.RESPONDING):
             self._chat.cancel_user_listening()
             return
@@ -667,8 +694,7 @@ class MainWindow(QMainWindow):
             return
         if gated.prompt_only:
             self._chat.cancel_user_listening()
-            self._chat.append_message_typed("Iris", "네, 말씀하세요.")
-            self._speak("네, 말씀하세요.")
+            self._iris_reply("네, 말씀하세요.", spoken="네, 말씀하세요.")
             return
         self._pause_voice_input()
         self._chat.complete_user_message_typed(gated.command_text)
@@ -682,18 +708,85 @@ class MainWindow(QMainWindow):
             if notice:
                 self._notes.add_note(notice)
 
-    def _speak(self, text: str, *, on_complete: object | None = None) -> None:
+    def _tts_playback_duration_ms(self, spoken: str) -> float:
+        """현재 TTS 재생 길이(ms) — 미측정 시 텍스트로 추정."""
+        base_ms = self._tts.current_playback_duration_ms
+        if base_ms > 0:
+            return float(base_ms)
+        return estimate_speech_duration_ms(
+            spoken,
+            self._settings.tts_speaking_rate,
+        )
+
+    def _sync_iris_chat_typing(self, visible: str, spoken: str) -> None:
+        """채팅 타이핑 속도를 TTS 재생 길이에 맞춘다."""
+        visible_text = visible.strip()
+        spoken_text = spoken.strip() or visible_text
+        base_ms = self._tts_playback_duration_ms(spoken_text)
+        self._chat.sync_typing_to_speech(
+            base_ms,
+            visible_len=len(visible_text),
+            spoken_len=max(len(spoken_text), 1),
+        )
+
+    def _iris_reply(
+        self,
+        visible: str,
+        *,
+        spoken: str | None = None,
+        from_llm: bool = False,
+        max_sentences: int | None = None,
+        on_complete: object | None = None,
+    ) -> None:
+        """Iris 답변 — TTS 재생과 동일한 속도로 채팅 타이핑."""
+        body = visible.strip()
+        if not body:
+            return
+        if spoken is None:
+            tone = infer_speech_tone(from_llm=from_llm, reply_text=body)
+            if self._settings.tts_enable_speech_formatter:
+                cap = (
+                    max_sentences
+                    if max_sentences is not None
+                    else self._settings.tts_max_spoken_sentences
+                )
+                spoken_text = format_speech(body, tone, max_sentences=cap)
+            else:
+                spoken_text = body
+        else:
+            spoken_text = spoken.strip() or body
+
+        self._chat.append_message_typed("Iris", body, speech_sync=True)
+        self._speak(
+            spoken_text,
+            on_complete=on_complete,
+            after_playback_start=lambda: self._sync_iris_chat_typing(body, spoken_text),
+        )
+
+    def _speak(
+        self,
+        text: str,
+        *,
+        on_complete: object | None = None,
+        after_playback_start: Callable[[], None] | None = None,
+        flush_typing_on_done: bool = True,
+    ) -> None:
         def on_synthesis_start() -> None:
             self._state.set_state(AppState.PROCESSING)
+            self._voice_session.on_tts_synthesis_started()
 
         def on_playback_start() -> None:
             self._state.set_state(AppState.RESPONDING)
-            self._pause_voice_input()
+            self._voice_session.on_tts_playback_started()
             if self._settings.barge_in_enabled:
                 self._barge.notify_tts_started()
-                self._barge.start_listening()
+            if after_playback_start:
+                after_playback_start()
 
         def on_done() -> None:
+            self._chat.on_speech_typing_finished(flush=flush_typing_on_done)
+            self._barge.reset()
+            self._voice_session.on_tts_playback_finished()
             if callable(on_complete):
                 on_complete()
             else:
@@ -725,13 +818,14 @@ class MainWindow(QMainWindow):
             if from_voice:
                 self._chat.complete_user_message_typed(text)
             else:
-                self._chat.append_message("나", text)
+                self._chat.append_message_typed("나", text, speech_sync=False)
         # 진행 중 턴은 memory에 넣지 않음 — 턴 완료 시 user+assistant 한꺼번에 커밋
         self._db.insert_log("user", text, None)
         push_activity_line(
             f"UI: user turn submitted ({'voice' if from_voice else 'text'}), log row written."
         )
         self._state.set_state(AppState.PROCESSING)
+        self._voice_session.on_agent_processing_started()
         self._last_user_text = text
         self._pending_final = None
         self._skip_followup_tts = False
@@ -746,6 +840,14 @@ class MainWindow(QMainWindow):
         self._agent_worker = AgentWorker(self._assistant, text)
         self._agent_worker.finished_reply.connect(self._on_agent_worker_reply)
         self._agent_worker.delegate_search.connect(self._on_agent_delegate_search)
+        self._agent_worker.delegate_dialogue_stream.connect(
+            self._on_delegate_dialogue_stream,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._agent_worker.frontier_stream.connect(
+            self._on_frontier_stream,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._agent_worker.early_ack.connect(
             self._on_agent_early_ack,
             Qt.ConnectionType.QueuedConnection,
@@ -763,17 +865,12 @@ class MainWindow(QMainWindow):
         self._final_reply_received = False
         self._skip_followup_tts = False
         self._db.insert_log("assistant_early_ack", ack, None)
-        self._chat.append_message_typed("Iris", ack)
-        tone = infer_speech_tone(from_llm=False, reply_text=ack)
-        if self._settings.tts_enable_speech_formatter:
-            spoken = format_speech(
-                ack,
-                tone,
-                max_sentences=min(2, self._settings.tts_max_spoken_sentences),
-            )
-        else:
-            spoken = ack
-        self._speak(spoken, on_complete=self._on_early_ack_tts_done)
+        self._iris_reply(
+            ack,
+            from_llm=False,
+            max_sentences=min(2, self._settings.tts_max_spoken_sentences),
+            on_complete=self._on_early_ack_tts_done,
+        )
 
     @pyqtSlot(str)
     def _on_agent_user_notify(self, msg: str) -> None:
@@ -782,22 +879,18 @@ class MainWindow(QMainWindow):
         if not body:
             return
         self._db.insert_log("assistant_user_notify", body, None)
-        self._chat.append_message_typed("Iris", body)
-        if self._settings.tts_enable_speech_formatter:
-            spoken = format_speech(
-                body,
-                infer_speech_tone(from_llm=False, reply_text=body),
-                max_sentences=min(3, self._settings.tts_max_spoken_sentences),
-            )
-        else:
-            spoken = body
-        self._speak(spoken)
+        self._iris_reply(
+            body,
+            from_llm=False,
+            max_sentences=min(3, self._settings.tts_max_spoken_sentences),
+        )
 
     def _on_early_ack_tts_done(self) -> None:
         """ack TTS 종료 — 워커 실행 중이면 EXECUTING, follow-up 대기."""
         self._early_ack_tts_done = True
         if not self._final_reply_received:
             self._state.set_state(AppState.EXECUTING)
+            self._voice_session.on_agent_processing_started()
         self._try_deliver_final_reply()
 
     def _try_deliver_final_reply(self) -> None:
@@ -816,23 +909,11 @@ class MainWindow(QMainWindow):
             self._resume_voice_input()
             return
 
-        if spoken_followup.strip():
-            self._chat.append_message_typed("Iris", spoken_followup)
-
         self._db.insert_log("assistant", user_visible, None)
         self._commit_completed_turn(user_visible, store_history=store_history)
 
         if spoken_followup.strip():
-            tone = infer_speech_tone(from_llm=False, reply_text=spoken_followup)
-            if self._settings.tts_enable_speech_formatter:
-                spoken = format_speech(
-                    spoken_followup,
-                    tone,
-                    max_sentences=self._settings.tts_max_spoken_sentences,
-                )
-            else:
-                spoken = spoken_followup
-            self._speak(spoken)
+            self._iris_reply(spoken_followup, from_llm=False)
         else:
             self._bridge.tts_finished.emit()
 
@@ -940,15 +1021,19 @@ class MainWindow(QMainWindow):
             quality=quality,
         )
 
-        messages = self._assistant.build_general_chat_messages(
+        messages = self._dialogue.build_messages(
             self._last_user_text,
-            history=self._history[-8:],
+            history=self._dialogue_history_slice(),
             extra_context=ctx,
         )
-        self._llm_worker = LlmWorker(self._assistant.gemma_client, messages)
-        push_activity_line("UI: summarization LlmWorker starting with search context.")
-        self._llm_worker.finished_text.connect(self._on_llm_done)
-        self._llm_worker.start()
+        push_activity_line(
+            "UI: summarization LlmWorker starting (stream) with search context."
+        )
+        self._start_streaming_llm_worker(
+            messages,
+            store_history=True,
+            add_iris_prefix=False,
+        )
 
     def _build_search_llm_context(
         self,
@@ -984,8 +1069,202 @@ class MainWindow(QMainWindow):
             quality=quality,
         )
 
-    def _on_llm_done(self, text: str) -> None:
-        self._finish_assistant_reply(text, store_history=True)
+    def _dialogue_history_slice(self) -> list[ChatMessage]:
+        turns = self._settings.dialogue_history_turns
+        if turns <= 0:
+            return []
+        return self._history[-(turns * 2) :]
+
+    def _reset_stream_state(self, *, store_history: bool, add_iris_prefix: bool) -> None:
+        self._stream_buffer = ""
+        self._stream_tts_first_done = False
+        self._stream_tts_spoken_len = 0
+        self._stream_store_history = store_history
+        self._stream_reply_ready = False
+        self._stream_add_iris_prefix = add_iris_prefix
+        self._stream_final_visible = ""
+
+    def _start_streaming_llm_worker(
+        self,
+        messages: list[ChatMessage],
+        *,
+        store_history: bool,
+        add_iris_prefix: bool,
+    ) -> None:
+        self._reset_stream_state(
+            store_history=store_history,
+            add_iris_prefix=add_iris_prefix,
+        )
+        self._chat.begin_stream_message("Iris")
+        if self._llm_worker and self._llm_worker.isRunning():
+            self._llm_worker.requestInterruption()
+        self._llm_worker = LlmWorker(
+            self._assistant.gemma_client,
+            messages,
+            stream=True,
+        )
+        self._llm_worker.chunk_received.connect(self._on_llm_stream_chunk)
+        self._llm_worker.finished_text.connect(self._on_llm_stream_finished)
+        self._llm_worker.start()
+
+    @pyqtSlot(str)
+    def _on_delegate_dialogue_stream(self, user_text: str) -> None:
+        messages = self._dialogue.build_messages(
+            user_text,
+            history=self._dialogue_history_slice(),
+        )
+        push_activity_line("UI: streaming dialogue LlmWorker starting.")
+        self._start_streaming_llm_worker(
+            messages,
+            store_history=True,
+            add_iris_prefix=True,
+        )
+
+    @pyqtSlot(str, bool)
+    def _on_frontier_stream(self, reply: str, store_history: bool) -> None:
+        """Frontier 선행 말 — 이미 수신한 문자열을 채팅·TTS 스트리밍 재생."""
+        body = (reply or "").strip()
+        if not body:
+            if store_history:
+                self._state.reset_to_idle()
+                self._resume_voice_input()
+            return
+        if not store_history:
+            self._early_ack_tts_done = False
+            self._final_reply_received = False
+            self._skip_followup_tts = False
+            self._db.insert_log("assistant_frontier", body, None)
+        push_activity_line(
+            f"UI: frontier prefetched stream store_history={store_history}."
+        )
+        self._play_prefetched_stream(
+            body,
+            store_history=store_history,
+            add_iris_prefix=True,
+        )
+
+    def _play_prefetched_stream(
+        self,
+        text: str,
+        *,
+        store_history: bool,
+        add_iris_prefix: bool,
+    ) -> None:
+        """LLM 2회 없이 수신 완료된 본문을 chunk 단위로 UI 재생."""
+        self._reset_stream_state(
+            store_history=store_history,
+            add_iris_prefix=add_iris_prefix,
+        )
+        self._chat.begin_stream_message("Iris")
+        body = text.strip()
+        step = max(1, len(body) // 24)
+        for i in range(0, len(body), step):
+            self._on_llm_stream_chunk(body[i : i + step])
+        visible = body
+        if add_iris_prefix:
+            from iris.assistant.dialogue_agent import DialogueAgent
+
+            visible = DialogueAgent._with_iris_prefix(body)
+        self._on_llm_stream_finished(visible)
+
+    @pyqtSlot(str)
+    def _on_llm_stream_chunk(self, chunk: str) -> None:
+        self._chat.append_stream_chunk(chunk)
+        self._stream_buffer += chunk
+        if self._stream_tts_first_done:
+            return
+        end = find_first_sentence_end(self._stream_buffer)
+        if end is None:
+            return
+        first = self._stream_buffer[:end].strip()
+        if not first:
+            return
+        self._stream_tts_first_done = True
+        self._stream_tts_spoken_len = end
+        tone = infer_speech_tone(from_llm=True, reply_text=first)
+        if self._settings.tts_enable_speech_formatter:
+            spoken = format_speech(first, tone, max_sentences=1)
+        else:
+            spoken = first
+
+        def _on_first_tts_done() -> None:
+            if self._stream_reply_ready:
+                self._speak_stream_remainder()
+
+        self._speak(
+            spoken,
+            on_complete=_on_first_tts_done,
+            after_playback_start=lambda s=spoken: self._sync_iris_chat_typing(
+                self._chat.typing_buffer_text,
+                s,
+            ),
+            flush_typing_on_done=False,
+        )
+
+    @pyqtSlot(str)
+    def _on_llm_stream_finished(self, text: str) -> None:
+        visible = text.strip()
+        if self._stream_add_iris_prefix:
+            visible = DialogueAgent._with_iris_prefix(visible)
+        self._stream_final_visible = visible
+        self._stream_reply_ready = True
+        self._chat.end_stream_message(visible)
+        self._db.insert_log("assistant", visible, None)
+        self._commit_completed_turn(visible, store_history=self._stream_store_history)
+        if self._stream_tts_first_done:
+            if not self._tts.is_speaking():
+                self._speak_stream_remainder()
+        else:
+            self._speak_stream_full(visible)
+
+    def _speak_stream_full(self, visible: str) -> None:
+        tone = infer_speech_tone(
+            from_llm=self._stream_store_history,
+            reply_text=visible,
+        )
+        if self._settings.tts_enable_speech_formatter:
+            spoken = format_speech(
+                visible,
+                tone,
+                max_sentences=self._settings.tts_max_spoken_sentences,
+            )
+        else:
+            spoken = visible
+        visible_body = strip_iris_prefix(visible)
+        self._speak(
+            spoken,
+            after_playback_start=lambda: self._sync_iris_chat_typing(
+                visible_body,
+                spoken,
+            ),
+            flush_typing_on_done=True,
+        )
+
+    def _speak_stream_remainder(self) -> None:
+        full = self._stream_final_visible
+        body = strip_iris_prefix(full)
+        remainder = body[self._stream_tts_spoken_len :].strip()
+        if not remainder:
+            self._bridge.tts_finished.emit()
+            self._resume_voice_input()
+            return
+        tone = infer_speech_tone(
+            from_llm=self._stream_store_history,
+            reply_text=full,
+        )
+        max_sent = max(1, self._settings.tts_max_spoken_sentences - 1)
+        if self._settings.tts_enable_speech_formatter:
+            spoken = format_speech(remainder, tone, max_sentences=max_sent)
+        else:
+            spoken = remainder
+        self._speak(
+            spoken,
+            after_playback_start=lambda s=spoken: self._chat.extend_typing_for_speech_segment(
+                s,
+                self._tts_playback_duration_ms(s),
+            ),
+            flush_typing_on_done=True,
+        )
 
     def _commit_completed_turn(self, assistant_visible: str, *, store_history: bool) -> None:
         """턴 성공 시에만 user+assistant를 memory·_history에 커밋 (Iris: 접두어 제외)."""
@@ -1000,25 +1279,15 @@ class MainWindow(QMainWindow):
             self._history.append(ChatMessage("assistant", body))
 
     def _finish_assistant_reply(self, text: str, store_history: bool) -> None:
-        self._chat.append_message_typed("Iris", text)
         self._db.insert_log("assistant", text, None)
         self._commit_completed_turn(text, store_history=store_history)
-        tone = infer_speech_tone(from_llm=store_history, reply_text=text)
-        if self._settings.tts_enable_speech_formatter:
-            spoken = format_speech(
-                text,
-                tone,
-                max_sentences=self._settings.tts_max_spoken_sentences,
-            )
-        else:
-            spoken = text
-        self._speak(spoken)
+        self._iris_reply(text, from_llm=store_history)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         register_activity_sink(None)
         self._monitor_mgr.stop()
         self._continuous_listen.stop()
         self._tts.stop()
-        self._barge.stop()
+        self._barge.reset()
         self._db.close()
         event.accept()

@@ -28,6 +28,37 @@ def unified_router_json(**fields: object) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def frontier_envelope_json(
+    user_reply: str,
+    *,
+    needs_execution: bool = False,
+    confidence: float = 0.92,
+    route: dict[str, Any] | None = None,
+) -> str:
+    """Frontier envelope — TurnCoordinator·frontier_agent 테스트용."""
+    route_body = route or {
+        "intent": "chat",
+        "lane": "chat_only",
+        "knowledge_lane": "chat_only",
+        "goal": "",
+        "task_type": "unknown",
+        "slots": {},
+        "risk_hint": "low",
+        "needs_user_confirm": False,
+        "clarification": None,
+        "confidence": confidence,
+    }
+    return json.dumps(
+        {
+            "user_reply": user_reply,
+            "needs_execution": needs_execution,
+            "confidence": confidence,
+            "route": route_body,
+        },
+        ensure_ascii=False,
+    )
+
+
 class FakeGemma:
     """GemmaClient 호환 mock — purpose= 키워드 수용."""
 
@@ -53,6 +84,20 @@ class FakeGemma:
         if messages and "실행 계획기" in messages[0].content:
             return self.planner_json
         return self.finalize
+
+    def chat_stream(
+        self,
+        messages: Sequence[ChatMessage],
+        purpose: object = None,
+        on_chunk: object = None,
+        **kwargs: object,
+    ) -> str:
+        text = self.chat(messages, purpose=purpose, **kwargs)
+        if callable(on_chunk) and text:
+            step = max(1, len(text) // 3)
+            for i in range(0, len(text), step):
+                on_chunk(text[i : i + step])
+        return text
 
 
 class ApprovalGemma(FakeGemma):
@@ -98,6 +143,136 @@ class RoutingGemma(FakeGemma):
         user = messages[-1].content if len(messages) > 1 else ""
         if self._route_fn is not None:
             return self._route_fn(sys, user)
+        if "Frontier" in sys:
+            if "영화" in user:
+                return frontier_envelope_json(
+                    "검색해 볼게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "search",
+                        "lane": "search",
+                        "knowledge_lane": "search",
+                        "goal": "영화 정보",
+                        "task_type": "knowledge",
+                        "slots": {"query": "요즘 영화", "search_topic": "movie"},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "Cursor" in user:
+                return frontier_envelope_json(
+                    "Cursor 실행할게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "computer_use",
+                        "lane": "computer_use",
+                        "goal": "Cursor 실행",
+                        "task_type": "open_app",
+                        "slots": {},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "카톡" in user:
+                return frontier_envelope_json(
+                    "카톡에서 메시지 보낼게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "computer_use",
+                        "lane": "computer_use",
+                        "goal": "카톡 메시지 전송",
+                        "task_type": "multi_step",
+                        "slots": {},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "유튜브" in user:
+                return frontier_envelope_json(
+                    "유튜브 재생을 시도할게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "computer_use",
+                        "lane": "computer_use",
+                        "goal": "유튜브 재생",
+                        "task_type": "media_play",
+                        "slots": {
+                            "platform_hint": "youtube",
+                            "media_action": "play",
+                        },
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "사양" in user:
+                return frontier_envelope_json(
+                    "사양을 확인할게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "fast_tool",
+                        "lane": "fast_tool",
+                        "goal": "시스템 사양",
+                        "task_type": "unknown",
+                        "slots": {},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "작업 시작" in user:
+                return frontier_envelope_json(
+                    "어떤 작업을 할까요?",
+                    needs_execution=True,
+                    route={
+                        "intent": "work_mode",
+                        "lane": "multi_turn",
+                        "goal": "작업 모드",
+                        "task_type": "unknown",
+                        "slots": {},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "example.com" in user:
+                return frontier_envelope_json(
+                    "링크를 열게요.",
+                    needs_execution=True,
+                    route={
+                        "intent": "computer_use",
+                        "lane": "direct_action",
+                        "goal": "URL 열기",
+                        "task_type": "unknown",
+                        "slots": {"url": "https://example.com/page"},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.9,
+                    },
+                )
+            if "안녕" in user:
+                return frontier_envelope_json(
+                    "반가워요!",
+                    needs_execution=False,
+                    route={
+                        "intent": "chat",
+                        "lane": "chat_only",
+                        "knowledge_lane": "chat_only",
+                        "goal": "인사",
+                        "task_type": "unknown",
+                        "slots": {},
+                        "risk_hint": "low",
+                        "needs_user_confirm": False,
+                        "confidence": 0.92,
+                    },
+                )
+            return frontier_envelope_json(
+                "네, 말씀해 주세요.",
+                needs_execution=False,
+            )
         if "Unified Router" in sys:
             if "영화" in user:
                 return unified_router_json(
@@ -186,6 +361,7 @@ def make_routing_assistant(tmp_path: Path, gemma: RoutingGemma | FakeGemma) -> I
         gemma,
         settings_overrides={
             "unified_llm_router_enabled": True,
+            "frontier_enabled": True,
             "chat_fast_path_enabled": True,
         },
         db_name="coord.db",

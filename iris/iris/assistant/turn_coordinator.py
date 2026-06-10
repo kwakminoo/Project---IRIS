@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from iris.assistant.dialogue_agent import DialogueAgent
+from iris.assistant.frontier_agent import run_frontier_turn
 from iris.assistant.computer_use_agent import extract_user_question
 from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_pending
 from iris.assistant.llm_intent_router import route_with_llm
@@ -75,6 +76,9 @@ class TurnResult:
     spoken_followup: str | None = None  # TTS용 — ack 제외 실행 결과만
     logs: list[str] = field(default_factory=list)
     delegate_search: bool = False
+    delegate_dialogue_stream: bool = False
+    delegate_frontier_stream: bool = False
+    frontier_reply: str = ""
     search_intent_name: str | None = None
     # Phase 3: 라우터 slots.query → 웹 리서치 기본 검색어 (비어 있으면 기존 추출 로직)
     search_query: str | None = None
@@ -108,6 +112,7 @@ class TurnCoordinator:
         *,
         routed: CommandKind | None = None,
         on_early_ack: Callable[[str], None] | None = None,
+        on_frontier_reply: Callable[[str], None] | None = None,
         on_user_notify: Callable[[str], None] | None = None,
     ) -> TurnResult:
         turn_id = uuid.uuid4().hex[:12]
@@ -137,7 +142,68 @@ class TurnCoordinator:
             if cu_result is not None:
                 return cu_result
 
-        # --- 라우팅: 기본은 Unified LLM Router (regex fast path 제거) ---
+        frontier_spoke = False
+        frontier_reply = ""
+
+        # --- Frontier 1회 envelope (멀티턴·pending_cu 제외) ---
+        if _frontier_enabled(self._assistant) and not is_multi_turn_active(ctx):
+            frontier = run_frontier_turn(
+                user_text, ctx, self._gemma, assistant=self._assistant
+            )
+            if frontier is not None:
+                logs.extend(frontier.logs)
+                frontier_reply = frontier.user_reply
+                # CHAT_ONLY는 delegate_frontier_stream 1회만 — prefetch 콜백 시 UI 이중 재생
+                if (
+                    frontier.needs_execution
+                    and on_frontier_reply is not None
+                    and frontier_reply
+                ):
+                    on_frontier_reply(frontier_reply)
+                    logs.append("frontier_reply_callback")
+                    frontier_spoke = True
+                if not frontier.needs_execution:
+                    lane = frontier.routed_turn.lane
+                    if lane is RouteLane.CHAT_ONLY:
+                        push_activity_line(
+                            "Frontier: CHAT_ONLY — single LLM, no unified router."
+                        )
+                        return TurnResult(
+                            turn_id=turn_id,
+                            route=RouteLane.CHAT_ONLY.value,
+                            user_visible="",
+                            early_ack=None,
+                            executed=False,
+                            logs=logs + ["frontier_chat_only"],
+                            delegate_frontier_stream=True,
+                            frontier_reply=frontier_reply,
+                            store_history=True,
+                        )
+                    push_activity_line(
+                        f"Frontier: knowledge delegate lane={lane.value}."
+                    )
+                    return self._dispatch_routed_turn(
+                        turn_id,
+                        user_text,
+                        frontier.routed_turn,
+                        logs,
+                        on_early_ack=on_early_ack,
+                        on_user_notify=on_user_notify,
+                        frontier_spoke=False,
+                        frontier_reply=frontier_reply,
+                    )
+                return self._dispatch_routed_turn(
+                    turn_id,
+                    user_text,
+                    frontier.routed_turn,
+                    logs,
+                    on_early_ack=on_early_ack,
+                    on_user_notify=on_user_notify,
+                    frontier_spoke=frontier_spoke,
+                    frontier_reply=frontier_reply,
+                )
+
+        # --- 폴백 라우팅: Unified LLM Router (regex fast path 제거) ---
         routed_turn: RoutedTurn
         if _unified_llm_router_enabled(self._assistant):
             routed_turn = route_user_turn(
@@ -157,6 +223,30 @@ class TurnCoordinator:
                 kind=CommandKind.GENERAL_CHAT,
                 lane=RouteLane.CHAT_ONLY,
             )
+        return self._dispatch_routed_turn(
+            turn_id,
+            user_text,
+            routed_turn,
+            logs,
+            on_early_ack=on_early_ack,
+            on_user_notify=on_user_notify,
+            frontier_spoke=False,
+            frontier_reply="",
+        )
+
+    def _dispatch_routed_turn(
+        self,
+        turn_id: str,
+        user_text: str,
+        routed_turn: RoutedTurn,
+        logs: list[str],
+        *,
+        on_early_ack: Callable[[str], None] | None = None,
+        on_user_notify: Callable[[str], None] | None = None,
+        frontier_spoke: bool = False,
+        frontier_reply: str = "",
+    ) -> TurnResult:
+        ctx = self._assistant.ctx
         lane = routed_turn.lane
         kind = routed_turn.kind
         logs.append(f"lane={lane.value} kind={kind.name}")
@@ -225,16 +315,18 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.CHAT_ONLY:
-            push_activity_line("Lane CHAT_ONLY: dialogue agent (LLM).")
-            reply = self._dialogue.chat(user_text)
-            logs.append("dialogue_chat")
+            push_activity_line(
+                "Lane CHAT_ONLY: delegate streaming dialogue to UI."
+            )
+            logs.append("dialogue_stream_delegate")
             return TurnResult(
                 turn_id=turn_id,
                 route=lane.value,
-                user_visible=reply,
+                user_visible="",
                 early_ack=None,
                 executed=False,
                 logs=logs,
+                delegate_dialogue_stream=True,
                 store_history=True,
             )
 
@@ -280,18 +372,32 @@ class TurnCoordinator:
                 logs,
                 on_early_ack=on_early_ack,
                 on_user_notify=on_user_notify,
+                frontier_spoke=frontier_spoke,
+                frontier_reply=frontier_reply,
             )
 
         if lane is RouteLane.FAST_TOOL:
             push_activity_line("Lane FAST_TOOL: single Tier-1 tool.")
             return self._run_fast_tool(
-                turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
+                turn_id,
+                user_text,
+                routed_turn,
+                logs,
+                on_early_ack=on_early_ack,
+                frontier_spoke=frontier_spoke,
+                frontier_reply=frontier_reply,
             )
 
         if lane is RouteLane.DIRECT_ACTION:
             push_activity_line("Lane DIRECT_ACTION: fast execute with early ack.")
             return self._run_direct_action(
-                turn_id, user_text, routed_turn, logs, on_early_ack=on_early_ack
+                turn_id,
+                user_text,
+                routed_turn,
+                logs,
+                on_early_ack=on_early_ack,
+                frontier_spoke=frontier_spoke,
+                frontier_reply=frontier_reply,
             )
 
         # ORCHESTRATED — 기존 AgentOrchestrator (Planner 포함)
@@ -437,6 +543,8 @@ class TurnCoordinator:
         *,
         on_early_ack: Callable[[str], None] | None = None,
         on_user_notify: Callable[[str], None] | None = None,
+        frontier_spoke: bool = False,
+        frontier_reply: str = "",
     ) -> TurnResult:
         """CU 레인 — early_ack 후 goal/slots로 PAV 루프 (ORCHESTRATED ≠ PC 미디어 스킬)."""
         ctx = self._assistant.ctx
@@ -444,13 +552,17 @@ class TurnCoordinator:
         slots = dict(routed_turn.slots)
         if routed_turn.task_type:
             slots.setdefault("task_type", routed_turn.task_type)
-        ack = self._dialogue.cu_early_ack(cu_goal, slots)
-        had_early = on_early_ack is not None
-        logs.append(f"cu_ack={ack[:40]}")
-
-        if on_early_ack is not None:
-            on_early_ack(ack)
-        logs.append("early_ack_callback")
+        if frontier_spoke:
+            ack = ""
+            had_early = True
+            logs.append("cu_ack_skipped_frontier")
+        else:
+            ack = self._dialogue.cu_early_ack(cu_goal, slots)
+            had_early = on_early_ack is not None
+            logs.append(f"cu_ack={ack[:40]}")
+            if on_early_ack is not None:
+                on_early_ack(ack)
+            logs.append("early_ack_callback")
 
         raw_reply = self._assistant.run_computer_use_loop(
             user_text,
@@ -468,14 +580,15 @@ class TurnCoordinator:
         )
         logs.extend(extra_logs)
         exec_reply = user_visible
-        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
-        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
+        merge_ack = frontier_reply if frontier_spoke else ack
+        user_visible = build_user_visible(merge_ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(merge_ack, exec_reply, had_early_ack=had_early)
         logs.append("computer_use")
         return TurnResult(
             turn_id=turn_id,
             route=RouteLane.COMPUTER_USE.value,
             user_visible=user_visible,
-            early_ack=ack,
+            early_ack=merge_ack or None,
             spoken_followup=spoken_followup,
             executed=executed,
             logs=logs,
@@ -490,17 +603,23 @@ class TurnCoordinator:
         logs: list[str],
         *,
         on_early_ack: Callable[[str], None] | None = None,
+        frontier_spoke: bool = False,
+        frontier_reply: str = "",
     ) -> TurnResult:
         """ack → (콜백) → 실행(handle_user_text / open_url) → 병합 메시지."""
         kind = routed.kind
         slots = dict(routed.slots)
-        ack = self._dialogue.ack(user_text, kind, slots=slots or None)
-        logs.append(f"ack={ack[:40]}")
-        had_early = on_early_ack is not None
-
-        if on_early_ack is not None:
-            on_early_ack(ack)
-        logs.append("early_ack_callback")
+        if frontier_spoke:
+            ack = ""
+            had_early = True
+            logs.append("ack_skipped_frontier")
+        else:
+            ack = self._dialogue.ack(user_text, kind, slots=slots or None)
+            logs.append(f"ack={ack[:40]}")
+            had_early = on_early_ack is not None
+            if on_early_ack is not None:
+                on_early_ack(ack)
+            logs.append("early_ack_callback")
 
         exec_reply = ""
         executed = False
@@ -528,13 +647,14 @@ class TurnCoordinator:
                 executed = True
                 logs.append("handle_user_text")
 
-        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
-        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
+        merge_ack = frontier_reply if frontier_spoke else ack
+        user_visible = build_user_visible(merge_ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(merge_ack, exec_reply, had_early_ack=had_early)
         return TurnResult(
             turn_id=turn_id,
             route=RouteLane.DIRECT_ACTION.value,
             user_visible=user_visible,
-            early_ack=ack,
+            early_ack=merge_ack or None,
             spoken_followup=spoken_followup,
             executed=executed,
             logs=logs,
@@ -549,16 +669,22 @@ class TurnCoordinator:
         logs: list[str],
         *,
         on_early_ack: Callable[[str], None] | None = None,
+        frontier_spoke: bool = False,
+        frontier_reply: str = "",
     ) -> TurnResult:
         """Tier 1 전용 도구 1스텝 (Computer Use 루프 생략)."""
         kind = routed.kind
-        ack = self._dialogue.ack(user_text, kind)
-        logs.append(f"fast_ack={ack[:40]}")
-        had_early = on_early_ack is not None
-
-        if on_early_ack is not None:
-            on_early_ack(ack)
-        logs.append("early_ack_callback")
+        if frontier_spoke:
+            ack = ""
+            had_early = True
+            logs.append("fast_ack_skipped_frontier")
+        else:
+            ack = self._dialogue.ack(user_text, kind)
+            logs.append(f"fast_ack={ack[:40]}")
+            had_early = on_early_ack is not None
+            if on_early_ack is not None:
+                on_early_ack(ack)
+            logs.append("early_ack_callback")
 
         exec_reply = ""
         executed = False
@@ -575,14 +701,15 @@ class TurnCoordinator:
         else:
             logs.append(f"fast_tool_unhandled:{kind.name}")
 
-        user_visible = build_user_visible(ack, exec_reply, had_early_ack=had_early)
-        spoken_followup = build_spoken_followup(ack, exec_reply, had_early_ack=had_early)
+        merge_ack = frontier_reply if frontier_spoke else ack
+        user_visible = build_user_visible(merge_ack, exec_reply, had_early_ack=had_early)
+        spoken_followup = build_spoken_followup(merge_ack, exec_reply, had_early_ack=had_early)
 
         return TurnResult(
             turn_id=turn_id,
             route=RouteLane.FAST_TOOL.value,
             user_visible=user_visible,
-            early_ack=ack,
+            early_ack=merge_ack or None,
             spoken_followup=spoken_followup,
             executed=executed,
             logs=logs,
@@ -619,6 +746,13 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
+
+
+def _frontier_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "frontier_enabled", True))
 
 
 def _unified_llm_router_enabled(assistant: IrisAssistant) -> bool:

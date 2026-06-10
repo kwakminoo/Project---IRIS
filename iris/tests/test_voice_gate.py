@@ -42,6 +42,17 @@ def test_ambient_voice_is_ignored_without_wake_word() -> None:
     assert result.reject_reason == "wake_word"
 
 
+def test_followup_paused_during_tts() -> None:
+    gate = VoiceCommandGate(followup_seconds=30)
+    gate.filter("아이리스")
+    gate.pause_followup_timer()
+    second = gate.filter("오늘 뉴스 알려줘")
+    assert second.accepted is False
+    gate.resume_followup_timer()
+    third = gate.filter("오늘 뉴스 알려줘")
+    assert third.accepted is True
+
+
 def test_wake_word_only_opens_followup_window() -> None:
     gate = VoiceCommandGate(followup_seconds=5)
 

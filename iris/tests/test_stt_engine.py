@@ -10,6 +10,7 @@ def test_build_stt_initial_prompt_includes_wake_words() -> None:
     settings = load_settings()
     prompt = build_stt_initial_prompt(settings)
     assert "아이리스" in prompt or "iris" in prompt.lower()
+    assert "한국어 음성 비서" not in prompt
 
 
 def test_resolve_stt_device_cpu_fallback() -> None:

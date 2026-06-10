@@ -15,6 +15,7 @@ import numpy as np
 
 from iris.audio.stt_engine import SttEngine, cuda_runtime_ready, resolve_stt_device_compute
 from iris.audio.voice_gate import VoiceCommandGate
+from iris.audio.voice_session import VoiceSessionState
 from iris.config.settings import load_settings
 
 
@@ -37,6 +38,13 @@ def test_settings() -> None:
     print(f"  max_seconds={s.always_listen_max_seconds}")
     print(f"  voice_require_wake_word={s.voice_require_wake_word}")
     print(f"  voice_wake_words={s.voice_wake_words}")
+    print(f"  STT_NO_SPEECH_THRESHOLD={s.stt_no_speech_threshold}")
+    print(f"  STT_MIN_AVG_LOGPROB={s.stt_min_avg_logprob}")
+    print(f"  STT_CONDITION_ON_PREVIOUS_TEXT={s.stt_condition_on_previous_text}")
+    print(f"  VOICE_RESUME_DELAY_MS={s.voice_resume_delay_ms}")
+    print(f"  VOICE_VAD_AUTO_CALIBRATE={s.voice_vad_auto_calibrate}")
+    print(f"  BARGE_IN_GRACE_MS={s.barge_in_grace_ms}")
+    print(f"  VoiceSession states: {[st.value for st in VoiceSessionState]}")
 
 
 def test_sounddevice() -> bool:
@@ -94,9 +102,13 @@ def test_stt_warmup_and_transcribe() -> str:
     samples = np.concatenate([silence, tone, silence])
 
     t1 = time.perf_counter()
-    text = engine.transcribe_audio(samples, sr)
+    result = engine.transcribe(samples, sr)
     transcribe_s = time.perf_counter() - t1
-    print(f"  transcribe: {transcribe_s:.2f}s  result={text!r}")
+    print(
+        f"  transcribe: {transcribe_s:.2f}s  text={result.text!r} "
+        f"no_speech={result.no_speech} reason={result.reject_reason!r}"
+    )
+    text = result.text
 
     if transcribe_s > 30:
         return "hang_risk"

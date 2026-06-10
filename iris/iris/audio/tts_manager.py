@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QMetaObject, Qt, pyqtSignal, pyqtSlot
 
+from iris.audio.audio_duration import audio_file_duration_ms, estimate_speech_duration_ms
 from iris.audio.audio_file_fx import apply_voice_fx_to_file
 from iris.audio.audio_player import AudioPlayer
 from iris.audio.fallback_tts_engine import FallbackTTSEngine
@@ -89,6 +90,7 @@ class TTSManager(QObject):
         self._speaking = False
         self._status = TtsStatus.IDLE
         self._last_user_notice: str | None = None
+        self._current_playback_duration_ms: float = 0.0
 
         self._player.playback_finished.connect(self._on_playback_finished)
         self._refresh_initial_status()
@@ -119,6 +121,36 @@ class TTSManager(QObject):
 
     def is_speaking(self) -> bool:
         return self._speaking or self._player.is_playing()
+
+    @property
+    def current_playback_duration_ms(self) -> float:
+        """직전 재생(예정) 오디오 길이 — UI 타이핑 동기화용."""
+        return self._current_playback_duration_ms
+
+    def _resolve_playback_duration_ms(
+        self,
+        text: str,
+        audio_path: Path | None = None,
+    ) -> float:
+        if audio_path is not None:
+            measured = audio_file_duration_ms(audio_path)
+            if measured is not None:
+                return measured
+        return estimate_speech_duration_ms(text, self._settings.tts_speaking_rate)
+
+    def _begin_playback(
+        self,
+        text: str,
+        audio_path: Path | None,
+        playback_start: Optional[Callable[[], None]],
+    ) -> None:
+        self._current_playback_duration_ms = self._resolve_playback_duration_ms(
+            text,
+            audio_path,
+        )
+        if playback_start:
+            playback_start()
+        self._speaking = True
 
     def _set_status(self, status: TtsStatus, notice: str | None = None) -> None:
         self._status = status
@@ -245,9 +277,7 @@ class TTSManager(QObject):
                                 out_fx.unlink(missing_ok=True)
                             except OSError:
                                 pass
-                    if playback_start:
-                        playback_start()
-                    self._speaking = True
+                    self._begin_playback(text, play_path, playback_start)
                     self._player.play_file.emit(token, str(play_path))
                     return
                 notice = self._supertonic.load_error or "Supertonic synthesis failed"
@@ -299,9 +329,7 @@ class TTSManager(QObject):
                         return
                     if ok and out.is_file() and out.stat().st_size > 0:
                         self._set_status(TtsStatus.XTTS_READY)
-                        if playback_start:
-                            playback_start()
-                        self._speaking = True
+                        self._begin_playback(text, out, playback_start)
                         self._player.play_file.emit(token, str(out))
                         return
                     notice = notice or "XTTS 합성에 실패했습니다. fallback으로 재생합니다."
@@ -354,9 +382,7 @@ class TTSManager(QObject):
                                     out_fx.unlink(missing_ok=True)
                                 except OSError:
                                     pass
-                        if playback_start:
-                            playback_start()
-                        self._speaking = True
+                        self._begin_playback(text, play_path, playback_start)
                         self._player.play_file.emit(token, str(play_path))
                         return
                 except Exception:
@@ -372,9 +398,7 @@ class TTSManager(QObject):
                     Qt.ConnectionType.QueuedConnection,
                 )
                 return
-            if playback_start:
-                playback_start()
-            self._speaking = True
+            self._begin_playback(text, None, playback_start)
             self._fallback.speak_blocking(text, on_start=None, on_done=self._invoke_done)
 
         self._thread = threading.Thread(target=run, daemon=True)

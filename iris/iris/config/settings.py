@@ -62,6 +62,7 @@ class Settings:
     """Iris 런타임 설정."""
 
     ollama_base_url: str
+    ollama_keep_alive: str  # Ollama keep_alive (비우면 payload 생략)
     gemma_api_base_url: str
     gemma_model_name: str
     ai_model_names: tuple[str, ...]
@@ -75,6 +76,9 @@ class Settings:
     stt_vad_filter: bool  # False 권장: 앞단 RMS VAD와 중복 방지
     stt_beam_size: int
     stt_initial_prompt: str  # 비어 있으면 호출어 기반 자동 생성
+    stt_condition_on_previous_text: bool
+    stt_no_speech_threshold: float
+    stt_min_avg_logprob: float
     # TTS: TTS_PROVIDER (supertonic | xtts | edge | pyttsx3). 미설정 시 TTS_ENGINE 레거시로 추론.
     tts_provider: str
     tts_fallback_provider: str
@@ -119,6 +123,14 @@ class Settings:
     hermes_cli_path: str
     # Barge-in / 상시 음성
     barge_in_enabled: bool
+    barge_in_grace_ms: int
+    barge_in_rms_multiplier: float
+    voice_resume_delay_ms: int
+    voice_vad_auto_calibrate: bool
+    voice_speech_rms_multiplier: float
+    voice_silence_rms_multiplier: float
+    always_listen_speech_rms_manual: bool
+    tts_processing_filler: bool
     always_listen_enabled: bool
     always_listen_sample_rate: int
     always_listen_speech_rms: float
@@ -134,6 +146,9 @@ class Settings:
     multi_agent_enabled: bool
     # (deprecated) chat fast path — TurnCoordinator에서 미사용, LLM 라우터만 사용
     chat_fast_path_enabled: bool
+    # Frontier — 1회 LLM으로 user_reply + route envelope (기본 on, 실패 시 Unified Router 폴백)
+    frontier_enabled: bool
+    frontier_min_confidence: float
     # Unified LLM Router (자연어 전체 → intent/lane/slots). false면 llm_intent_router 또는 규칙만
     unified_llm_router_enabled: bool
     # LLM Intent Router (Gemma 1회 JSON → lane/goal). unified 비활성 시 사용
@@ -157,6 +172,8 @@ class Settings:
     phase3_mode_preset_llm: bool
     # Ollama think: off | default | on (IRIS_THINKING_MODE)
     thinking_mode: str
+    # DIALOGUE_CHAT 전용 최근 턴 수 (1턴=user+assistant 2메시지)
+    dialogue_history_turns: int
     # Media Ranker — 창 스크린샷 멀티모달 (DB·디스크 저장 없음, HTTP body만)
     media_ranker_use_screenshot: bool
     media_ranker_vision_model: str  # 비어 있으면 gemma_model_name
@@ -192,6 +209,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
 
     return Settings(
         ollama_base_url=ollama_base_url,
+        ollama_keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", "").strip(),
         gemma_api_base_url=gemma_api_base_url,
         gemma_model_name=model_name,
         ai_model_names=model_names or (model_name,),
@@ -205,6 +223,9 @@ def load_settings(env_path: Path | None = None) -> Settings:
         stt_vad_filter=_env_bool("STT_VAD_FILTER", False),
         stt_beam_size=_env_int("STT_BEAM_SIZE", 5),
         stt_initial_prompt=os.getenv("STT_INITIAL_PROMPT", "").strip(),
+        stt_condition_on_previous_text=_env_bool("STT_CONDITION_ON_PREVIOUS_TEXT", False),
+        stt_no_speech_threshold=_env_float("STT_NO_SPEECH_THRESHOLD", 0.6),
+        stt_min_avg_logprob=_env_float("STT_MIN_AVG_LOGPROB", -1.0),
         tts_provider=_resolve_tts_provider(),
         tts_fallback_provider=os.getenv("TTS_FALLBACK_PROVIDER", "edge").strip().lower(),
         tts_voice=os.getenv("TTS_VOICE", "ko-KR-SunHiNeural").strip(),
@@ -246,6 +267,14 @@ def load_settings(env_path: Path | None = None) -> Settings:
         external_agent_verify_perception=_env_bool("EXTERNAL_AGENT_VERIFY_PERCEPTION", False),
         hermes_cli_path=os.getenv("HERMES_CLI_PATH", "hermes").strip(),
         barge_in_enabled=_env_bool("BARGE_IN_ENABLED", False),
+        barge_in_grace_ms=_env_int("BARGE_IN_GRACE_MS", 450),
+        barge_in_rms_multiplier=_env_float("BARGE_IN_RMS_MULTIPLIER", 3.0),
+        voice_resume_delay_ms=_env_int("VOICE_RESUME_DELAY_MS", 250),
+        voice_vad_auto_calibrate=_env_bool("VOICE_VAD_AUTO_CALIBRATE", True),
+        voice_speech_rms_multiplier=_env_float("VOICE_SPEECH_RMS_MULTIPLIER", 2.5),
+        voice_silence_rms_multiplier=_env_float("VOICE_SILENCE_RMS_MULTIPLIER", 1.3),
+        always_listen_speech_rms_manual=os.getenv("ALWAYS_LISTEN_SPEECH_RMS") is not None,
+        tts_processing_filler=_env_bool("TTS_PROCESSING_FILLER", False),
         always_listen_enabled=_env_bool("ALWAYS_LISTEN_ENABLED", True),
         always_listen_sample_rate=_env_int("ALWAYS_LISTEN_SAMPLE_RATE", 16000),
         always_listen_speech_rms=_env_float("ALWAYS_LISTEN_SPEECH_RMS", 0.018),
@@ -263,6 +292,8 @@ def load_settings(env_path: Path | None = None) -> Settings:
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
         multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
         chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", False),
+        frontier_enabled=_env_bool("IRIS_FRONTIER_ENABLED", True),
+        frontier_min_confidence=_env_float("IRIS_FRONTIER_MIN_CONFIDENCE", 0.65),
         unified_llm_router_enabled=_env_bool("IRIS_UNIFIED_LLM_ROUTER", True),
         llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
         llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),
@@ -285,6 +316,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         thinking_mode=_normalize_thinking_mode_env(
             os.getenv("IRIS_THINKING_MODE", "default")
         ),
+        dialogue_history_turns=max(0, _env_int("DIALOGUE_HISTORY_TURNS", 4)),
         media_ranker_use_screenshot=_env_bool(
             "IRIS_MEDIA_RANKER_USE_SCREENSHOT", True
         ),

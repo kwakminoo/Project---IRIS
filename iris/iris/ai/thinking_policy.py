@@ -16,6 +16,7 @@ class LlmPurpose(str, Enum):
     ORCHESTRATOR_PLAN = "orchestrator_plan"
     MODE_PRESET = "mode_preset"
     MEDIA_USER_REPLY = "media_user_reply"  # 미디어 플로우 사용자 멘트(thinking 기본 off)
+    FRONTIER = "frontier"  # 앞단 1회 envelope (thinking 기본 off)
     GENERIC = "generic"
 
 

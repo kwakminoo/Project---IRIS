@@ -82,9 +82,27 @@ class VoiceCommandGate:
         self._require_wake_word = require_wake_word
         self._followup_seconds = max(0.0, followup_seconds)
         self._awake_until = 0.0
+        self._followup_paused = False
+        self._followup_remaining = 0.0
 
     def reset(self) -> None:
         self._awake_until = 0.0
+        self._followup_paused = False
+        self._followup_remaining = 0.0
+
+    def pause_followup_timer(self) -> None:
+        """TTS/처리 중 follow-up 타이머 정지 — 남은 시간 보존."""
+        now = time.time()
+        if now < self._awake_until and not self._followup_paused:
+            self._followup_remaining = self._awake_until - now
+            self._followup_paused = True
+
+    def resume_followup_timer(self) -> None:
+        """TTS 종료 후 follow-up 윈도우 복원."""
+        if self._followup_paused and self._followup_remaining > 0:
+            self._awake_until = time.time() + self._followup_remaining
+        self._followup_paused = False
+        self._followup_remaining = 0.0
 
     def filter(self, text: str) -> VoiceGateResult:
         clean = _normalize(text)
@@ -102,7 +120,7 @@ class VoiceCommandGate:
                 return VoiceGateResult(True, command)
             return VoiceGateResult(True, "", prompt_only=True)
 
-        if now <= self._awake_until:
+        if not self._followup_paused and now <= self._awake_until:
             return VoiceGateResult(True, clean)
 
         return VoiceGateResult(

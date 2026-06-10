@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ctypes
 import logging
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import numpy as np
 
@@ -13,15 +14,76 @@ from iris.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SttSegment:
+    """세그먼트 메타 — 테스트·디버그용."""
+
+    text: str
+    no_speech_prob: float
+    avg_logprob: float
+    compression_ratio: float
+
+
+@dataclass
+class SttResult:
+    text: str | None
+    no_speech: bool
+    confidence: float
+    segments: list[SttSegment] = field(default_factory=list)
+    reject_reason: str = ""
+
+
 def build_stt_initial_prompt(settings: Settings) -> str:
-    """호출어·자주 쓰는 단어를 Whisper에 힌트로 제공."""
+    """호출어 힌트만 제공 — 설명형 문장 제거."""
     custom = (settings.stt_initial_prompt or "").strip()
     if custom:
-        return custom
+        return custom[:80]
     words = ", ".join(settings.voice_wake_words) if settings.voice_wake_words else "아이리스, iris, 이리스"
-    return (
-        f"호출어와 명령: {words}. "
-        "한국어 음성 비서 Iris. 사용자가 아이리스라고 부르면 아이리스로 받아적는다."
+    return words[:80]
+
+
+def evaluate_stt_result(
+    segments: list[SttSegment],
+    *,
+    no_speech_threshold: float,
+    min_avg_logprob: float,
+) -> SttResult:
+    """Whisper 세그먼트 메타데이터로 no-speech 판정."""
+    if not segments:
+        return SttResult(
+            text=None,
+            no_speech=True,
+            confidence=0.0,
+            segments=[],
+            reject_reason="no_segments",
+        )
+
+    avg_no_speech = sum(s.no_speech_prob for s in segments) / len(segments)
+    avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
+    text = " ".join(s.text for s in segments).strip() or None
+
+    if avg_no_speech >= no_speech_threshold:
+        return SttResult(
+            text=None,
+            no_speech=True,
+            confidence=avg_logprob,
+            segments=segments,
+            reject_reason=f"no_speech_prob={avg_no_speech:.3f}",
+        )
+    if avg_logprob < min_avg_logprob:
+        return SttResult(
+            text=None,
+            no_speech=True,
+            confidence=avg_logprob,
+            segments=segments,
+            reject_reason=f"low_logprob={avg_logprob:.3f}",
+        )
+
+    return SttResult(
+        text=text,
+        no_speech=False,
+        confidence=avg_logprob,
+        segments=segments,
     )
 
 
@@ -107,23 +169,40 @@ class SttEngine:
             self._model = False  # type: ignore[assignment]
             return False
 
-    def _transcribe_with_loaded_model(self, samples: np.ndarray) -> Optional[str]:
+    def _segment_from_raw(self, raw: Any) -> SttSegment:
+        return SttSegment(
+            text=(raw.text or "").strip(),
+            no_speech_prob=float(getattr(raw, "no_speech_prob", 0.0) or 0.0),
+            avg_logprob=float(getattr(raw, "avg_logprob", 0.0) or 0.0),
+            compression_ratio=float(getattr(raw, "compression_ratio", 0.0) or 0.0),
+        )
+
+    def _transcribe_with_loaded_model(self, samples: np.ndarray) -> SttResult:
         prompt = build_stt_initial_prompt(self._settings)
-        segments, _info = self._model.transcribe(  # type: ignore[union-attr]
+        segments_iter, _info = self._model.transcribe(  # type: ignore[union-attr]
             samples.astype(np.float32),
             language="ko",
             vad_filter=self._settings.stt_vad_filter,
             beam_size=self._settings.stt_beam_size,
             initial_prompt=prompt,
+            condition_on_previous_text=self._settings.stt_condition_on_previous_text,
         )
-        parts = [s.text for s in segments]
-        text = " ".join(parts).strip()
-        return text or None
+        segments = [self._segment_from_raw(s) for s in segments_iter]
+        return evaluate_stt_result(
+            segments,
+            no_speech_threshold=self._settings.stt_no_speech_threshold,
+            min_avg_logprob=self._settings.stt_min_avg_logprob,
+        )
 
-    def transcribe_audio(self, samples: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
-        """float32 모노 PCM."""
+    def transcribe(self, samples: np.ndarray, sample_rate: int = 16000) -> SttResult:
+        """float32 모노 PCM → SttResult."""
         if not self._ensure_model() or self._model is False:
-            return None
+            return SttResult(
+                text=None,
+                no_speech=True,
+                confidence=0.0,
+                reject_reason="model_unavailable",
+            )
         try:
             return self._transcribe_with_loaded_model(samples)
         except Exception as exc:
@@ -135,4 +214,16 @@ class SttEngine:
                         return self._transcribe_with_loaded_model(samples)
                 except Exception as cpu_exc:
                     logger.warning("STT CPU 폴백 transcribe 실패: %s", cpu_exc)
+            return SttResult(
+                text=None,
+                no_speech=True,
+                confidence=0.0,
+                reject_reason="transcribe_error",
+            )
+
+    def transcribe_audio(self, samples: np.ndarray, sample_rate: int = 16000) -> Optional[str]:
+        """하위 호환 — no_speech이면 None."""
+        result = self.transcribe(samples, sample_rate)
+        if result.no_speech or not result.text:
             return None
+        return result.text

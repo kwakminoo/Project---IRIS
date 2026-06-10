@@ -1,14 +1,9 @@
-"""Barge-in: TTS 중 마이크 입력 감지 시 TTS 중단."""
+"""Barge-in: TTS 중 단일 마이크 스트림에서 RMS 감지 → TTS 중단."""
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Callable, Optional, Protocol
-
-import numpy as np
-
-from iris.audio.input_device import resolve_input_device
 
 
 class TtsStopCapable(Protocol):
@@ -17,75 +12,58 @@ class TtsStopCapable(Protocol):
     def stop(self) -> None: ...
 
 
-class BargeInController:
+class BargeInMonitor:
     """
-    TTS 재생 중 RMS가 임계값을 넘으면 TTS 중단 후 UI 훅 호출.
+    별도 InputStream 없음 — ContinuousListenController 콜백에서 RMS 검사.
     에코 방지: TTS 시작 후 grace_ms 동안 무시.
     """
 
     def __init__(
         self,
         tts: TtsStopCapable,
+        *,
         ui_hook: Optional[Callable[[], None]] = None,
         grace_ms: int = 450,
         threshold: float = 0.02,
-        input_device: int | None = None,
     ) -> None:
         self._tts = tts
         self._ui_hook = ui_hook
         self._grace_ms = grace_ms
         self._threshold = threshold
-        self._thread: Optional[threading.Thread] = None
-        self._active = threading.Event()
         self._tts_start_ts = 0.0
-        self._input_device = input_device
+        self._triggered = False
+
+    def set_threshold(self, threshold: float) -> None:
+        self._threshold = max(threshold, 1e-6)
 
     def notify_tts_started(self) -> None:
         self._tts_start_ts = time.time()
+        self._triggered = False
 
-    def start_listening(self) -> None:
-        self.stop()
-        self._active.set()
+    def reset(self) -> None:
+        self._triggered = False
 
-        def loop() -> None:
-            try:
-                import sounddevice as sd
-            except Exception:
-                return
-            sample_rate = 16000
-            block = int(sample_rate * 0.2)
-            device_choice, _reason = resolve_input_device(sd, self._input_device)
-            if device_choice is None:
-                self._active.clear()
-                return
-
-            def callback(indata, frames, time_info, status):  # noqa: ARG001
-                if not self._active.is_set():
-                    return
-                if (time.time() - self._tts_start_ts) * 1000 < self._grace_ms:
-                    return
-                rms = float(np.sqrt(np.mean(np.square(indata))))
-                if rms > self._threshold:
-                    self._tts.stop()
-                    self._active.clear()
-                    if self._ui_hook:
-                        self._ui_hook()
-
-            try:
-                with sd.InputStream(
-                    channels=1,
-                    samplerate=sample_rate,
-                    blocksize=block,
-                    device=device_choice.device,
-                    callback=callback,
-                ):
-                    while self._active.is_set():
-                        time.sleep(0.05)
-            except Exception:
-                self._active.clear()
-
-        self._thread = threading.Thread(target=loop, daemon=True)
-        self._thread.start()
+    def check_rms(self, rms: float) -> bool:
+        """
+        RMS가 임계값 초과 시 TTS 중단.
+        반환: barge-in이 발생했으면 True (한 번만).
+        """
+        if self._triggered:
+            return False
+        if (time.time() - self._tts_start_ts) * 1000 < self._grace_ms:
+            return False
+        if rms <= self._threshold:
+            return False
+        self._triggered = True
+        self._tts.stop()
+        if self._ui_hook:
+            self._ui_hook()
+        return True
 
     def stop(self) -> None:
-        self._active.clear()
+        """하위 호환 — 별도 스트림 없음."""
+        self.reset()
+
+
+# 하위 호환 별칭
+BargeInController = BargeInMonitor

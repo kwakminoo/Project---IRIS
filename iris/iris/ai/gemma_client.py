@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
@@ -133,6 +135,60 @@ class GemmaClient:
             push_activity_line("LLM: request failed (transport or HTTP error).")
             return FALLBACK_KO
 
+    def chat_stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        purpose: LlmPurpose = LlmPurpose.GENERIC,
+        lane: str | None = None,
+        model_override: str | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> str:
+        """Ollama stream: true — 청크마다 on_chunk, 최종 sanitize 문자열 반환."""
+        if not self._settings.use_local_llm:
+            push_activity_line("LLM: stream skipped (USE_LOCAL_LLM off).")
+            if on_chunk:
+                on_chunk(FALLBACK_KO)
+            return FALLBACK_KO
+        think = resolve_think(self._settings.thinking_mode, purpose, lane=lane)
+        lane_bit = f" lane={lane}" if lane else ""
+        has_images = any(m.images for m in messages)
+        model = (model_override or "").strip() or self._settings.gemma_model_name
+        push_activity_line(
+            f"LLM: stream think={str(think).lower()} purpose={purpose.value}{lane_bit} "
+            f"backend={self._settings.gemma_backend!r} "
+            f"model={model!r} messages={len(messages)} images={has_images}."
+        )
+        try:
+            if self._settings.gemma_backend == "openai_compatible":
+                raw = self._chat_openai_compatible(messages, model=model)
+                if on_chunk and raw:
+                    on_chunk(raw)
+            else:
+                raw = self._chat_ollama_stream(
+                    messages,
+                    think=think,
+                    model=model,
+                    include_images=has_images,
+                    on_chunk=on_chunk,
+                )
+            cleaned = _sanitize_visible_reply(raw)
+            if not cleaned:
+                push_activity_line(
+                    "LLM: empty visible stream reply after sanitization (fallback)."
+                )
+                fallback = _STRIP_EMPTY_KO if raw.strip() else FALLBACK_KO
+                if on_chunk and not raw.strip():
+                    on_chunk(fallback)
+                return fallback
+            push_activity_line(f"LLM: stream done chars={len(cleaned)}.")
+            return cleaned
+        except Exception:
+            push_activity_line("LLM: stream failed (transport or HTTP error).")
+            if on_chunk:
+                on_chunk(FALLBACK_KO)
+            return FALLBACK_KO
+
     def chat_with_images(
         self,
         messages: Sequence[ChatMessage],
@@ -198,6 +254,29 @@ class GemmaClient:
                 False,
             )
 
+    def _ollama_chat_payload(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        think: bool,
+        model: str,
+        include_images: bool,
+        stream: bool,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [
+                _ollama_message_dict(m, include_images=include_images)
+                for m in messages
+            ],
+            "stream": stream,
+            "think": think,
+        }
+        keep_alive = (getattr(self._settings, "ollama_keep_alive", "") or "").strip()
+        if keep_alive:
+            payload["keep_alive"] = keep_alive
+        return payload
+
     def _chat_ollama(
         self,
         messages: Sequence[ChatMessage],
@@ -208,15 +287,13 @@ class GemmaClient:
     ) -> str:
         base = self._settings.ollama_base_url.rstrip("/")
         url = f"{base}/api/chat"
-        payload: dict[str, object] = {
-            "model": model,
-            "messages": [
-                _ollama_message_dict(m, include_images=include_images)
-                for m in messages
-            ],
-            "stream": False,
-            "think": think,
-        }
+        payload = self._ollama_chat_payload(
+            messages,
+            think=think,
+            model=model,
+            include_images=include_images,
+            stream=False,
+        )
         with httpx.Client(timeout=self._timeout) as client:
             r = client.post(url, json=payload)
             r.raise_for_status()
@@ -231,6 +308,44 @@ class GemmaClient:
                 f"LLM: empty content (thinking_len={think_len}) — visible fallback only."
             )
             return ""
+
+    def _chat_ollama_stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        think: bool,
+        model: str,
+        include_images: bool,
+        on_chunk: Callable[[str], None] | None,
+    ) -> str:
+        base = self._settings.ollama_base_url.rstrip("/")
+        url = f"{base}/api/chat"
+        payload = self._ollama_chat_payload(
+            messages,
+            think=think,
+            model=model,
+            include_images=include_images,
+            stream=True,
+        )
+        parts: list[str] = []
+        with httpx.Client(timeout=self._timeout) as client:
+            with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    msg = data.get("message") or {}
+                    chunk = msg.get("content")
+                    if not isinstance(chunk, str) or not chunk:
+                        continue
+                    parts.append(chunk)
+                    if on_chunk is not None:
+                        on_chunk(chunk)
+        return "".join(parts).strip()
 
     def _chat_openai_compatible(
         self,

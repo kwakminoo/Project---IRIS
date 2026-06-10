@@ -21,15 +21,36 @@ if TYPE_CHECKING:
 
 class LlmWorker(QThread):
     finished_text = pyqtSignal(str)
+    chunk_received = pyqtSignal(str)
 
-    def __init__(self, client: GemmaClient, messages: Sequence[ChatMessage]) -> None:
+    def __init__(
+        self,
+        client: GemmaClient,
+        messages: Sequence[ChatMessage],
+        *,
+        stream: bool = False,
+    ) -> None:
         super().__init__()
         self._client = client
         self._messages = list(messages)
+        self._stream = stream
 
     def run(self) -> None:
-        push_activity_line("Worker: LlmWorker started.")
-        text = self._client.chat(self._messages, purpose=LlmPurpose.DIALOGUE_CHAT)
+        push_activity_line(
+            f"Worker: LlmWorker started stream={self._stream}."
+        )
+        if self._stream:
+
+            def _on_chunk(chunk: str) -> None:
+                self.chunk_received.emit(chunk)
+
+            text = self._client.chat_stream(
+                self._messages,
+                purpose=LlmPurpose.DIALOGUE_CHAT,
+                on_chunk=_on_chunk,
+            )
+        else:
+            text = self._client.chat(self._messages, purpose=LlmPurpose.DIALOGUE_CHAT)
         push_activity_line("Worker: LlmWorker emitting reply.")
         self.finished_text.emit(text)
 
@@ -100,6 +121,8 @@ class AgentWorker(QThread):
     # text, store_history, had_early_ack, spoken_followup(TTS용, ack 제외)
     finished_reply = pyqtSignal(str, bool, bool, str)
     delegate_search = pyqtSignal(str, str, str, str)  # user_text, intent, slot_query, meta_json
+    delegate_dialogue_stream = pyqtSignal(str)  # CHAT_ONLY — UI 스트리밍 대화 (폴백)
+    frontier_stream = pyqtSignal(str, bool)  # Frontier 선행 말, store_history
     early_ack = pyqtSignal(str)  # DIRECT_ACTION 실행 전 (메인 스레드 QueuedConnection)
     user_notify = pyqtSignal(str)  # 키보드·단축키 충돌 안내 (TTS)
 
@@ -115,12 +138,16 @@ class AgentWorker(QThread):
         def _emit_early_ack(ack: str) -> None:
             self.early_ack.emit(ack)
 
+        def _emit_frontier_reply(reply: str) -> None:
+            self.frontier_stream.emit(reply, False)
+
         def _emit_user_notify(msg: str) -> None:
             self.user_notify.emit(msg)
 
         result = coordinator.run_turn(
             self._user_text,
             on_early_ack=_emit_early_ack,
+            on_frontier_reply=_emit_frontier_reply,
             on_user_notify=_emit_user_notify,
         )
         if result.delegate_search:
@@ -129,6 +156,17 @@ class AgentWorker(QThread):
             slot_q = (result.search_query or "").strip()
             meta = (result.search_meta_json or "").strip()
             self.delegate_search.emit(self._user_text, intent_name, slot_q, meta)
+            return
+        if getattr(result, "delegate_frontier_stream", False):
+            push_activity_line("Worker: AgentWorker delegating to frontier stream.")
+            self.frontier_stream.emit(
+                getattr(result, "frontier_reply", "") or "",
+                True,
+            )
+            return
+        if getattr(result, "delegate_dialogue_stream", False):
+            push_activity_line("Worker: AgentWorker delegating to streaming dialogue.")
+            self.delegate_dialogue_stream.emit(self._user_text)
             return
         if result.user_visible:
             push_activity_line(

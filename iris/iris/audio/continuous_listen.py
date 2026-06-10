@@ -9,64 +9,88 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from iris.audio.input_device import resolve_input_device
+from iris.audio.barge_in import BargeInMonitor
+from iris.audio.echo_cancellation import EchoCancellationAdapter
 from iris.audio.mic_level import rms_to_display_level
+from iris.audio.input_device import resolve_input_device
+from iris.audio.vad_calibrator import VadCalibrator
+from iris.core.activity_sink import push_activity_line
 
 if TYPE_CHECKING:
     from iris.audio.stt_engine import SttEngine
+    from iris.audio.voice_session import VoiceSessionController
     from iris.config.settings import Settings
 
 
 class ContinuousListenController(QObject):
     """
     백그라운드 마이크 스트림 + RMS VAD.
-    TTS/LLM 처리 중에는 pause()로 수집을 막아 스피커 에코를 줄인다.
+    VoiceSessionController가 half-duplex·barge-in을 제어한다.
     """
 
     utterance_ready = pyqtSignal(str)
-    utterance_failed = pyqtSignal()  # STT 결과 없음
+    utterance_failed = pyqtSignal()
+    utterance_rejected = pyqtSignal(str)
     listen_failed = pyqtSignal(str)
     mic_level = pyqtSignal(float)
     speech_started = pyqtSignal()
-    stt_started = pyqtSignal()  # 침묵 확정 후 Whisper 변환 시작
+    stt_started = pyqtSignal()
 
-    def __init__(self, settings: "Settings", stt: "SttEngine", parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        settings: "Settings",
+        stt: "SttEngine",
+        session: "VoiceSessionController",
+        *,
+        barge: BargeInMonitor | None = None,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
         self._stt = stt
+        self._session = session
+        self._barge = barge
+        self._vad = VadCalibrator(settings)
+        self._aec = EchoCancellationAdapter()
         self._thread: Optional[threading.Thread] = None
         self._stream_active = threading.Event()
-        self._accept_audio = threading.Event()
-        self._accept_audio.set()
+        self._speech_rms = settings.always_listen_speech_rms
+        self._silence_rms = settings.always_listen_silence_rms
 
     def start(self) -> None:
         """상시 듣기 스레드 시작."""
         if self._thread and self._thread.is_alive():
-            self._accept_audio.set()
             return
         self._stream_active.set()
-        self._accept_audio.set()
         self._thread = threading.Thread(target=self._run_loop, name="iris-continuous-listen", daemon=True)
         self._thread.start()
 
     def pause(self) -> None:
-        """처리/TTS 중 — 새 발화 수집 중단."""
-        self._accept_audio.clear()
+        """레거시 호환 — VoiceSessionController가 실제 half-duplex를 담당."""
 
     def resume(self) -> None:
-        """대화 가능 상태로 복귀."""
-        self._accept_audio.set()
+        """레거시 호환."""
 
     def stop(self) -> None:
         self._stream_active.clear()
-        self._accept_audio.clear()
 
     def _transcribe_and_emit(self, audio: np.ndarray, sample_rate: int) -> None:
-        text = self._stt.transcribe_audio(audio, sample_rate)
-        if text:
-            self.utterance_ready.emit(text.strip())
-        else:
-            self.utterance_failed.emit()
+        if not self._session.should_run_stt(audio):
+            push_activity_line("STT: rejected pre-gate (low energy).")
+            self._session.on_stt_rejected("low_energy")
+            self.utterance_rejected.emit("low_energy")
+            return
+
+        result = self._stt.transcribe(audio, sample_rate)
+        if result.no_speech or not result.text:
+            reason = result.reject_reason or "no_speech"
+            push_activity_line(f"STT: rejected no_speech {reason}.")
+            self._session.on_stt_rejected(reason)
+            self.utterance_rejected.emit(reason)
+            return
+
+        self._session.on_stt_accepted()
+        self.utterance_ready.emit(result.text.strip())
 
     def _run_loop(self) -> None:
         try:
@@ -81,8 +105,6 @@ class ContinuousListenController(QObject):
 
         sample_rate = self._settings.always_listen_sample_rate
         block = int(sample_rate * 0.1)
-        speech_rms = self._settings.always_listen_speech_rms
-        silence_rms = self._settings.always_listen_silence_rms
         silence_ms = self._settings.always_listen_silence_ms
         min_speech_ms = self._settings.always_listen_min_speech_ms
         max_seconds = self._settings.always_listen_max_seconds
@@ -117,8 +139,8 @@ class ContinuousListenController(QObject):
             reset_utterance()
             if audio.size < int(sample_rate * min_speech_ms / 1000):
                 return
+            self._session.on_silence_boundary()
             self.stt_started.emit()
-            # STT는 무거우므로 오디오 콜백을 막지 않도록 별도 스레드에서 실행
             threading.Thread(
                 target=self._transcribe_and_emit,
                 args=(audio, sample_rate),
@@ -131,21 +153,43 @@ class ContinuousListenController(QObject):
             if not self._stream_active.is_set():
                 return
             mono = np.asarray(indata[:, 0], dtype=np.float32)
+            mono = self._aec.process_capture(mono)
             rms = float(np.sqrt(np.mean(np.square(mono))))
             self.mic_level.emit(rms_to_display_level(rms))
 
-            if not self._accept_audio.is_set():
+            calibrated = self._vad.feed_calibration_chunk(mono, sample_rate)
+            if calibrated is not None:
+                self._speech_rms = calibrated.speech_rms
+                self._silence_rms = calibrated.silence_rms
+                if self._barge is not None:
+                    self._barge.set_threshold(self._vad.barge_in_threshold())
+                push_activity_line(
+                    f"VAD: calibrated speech_rms={self._speech_rms:.4f} "
+                    f"silence_rms={self._silence_rms:.4f}"
+                )
+            else:
+                th = self._vad.thresholds
+                self._speech_rms = th.speech_rms
+                self._silence_rms = th.silence_rms
+
+            if self._session.should_monitor_barge_in() and self._barge is not None:
+                if self._barge.check_rms(rms):
+                    self._session.on_barge_in_triggered()
+                return
+
+            if not self._session.should_accept_capture():
                 if in_speech:
                     reset_utterance()
                 return
 
             now = time.time()
             if not in_speech:
-                if rms >= speech_rms:
+                if rms >= self._speech_rms:
                     in_speech = True
                     speech_started_at = now
                     silence_started = None
                     speech_chunks.append(mono.copy())
+                    self._session.on_speech_segment_started()
                     self.speech_started.emit()
                 return
 
@@ -155,7 +199,7 @@ class ContinuousListenController(QObject):
                 finalize_utterance()
                 return
 
-            if rms < silence_rms:
+            if rms < self._silence_rms:
                 if silence_started is None:
                     silence_started = now
                 elif (now - silence_started) * 1000 >= silence_ms:
