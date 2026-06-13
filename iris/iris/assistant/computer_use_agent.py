@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from iris.ai.gemma_client import GemmaClient
     from iris.assistant.cu_perception import PerceptionObservation
     from iris.automation.tool_registry import AutomationToolRegistry
+    from iris.infrastructure.adapters.cu_task_adapter import CuTaskRuntimePort
 
 _MAX_VERIFY_SKIP = 3
 _MAX_PLAY_COMPLETE_SKIP = 3
@@ -112,6 +113,7 @@ class ComputerUseAgent:
         *,
         max_steps: int = 20,
         tier4_backend: ExternalAgentBackend | None = None,
+        task_runtime: CuTaskRuntimePort | None = None,
     ) -> None:
         self._assistant = assistant
         self._gemma = gemma
@@ -119,6 +121,8 @@ class ComputerUseAgent:
         self._max_steps = max_steps
         # 테스트용 Tier4 백엔드 주입(None이면 settings에서 조립)
         self._tier4_backend_override = tier4_backend
+        # Task Runtime Adapter (None이면 기존 동작만)
+        self._task_runtime = task_runtime
 
     def run(
         self,
@@ -168,6 +172,10 @@ class ComputerUseAgent:
         push_activity_line("ComputerUse: session started (planner + PAV).")
         db.insert_log("computer_use", "start", goal[:500])
         self._assistant.memory.save_task_session(goal[:200])
+
+        if self._task_runtime is not None:
+            tid = self._task_runtime.on_cu_started(goal, slot_map)
+            self._assistant.ctx.active_task_id = tid
 
         # 스텝 0: Perception
         push_activity_line("ComputerUse: perceive phase (loop_start).")
@@ -220,6 +228,9 @@ class ComputerUseAgent:
         params = dict(pending.pending_tool_params)
         if not tool_name:
             return "승인된 도구 정보가 없습니다."
+
+        if self._task_runtime is not None:
+            self._task_runtime.on_approval_granted(tool_name, params)
 
         push_activity_line(
             f"ComputerUse: resume after CRITICAL approval tool={tool_name!r}."
@@ -363,6 +374,19 @@ class ComputerUseAgent:
         push_activity_line(
             f"ComputerUse: session finished exit={exit_tag} step_count={len(ctx.steps_taken)}."
         )
+        if self._task_runtime is not None:
+            if exit_tag == "approval":
+                pass  # waiting_approval 상태 유지
+            elif exit_tag == "success":
+                self._task_runtime.on_cu_finished(
+                    success=True,
+                    message=(ctx.final_message or exit_tag)[:500],
+                )
+            else:
+                self._task_runtime.on_cu_finished(
+                    success=False,
+                    message=(ctx.final_message or exit_tag)[:500],
+                )
         return ctx.final_message
 
     def _resolve_tier4_backend(self) -> ExternalAgentBackend | None:
@@ -575,6 +599,8 @@ class ComputerUseAgent:
             f"ComputerUse: full plan id={full_plan.plan_id!r} steps={len(full_plan.plans)}."
         )
         ctx.full_plan = full_plan
+        if self._task_runtime is not None:
+            self._task_runtime.on_full_plan_created(list(full_plan.plans))
         self._assistant._db.insert_log(
             "computer_use",
             "full_plan",
@@ -881,6 +907,12 @@ class ComputerUseAgent:
                 "checkpoint_ok",
                 f"{checkpoint_id} conf={result.confidence:.2f}"[:500],
             )
+            if self._task_runtime is not None:
+                self._task_runtime.on_checkpoint_verified(
+                    attempt_id=None,
+                    achieved=True,
+                    checkpoint_id=checkpoint_id,
+                )
             return True
 
         ctx.observations.append(format_checkpoint_fail(result))
@@ -892,6 +924,14 @@ class ComputerUseAgent:
                 f"resume={result.resume_from_index} gap={result.gap[:120]}"
             )[:500],
         )
+        if self._task_runtime is not None:
+            self._task_runtime.on_checkpoint_verified(
+                attempt_id=None,
+                achieved=False,
+                checkpoint_id=checkpoint_id,
+                gap=getattr(result, "gap", "") or "",
+                failure_kind=getattr(result, "failure_kind", "") or "",
+            )
         return False
 
     def _repair_after_tool_fail(
@@ -1437,6 +1477,19 @@ class ComputerUseAgent:
                 time.sleep(getattr(self, "_input_notify_delay", 2.0))
             cu_ctx.input_conflict_announced.add(step.tool)
 
+        tr = None
+        if self._task_runtime is not None:
+            tr = self._task_runtime.on_tool_execute(
+                tool_name=step.tool,
+                params=dict(step.params),
+                step_index=step_idx,
+                reason=summary,
+                approved=False,
+                run_tool=False,
+            )
+            if tr.blocked:
+                return f"tool_fail: {tr.message}"
+
         if self._registry.needs_approval(step.tool, tool_ctx):
             preview = self._registry.preview(step.tool, tool_ctx)
             user_msg = format_user_approval_message(step.tool, preview, step.params)
@@ -1458,6 +1511,20 @@ class ComputerUseAgent:
             )
             self._assistant.ctx.pending_cu = pending
             self._save_cu_pending_task_session(pending, cu_ctx)
+            if self._task_runtime is not None:
+                snap = {
+                    "cu_mode": approval_cu_mode,
+                    "step_idx": step_idx,
+                    "checkpoint_id": checkpoint_id or "",
+                }
+                aid = self._task_runtime.on_approval_pending(
+                    tool_name=step.tool,
+                    params=dict(step.params),
+                    step_index=step_idx,
+                    snapshot=snap,
+                )
+                if aid:
+                    pending.slots["_task_approval_id"] = aid
             return f"approval_required: {user_msg}"
 
         result = self._run_tool_direct(
@@ -1466,6 +1533,16 @@ class ComputerUseAgent:
             summary=summary,
             approved=True,
         )
+        if self._task_runtime is not None:
+            self._task_runtime.record_tool_result(
+                tool_name=step.tool,
+                params=dict(step.params),
+                step_index=step_idx,
+                reason=summary,
+                success=result.success,
+                message=result.message,
+                detail=result.detail,
+            )
         if step.tool == "focus_window" and result.success:
             sub = str(step.params.get("title_sub") or "").strip()
             if sub:

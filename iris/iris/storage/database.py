@@ -37,6 +37,7 @@ class Database:
             self._conn.execute("PRAGMA busy_timeout=15000")
             self._migrate_legacy_actions()
             self._init_schema()
+            self._run_task_runtime_migrations()
 
     def _execute(self, sql: str, params: Any = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -59,6 +60,13 @@ class Database:
             return
         self._execute("ALTER TABLE actions RENAME TO launcher_actions")
         self._commit()
+
+    def _run_task_runtime_migrations(self) -> None:
+        """Task Runtime 스키마 마이그레이션 (schema_migrations 버전 관리)."""
+        from iris.infrastructure.persistence.migrations import run_pending_migrations
+
+        with self._lock:
+            run_pending_migrations(self._conn)
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -409,14 +417,19 @@ class Database:
         recommended_action: str,
         user_confirmed: bool | None = None,
         action_executed: bool | None = None,
+        *,
+        related_task_id: str | None = None,
+        related_plan_step_id: str | None = None,
+        related_action_attempt_id: str | None = None,
     ) -> int:
         ts = datetime.utcnow().isoformat()
         cur = self._execute(
             """
             INSERT INTO events (
                 timestamp, target_id, target_title, category, confidence,
-                reason, recommended_action, user_confirmed, action_executed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reason, recommended_action, user_confirmed, action_executed,
+                related_task_id, related_plan_step_id, related_action_attempt_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts,
@@ -428,6 +441,9 @@ class Database:
                 recommended_action,
                 None if user_confirmed is None else (1 if user_confirmed else 0),
                 None if action_executed is None else (1 if action_executed else 0),
+                related_task_id,
+                related_plan_step_id,
+                related_action_attempt_id,
             ),
         )
         self._commit()

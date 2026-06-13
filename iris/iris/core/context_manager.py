@@ -107,6 +107,7 @@ class DialogueContext:
     pending_automation: Optional[PendingAutomationTool] = None
     pending_cu: Optional[PendingComputerUseGoal] = None
     slots: Dict[str, Any] = field(default_factory=dict)
+    active_task_id: Optional[str] = None  # Task Runtime 추적 ID
 
     def clear(self) -> None:
         self.step = DialogueStep.NONE

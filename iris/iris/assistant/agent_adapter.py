@@ -87,6 +87,38 @@ class IrisAssistant:
         self.ctx = DialogueContext()
         self.memory = MemoryManager(db)
         seed_demo_recent_work(db)
+        self._task_runtime_bundle = None
+        self._cu_task_adapter = None
+
+    def _ensure_task_runtime(self) -> object | None:
+        """Task Runtime 서비스·Adapter lazy 초기화."""
+        if self._cu_task_adapter is not None:
+            return self._cu_task_adapter
+        try:
+            from iris.application.runtime_factory import build_task_runtime
+            from iris.infrastructure.adapters.cu_task_adapter import CuTaskAdapter
+
+            self._task_runtime_bundle = build_task_runtime(
+                self._db, self._executor.tool_registry
+            )
+            self._cu_task_adapter = CuTaskAdapter(self._task_runtime_bundle)
+            from iris.infrastructure.events.task_status_bridge import TaskStatusEventBridge
+
+            self._task_runtime_bundle.events.subscribe(TaskStatusEventBridge())
+            return self._cu_task_adapter
+        except Exception:
+            return None
+
+    def _create_computer_use_agent(self) -> object:
+        from iris.assistant.computer_use_agent import ComputerUseAgent
+
+        return ComputerUseAgent(
+            self,
+            self._gemma,
+            self._executor.tool_registry,
+            max_steps=20,
+            task_runtime=self._ensure_task_runtime(),
+        )
 
     def update_app_paths(self, app_paths: Dict[str, str]) -> None:
         """앱 인덱스 병합 후 경로 dict 갱신."""
@@ -166,12 +198,7 @@ class IrisAssistant:
         from iris.assistant.computer_use_agent import ComputerUseAgent
 
         if not hasattr(self, "_computer_use_agent"):
-            self._computer_use_agent = ComputerUseAgent(
-                self,
-                self._gemma,
-                self._executor.tool_registry,
-                max_steps=20,
-            )
+            self._computer_use_agent = self._create_computer_use_agent()
         body = self._computer_use_agent.resume_after_critical_approval(
             pending,
             on_user_notify=on_user_notify,
@@ -195,12 +222,7 @@ class IrisAssistant:
         _ = routed  # 분류는 TurnCoordinator·LLM Intent Router에서 완료
         cu_goal = (goal or text).strip()
         if not hasattr(self, "_computer_use_agent"):
-            self._computer_use_agent = ComputerUseAgent(
-                self,
-                self._gemma,
-                self._executor.tool_registry,
-                max_steps=20,
-            )
+            self._computer_use_agent = self._create_computer_use_agent()
         body = self._computer_use_agent.run(
             cu_goal, slots=slots, on_user_notify=on_user_notify
         )
