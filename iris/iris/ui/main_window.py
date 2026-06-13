@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
 
     def _deferred_startup_services(self) -> None:
         """창이 뜬 뒤 상시 음성·모니터·STT 워밍업 시작."""
+        self._check_recoverable_tasks()
         if self._settings.always_listen_enabled:
             self._continuous_listen.start()
             self._notes.add_note("상시 음성 대기: 말씀하시면 인식합니다.")
@@ -408,6 +409,35 @@ class MainWindow(QMainWindow):
         self._monitor_mgr.start()
         self._state.reset_to_idle()
         self._viz.set_state(AppState.IDLE)
+
+    def _check_recoverable_tasks(self) -> None:
+        """앱 재시작 시 중단 Task 알림."""
+        try:
+            from iris.application.runtime_factory import build_task_runtime
+
+            runtime = build_task_runtime(self._db, self._executor.tool_registry)
+            recoverable = runtime.recovery.list_recoverable_tasks()
+            if not recoverable:
+                return
+            task = recoverable[0]
+            snap = runtime.recovery.load_recovery_snapshot(task.id)
+            summary = task.goal[:80]
+            if snap and snap.pending_approval:
+                summary += " (승인 대기 중)"
+            msg = (
+                f"이전 작업이 중단되었습니다: {summary}\n"
+                "계속하려면 '계속 진행', 상태는 '상태 확인', "
+                "취소하려면 '작업 취소'라고 입력해 주세요."
+            )
+            self._chat.append_assistant(msg)
+            self._assistant.ctx.active_task_id = task.id
+            health = self._assistant.task_runtime_health
+            if health.status == "failed":
+                self._chat.append_assistant(
+                    f"Task Runtime 경고: {health.error_message or health.error_type}"
+                )
+        except Exception as exc:
+            self._db.insert_log("task_runtime", "recovery_check_failed", str(exc)[:300])
 
     def _warmup_stt_async(self) -> None:
         """Whisper 모델 선로딩 — 첫 음성 인식 지연 완화."""
@@ -818,7 +848,7 @@ class MainWindow(QMainWindow):
             if from_voice:
                 self._chat.complete_user_message_typed(text)
             else:
-                self._chat.append_message_typed("나", text, speech_sync=False)
+                self._chat.append_message_instant("나", text)
         # 진행 중 턴은 memory에 넣지 않음 — 턴 완료 시 user+assistant 한꺼번에 커밋
         self._db.insert_log("user", text, None)
         push_activity_line(

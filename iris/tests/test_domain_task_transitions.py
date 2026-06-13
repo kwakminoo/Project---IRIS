@@ -34,6 +34,8 @@ def test_plan_revision_increments_version():
     plan = Plan(id="p1", task_id="t1", version=1)
     rev = plan.create_revision("repair failed")
     assert rev.version == 2
+    assert rev.id != plan.id
+    assert rev.previous_plan_id == plan.id
     assert rev.revision_reason == "repair failed"
 
 

@@ -23,6 +23,7 @@ from iris.domain.task.enums import (
 )
 from iris.domain.task.models import Plan, PlanStep, Task, TaskCheckpoint, TaskResult
 from iris.storage.database import Database
+from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 
 _ACTIVE_STATUSES = (
     TaskStatus.DRAFT.value,
@@ -47,6 +48,16 @@ def _json_loads(raw: str | None, default: Any) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return default
+
+
+_RECOVERABLE_STATUSES = (
+    TaskStatus.RUNNING.value,
+    TaskStatus.WAITING_APPROVAL.value,
+    TaskStatus.WAITING_USER.value,
+    TaskStatus.WAITING_RESOURCE.value,
+    TaskStatus.SUSPENDED.value,
+    TaskStatus.INTERRUPTED.value,
+)
 
 
 class SqliteTaskRepository:
@@ -120,6 +131,14 @@ class SqliteTaskRepository:
         )
         self._db._commit()
 
+    def get_recoverable(self) -> list[Task]:
+        placeholders = ",".join("?" * len(_RECOVERABLE_STATUSES))
+        rows = self._db._execute(
+            f"SELECT * FROM tasks WHERE status IN ({placeholders}) ORDER BY created_at DESC",
+            _RECOVERABLE_STATUSES,
+        ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
     def get_active(self) -> list[Task]:
         placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
         rows = self._db._execute(
@@ -157,10 +176,20 @@ class SqlitePlanRepository:
     def save_plan(self, plan: Plan) -> None:
         self._db._execute(
             """
-            INSERT INTO task_plans (id, task_id, version, revision_reason, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO task_plans (
+                id, task_id, version, revision_reason, previous_plan_id,
+                superseded_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (plan.id, plan.task_id, plan.version, plan.revision_reason, plan.created_at),
+            (
+                plan.id,
+                plan.task_id,
+                plan.version,
+                plan.revision_reason,
+                plan.previous_plan_id,
+                plan.superseded_at,
+                plan.created_at,
+            ),
         )
         self._db._commit()
 
@@ -175,6 +204,8 @@ class SqlitePlanRepository:
             task_id=row["task_id"],
             version=row["version"],
             revision_reason=row["revision_reason"],
+            previous_plan_id=row["previous_plan_id"] if "previous_plan_id" in row.keys() else None,
+            superseded_at=row["superseded_at"] if "superseded_at" in row.keys() else None,
             created_at=row["created_at"],
         )
 
@@ -193,10 +224,15 @@ class SqlitePlanRepository:
             task_id=row["task_id"],
             version=row["version"],
             revision_reason=row["revision_reason"],
+            previous_plan_id=row["previous_plan_id"] if "previous_plan_id" in row.keys() else None,
+            superseded_at=row["superseded_at"] if "superseded_at" in row.keys() else None,
             created_at=row["created_at"],
         )
 
     def save_step(self, step: PlanStep) -> None:
+        plan = self.get_plan(step.plan_id)
+        if plan is None:
+            raise ValueError(f"plan not found: {step.plan_id}")
         self._db._execute(
             """
             INSERT INTO task_steps (
@@ -226,6 +262,14 @@ class SqlitePlanRepository:
             (plan_id,),
         ).fetchall()
         return [_row_to_step(r) for r in rows]
+
+    def get_step(self, step_id: str) -> PlanStep | None:
+        row = self._db._execute(
+            "SELECT * FROM task_steps WHERE id = ?", (step_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_step(row)
 
     def update_step(self, step: PlanStep) -> None:
         self._db._execute(
@@ -598,14 +642,17 @@ class SqliteTaskResultRepository:
         )
 
 
-class SqliteRepositoryBundle:
-    """모든 Task Runtime Repository 묶음."""
+class SqliteRepositoryBundle(TaskRuntimeRepositories):
+    """모든 Task Runtime Repository SQLite 구현."""
 
     def __init__(self, db: Database) -> None:
-        self.tasks = SqliteTaskRepository(db)
-        self.plans = SqlitePlanRepository(db)
-        self.execution = SqliteExecutionRepository(db)
-        self.approvals = SqliteApprovalRepository(db)
-        self.verifications = SqliteVerificationRepository(db)
-        self.checkpoints = SqliteCheckpointRepository(db)
-        self.task_results = SqliteTaskResultRepository(db)
+        super().__init__(
+            tasks=SqliteTaskRepository(db),
+            plans=SqlitePlanRepository(db),
+            execution=SqliteExecutionRepository(db),
+            approvals=SqliteApprovalRepository(db),
+            verifications=SqliteVerificationRepository(db),
+            checkpoints=SqliteCheckpointRepository(db),
+            task_results=SqliteTaskResultRepository(db),
+        )
+        self.db = db

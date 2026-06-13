@@ -69,16 +69,26 @@ def test_approval_grant_requires_matching_hash(tmp_path: Path):
     db = Database(tmp_path / "appr.db")
     runtime = build_task_runtime(db, AutomationToolRegistry(db))
     task = runtime.tasks.create_task_from_cu_request("shell")
-    from iris.domain.execution.models import ActionProposal
+    step = PlanStep(
+        id=new_id(),
+        plan_id=new_id(),
+        index=0,
+        title="shell",
+        capability_required="computer.run_shell",
+    )
+    from iris.domain.task.models import Plan
 
+    runtime.repos.plans.save_plan(Plan(id=step.plan_id, task_id=task.id))
+    runtime.repos.plans.save_step(step)
     proposal = ActionProposal(
         id=new_id(),
         task_id=task.id,
-        plan_step_id=new_id(),
+        plan_step_id=step.id,
         capability_id="computer.run_shell",
         tool_name="run_shell",
         arguments={"command": "npm test"},
     )
+    runtime.repos.execution.save_proposal(proposal)
     req = runtime.approvals.create_request(task, proposal)
     ok = runtime.approvals.grant(req.id, tool_name="run_shell", arguments={"command": "npm test"})
     assert ok is not None
@@ -124,4 +134,4 @@ def test_tool_execution_records_attempt(tmp_path: Path):
     assert outcome.attempt is not None
     assert outcome.result is not None
     assert outcome.result.tool_success
-    assert outcome.step_status == StepStatus.SUCCEEDED
+    assert outcome.step_status == StepStatus.VERIFYING

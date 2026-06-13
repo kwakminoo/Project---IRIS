@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 from iris.domain.execution.enums import SuggestedNext, VerificationStatus
 from iris.domain.execution.models import VerificationResult
 from iris.domain.shared.id_generator import new_id
+from iris.domain.task.enums import StepStatus
 from iris.domain.task.events import VerificationCompleted
+from iris.domain.task.models import PlanStep, Task
 from iris.infrastructure.events.in_memory_dispatcher import InMemoryEventDispatcher
-from iris.infrastructure.persistence.sqlite_repositories import SqliteRepositoryBundle
 
 
 class VerificationService:
-    """검증 수행·저장."""
+    """검증 수행·저장·Step 최종 상태."""
 
     def __init__(
         self,
-        repos: SqliteRepositoryBundle,
+        repos: TaskRuntimeRepositories,
         events: InMemoryEventDispatcher,
+        *,
+        task_service: object | None = None,
     ) -> None:
         self._repos = repos
         self._events = events
+        self._tasks = task_service
+
+    def set_task_service(self, task_service: object) -> None:
+        self._tasks = task_service
 
     def record_checkpoint_result(
         self,
@@ -71,23 +77,45 @@ class VerificationService:
         observation: str,
         success: bool,
     ) -> VerificationResult:
-        """도구 실행 후 간단 검증 기록."""
-        status = VerificationStatus.SUCCESS if success else VerificationStatus.FAILED
+        """도구 실행 직후 pending 관측 — Step 완료 처리 금지."""
         vr = VerificationResult(
             id=new_id(),
             attempt_id=attempt_id,
-            expected_state={"tool": tool_name},
-            actual_state={"observation": observation[:500]},
-            status=status,
-            confidence=0.8 if success else 0.2,
+            expected_state={"tool": tool_name, "pending_verify": True},
+            actual_state={"observation": observation[:500], "tool_success": success},
+            status=VerificationStatus.UNKNOWN,
+            confidence=0.0,
             retryable=not success,
+            suggested_next=SuggestedNext.CONTINUE.value,
         )
         self._repos.verifications.save(vr)
         self._events.publish(
             VerificationCompleted(
                 task_id=task_id,
                 attempt_id=attempt_id,
-                status=status.value,
+                status=VerificationStatus.UNKNOWN.value,
             )
         )
         return vr
+
+    def finalize_step_from_verification(
+        self,
+        task: Task,
+        step: PlanStep,
+        vr: VerificationResult,
+    ) -> StepStatus:
+        """VerificationResult 기준으로만 Step 상태 확정."""
+        if self._tasks is None:
+            raise RuntimeError("task_service not configured")
+        ts = self._tasks
+        if vr.status == VerificationStatus.SUCCESS:
+            ts.mark_step_succeeded(task, step)
+            return StepStatus.SUCCEEDED
+        if vr.status == VerificationStatus.PARTIAL:
+            ts.mark_step_partially_succeeded(task, step)
+            return StepStatus.PARTIALLY_SUCCEEDED
+        if vr.status == VerificationStatus.FAILED:
+            reason = vr.failure_reason or "verification_failed"
+            ts.mark_step_failed(task, step, reason)
+            return StepStatus.FAILED
+        return StepStatus.VERIFYING

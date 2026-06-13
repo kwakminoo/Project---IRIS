@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from iris.application.approval_service import ApprovalService
+from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 from iris.application.task_service import TaskApplicationService
 from iris.application.verification_service import VerificationService
 from iris.domain.execution.enums import PolicyDecisionKind
@@ -27,7 +28,6 @@ from iris.domain.task.events import (
 )
 from iris.domain.task.models import PlanStep, Task
 from iris.infrastructure.events.in_memory_dispatcher import InMemoryEventDispatcher
-from iris.infrastructure.persistence.sqlite_repositories import SqliteRepositoryBundle
 
 
 @dataclass
@@ -43,6 +43,7 @@ class ExecutionOutcome:
     step_status: StepStatus
     blocked: bool = False
     message: str = ""
+    proposal_id: str | None = None
 
 
 class ExecutionCoordinator:
@@ -50,7 +51,7 @@ class ExecutionCoordinator:
 
     def __init__(
         self,
-        repos: SqliteRepositoryBundle,
+        repos: TaskRuntimeRepositories,
         events: InMemoryEventDispatcher,
         policy: SafetyPolicyPort,
         tools: AutomationToolPort,
@@ -69,6 +70,98 @@ class ExecutionCoordinator:
         self._verify = verification_service
         self._ctx_factory = tool_context_factory
 
+    def execute_proposal(
+        self,
+        proposal_id: str,
+        *,
+        approval_id: str | None = None,
+    ) -> ExecutionOutcome:
+        """DB Proposal 로드 후 공통 실행 (승인 재개 포함)."""
+        proposal = self._repos.execution.get_proposal(proposal_id)
+        if proposal is None:
+            return ExecutionOutcome(
+                attempt=None,
+                result=None,
+                verification=None,
+                policy_decision=None,
+                approval_required=False,
+                approval_id=None,
+                step_status=StepStatus.FAILED,
+                blocked=True,
+                message="proposal_not_found",
+            )
+        task = self._repos.tasks.get_by_id(proposal.task_id)
+        if task is None:
+            return ExecutionOutcome(
+                attempt=None,
+                result=None,
+                verification=None,
+                policy_decision=None,
+                approval_required=False,
+                approval_id=None,
+                step_status=StepStatus.FAILED,
+                blocked=True,
+                message="task_not_found",
+            )
+        step = self._repos.plans.get_step(proposal.plan_step_id)
+        if step is None:
+            return ExecutionOutcome(
+                attempt=None,
+                result=None,
+                verification=None,
+                policy_decision=None,
+                approval_required=False,
+                approval_id=None,
+                step_status=StepStatus.FAILED,
+                blocked=True,
+                message="step_not_found",
+            )
+        prior = self._repos.execution.get_attempts_for_proposal(proposal_id)
+        if any(a.status == AttemptStatus.SUCCEEDED for a in prior):
+            return ExecutionOutcome(
+                attempt=None,
+                result=None,
+                verification=None,
+                policy_decision=None,
+                approval_required=False,
+                approval_id=approval_id,
+                step_status=step.status,
+                blocked=True,
+                message="already_executed",
+                proposal_id=proposal_id,
+            )
+        approved = False
+        if approval_id:
+            req = self._approval.validate_for_execution(
+                approval_id,
+                tool_name=proposal.tool_name,
+                arguments=proposal.arguments,
+                require_granted=True,
+            )
+            if req is None:
+                return ExecutionOutcome(
+                    attempt=None,
+                    result=None,
+                    verification=None,
+                    policy_decision=None,
+                    approval_required=False,
+                    approval_id=approval_id,
+                    step_status=StepStatus.WAITING_APPROVAL,
+                    blocked=True,
+                    message="approval_invalid",
+                    proposal_id=proposal_id,
+                )
+            approved = True
+        return self.execute_step(
+            task,
+            step,
+            proposal,
+            approved=approved,
+            run_tool=True,
+            approval_id=approval_id,
+            skip_proposal_save=True,
+        )
+
     def execute_step(
         self,
         task: Task,
@@ -77,16 +170,19 @@ class ExecutionCoordinator:
         *,
         approved: bool = False,
         run_tool: bool = True,
+        approval_id: str | None = None,
+        skip_proposal_save: bool = False,
     ) -> ExecutionOutcome:
         """ActionProposal 기록 → 정책 → (선택) 실행 또는 승인 대기."""
-        self._repos.execution.save_proposal(proposal)
-        self._events.publish(
-            ActionProposed(
-                task_id=task.id,
-                proposal_id=proposal.id,
-                tool_name=proposal.tool_name,
+        if not skip_proposal_save:
+            self._repos.execution.save_proposal(proposal)
+            self._events.publish(
+                ActionProposed(
+                    task_id=task.id,
+                    proposal_id=proposal.id,
+                    tool_name=proposal.tool_name,
+                )
             )
-        )
 
         tool_ctx = None
         if self._ctx_factory is not None:
@@ -106,6 +202,7 @@ class ExecutionCoordinator:
                 step_status=StepStatus.FAILED,
                 blocked=True,
                 message=decision.reason,
+                proposal_id=proposal.id,
             )
 
         needs_approval = (
@@ -126,6 +223,7 @@ class ExecutionCoordinator:
                 approval_id=req.id,
                 step_status=StepStatus.WAITING_APPROVAL,
                 message="approval_required",
+                proposal_id=proposal.id,
             )
 
         if not run_tool:
@@ -135,9 +233,10 @@ class ExecutionCoordinator:
                 verification=None,
                 policy_decision=decision,
                 approval_required=False,
-                approval_id=None,
+                approval_id=approval_id,
                 step_status=StepStatus.RUNNING,
                 message="policy_allowed",
+                proposal_id=proposal.id,
             )
 
         running = self._tasks.mark_step_started(task, step)
@@ -183,6 +282,28 @@ class ExecutionCoordinator:
             )
         )
 
+        if not success:
+            self._tasks.mark_step_failed(task, running, msg)
+            verification = self._verify.record_tool_observation(
+                task_id=task.id,
+                attempt_id=attempt.id,
+                tool_name=proposal.tool_name,
+                observation=f"fail: {msg}",
+                success=False,
+            )
+            return ExecutionOutcome(
+                attempt=attempt,
+                result=action_result,
+                verification=verification,
+                policy_decision=decision,
+                approval_required=False,
+                approval_id=approval_id,
+                step_status=StepStatus.FAILED,
+                message=msg,
+                proposal_id=proposal.id,
+            )
+
+        verifying = self._tasks.mark_step_verifying(task, running)
         obs = msg if success else f"fail: {msg}"
         verification = self._verify.record_tool_observation(
             task_id=task.id,
@@ -192,20 +313,14 @@ class ExecutionCoordinator:
             success=success,
         )
 
-        if success:
-            self._tasks.mark_step_succeeded(task, running)
-            step_status = StepStatus.SUCCEEDED
-        else:
-            self._tasks.mark_step_failed(task, running, msg)
-            step_status = StepStatus.FAILED
-
         return ExecutionOutcome(
             attempt=attempt,
             result=action_result,
             verification=verification,
             policy_decision=decision,
             approval_required=False,
-            approval_id=None,
-            step_status=step_status,
+            approval_id=approval_id,
+            step_status=StepStatus.VERIFYING,
             message=msg,
+            proposal_id=proposal.id,
         )

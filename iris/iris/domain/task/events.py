@@ -106,6 +106,17 @@ class TaskFailed:
 
 
 @dataclass(frozen=True)
+class TaskSuspended:
+    task_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class TaskResumed:
+    task_id: str
+
+
+@dataclass(frozen=True)
 class TaskStatusChanged:
     task_id: str
     old_status: TaskStatus
@@ -135,6 +146,8 @@ DomainEvent = Union[
     TaskCheckpointCreated,
     TaskCompleted,
     TaskFailed,
+    TaskSuspended,
+    TaskResumed,
     TaskStatusChanged,
     PlanStepStatusChanged,
 ]

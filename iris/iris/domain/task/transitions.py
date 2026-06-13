@@ -21,6 +21,7 @@ _TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.WAITING_USER,
             TaskStatus.WAITING_RESOURCE,
             TaskStatus.SUSPENDED,
+            TaskStatus.INTERRUPTED,
             TaskStatus.PARTIALLY_COMPLETED,
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
@@ -37,7 +38,10 @@ _TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}
     ),
     TaskStatus.SUSPENDED: frozenset(
-        {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.FAILED}
+        {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.PARTIALLY_COMPLETED}
+    ),
+    TaskStatus.INTERRUPTED: frozenset(
+        {TaskStatus.RUNNING, TaskStatus.SUSPENDED, TaskStatus.CANCELLED, TaskStatus.FAILED}
     ),
     TaskStatus.PARTIALLY_COMPLETED: frozenset(
         {TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.CANCELLED}

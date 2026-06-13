@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from iris.application.approval_hash import hash_arguments
+from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 from iris.domain.execution.enums import ApprovalStatus
 from iris.domain.execution.models import ActionProposal, ApprovalRequest
 from iris.domain.shared.id_generator import new_id
@@ -11,7 +14,18 @@ from iris.domain.task.enums import TaskStatus
 from iris.domain.task.events import ApprovalGranted, ApprovalRequested, TaskStatusChanged
 from iris.domain.task.models import Task
 from iris.infrastructure.events.in_memory_dispatcher import InMemoryEventDispatcher
-from iris.infrastructure.persistence.sqlite_repositories import SqliteRepositoryBundle
+
+
+def _is_expired(req: ApprovalRequest) -> bool:
+    if not req.expires_at:
+        return False
+    try:
+        exp = datetime.fromisoformat(req.expires_at.replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= exp
+    except ValueError:
+        return False
 
 
 class ApprovalService:
@@ -19,7 +33,7 @@ class ApprovalService:
 
     def __init__(
         self,
-        repos: SqliteRepositoryBundle,
+        repos: TaskRuntimeRepositories,
         events: InMemoryEventDispatcher,
     ) -> None:
         self._repos = repos
@@ -31,6 +45,7 @@ class ApprovalService:
         proposal: ActionProposal,
         *,
         risk_level: str = "critical",
+        expires_at: str | None = None,
     ) -> ApprovalRequest:
         """ActionProposal에 대한 승인 요청 생성."""
         req = ApprovalRequest(
@@ -42,6 +57,7 @@ class ApprovalService:
             arguments_hash=hash_arguments(proposal.arguments),
             target=proposal.target,
             risk_level=risk_level,
+            expires_at=expires_at,
         )
         self._repos.approvals.save(req)
         self._events.publish(
@@ -56,11 +72,14 @@ class ApprovalService:
         tool_name: str,
         arguments: dict,
     ) -> ApprovalRequest | None:
-        """승인 — 도구+인수 해시 일치 필수."""
+        """승인 — 도구+인수 해시·만료 일치 필수."""
         req = self._repos.approvals.get_by_id(approval_id)
         if req is None:
             return None
         if req.approval_status != ApprovalStatus.PENDING:
+            return None
+        if _is_expired(req):
+            self._repos.approvals.update_status(approval_id, ApprovalStatus.EXPIRED)
             return None
         if req.tool_name != tool_name:
             return None
@@ -77,8 +96,43 @@ class ApprovalService:
         )
         return req
 
-    def deny(self, approval_id: str) -> None:
+    def validate_for_execution(
+        self,
+        approval_id: str,
+        *,
+        tool_name: str,
+        arguments: dict,
+        require_granted: bool = True,
+    ) -> ApprovalRequest | None:
+        """실행 직전 승인 바인딩 검증."""
+        req = self._repos.approvals.get_by_id(approval_id)
+        if req is None:
+            return None
+        if require_granted and req.approval_status != ApprovalStatus.GRANTED:
+            if req.approval_status == ApprovalStatus.PENDING:
+                return None
+            return None
+        if not require_granted and req.approval_status not in (
+            ApprovalStatus.PENDING,
+            ApprovalStatus.GRANTED,
+        ):
+            return None
+        if _is_expired(req):
+            self._repos.approvals.update_status(approval_id, ApprovalStatus.EXPIRED)
+            return None
+        if req.tool_name != tool_name:
+            return None
+        if req.arguments_hash != hash_arguments(arguments):
+            return None
+        return req
+
+    def deny(self, approval_id: str) -> ApprovalRequest | None:
+        req = self._repos.approvals.get_by_id(approval_id)
+        if req is None:
+            return None
         self._repos.approvals.update_status(approval_id, ApprovalStatus.DENIED)
+        req.approval_status = ApprovalStatus.DENIED
+        return req
 
     def get_pending_for_task(self, task_id: str) -> ApprovalRequest | None:
         return self._repos.approvals.get_pending_for_task(task_id)

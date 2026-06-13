@@ -145,7 +145,19 @@ class ComputerUseAgent:
         self._input_notify_delay = max(0.5, min(notify_delay, 8.0))
         db = self._assistant._db
 
-        # 스킬 Flow — PAV·quick launch·recipe_hint 우회
+        # 모든 실행 경로 — Task Runtime 세션 (재개 시 attach)
+        if self._task_runtime is not None:
+            resume_tid = str(
+                slot_map.get("_resume_task_id") or slot_map.get("_task_id") or ""
+            )
+            if resume_tid:
+                self._task_runtime.attach_task(resume_tid)
+                self._assistant.ctx.active_task_id = resume_tid
+            elif not self._task_runtime.task_id:
+                tid = self._task_runtime.begin_cu_session(goal, slot_map)
+                self._assistant.ctx.active_task_id = tid
+
+        # 스킬 Flow — PAV·quick launch·recipe_hint 우회 (Task는 이미 생성됨)
         from iris.assistant.action_skills import resolve_skill_id, run_skill, should_dispatch_skill
 
         if should_dispatch_skill(slot_map):
@@ -163,6 +175,8 @@ class ComputerUseAgent:
             self._assistant.memory.save_task_session(
                 goal[:200], tools_run=["launch_app"], observations=[quick_msg[:200]]
             )
+            if self._task_runtime is not None:
+                self._task_runtime.on_cu_finished(success=True, message=quick_msg[:500])
             return quick_msg
 
         ctx = ComputerUseContext(goal=goal, slots=slot_map)
@@ -173,9 +187,16 @@ class ComputerUseAgent:
         db.insert_log("computer_use", "start", goal[:500])
         self._assistant.memory.save_task_session(goal[:200])
 
-        if self._task_runtime is not None:
-            tid = self._task_runtime.on_cu_started(goal, slot_map)
-            self._assistant.ctx.active_task_id = tid
+        if self._task_runtime is not None and not self._task_runtime.task_id:
+            resume_tid = str(
+                slot_map.get("_resume_task_id") or slot_map.get("_task_id") or ""
+            )
+            if resume_tid:
+                self._task_runtime.attach_task(resume_tid)
+                self._assistant.ctx.active_task_id = resume_tid
+            else:
+                tid = self._task_runtime.begin_cu_session(goal, slot_map)
+                self._assistant.ctx.active_task_id = tid
 
         # 스텝 0: Perception
         push_activity_line("ComputerUse: perceive phase (loop_start).")
@@ -229,8 +250,46 @@ class ComputerUseAgent:
         if not tool_name:
             return "승인된 도구 정보가 없습니다."
 
+        task_id = str(pending.slots.get("_task_id") or self._assistant.ctx.active_task_id or "")
+        proposal_id = str(pending.slots.get("_task_proposal_id") or "")
+        approval_id = str(pending.slots.get("_task_approval_id") or "")
+
         if self._task_runtime is not None:
-            self._task_runtime.on_approval_granted(tool_name, params)
+            if task_id:
+                self._task_runtime.attach_task(task_id)
+            exec_result = None
+            if proposal_id and approval_id:
+                self._task_runtime.on_approval_granted(tool_name, params)
+                exec_result = self._task_runtime.execute_approved_proposal(
+                    proposal_id=proposal_id,
+                    approval_id=approval_id,
+                    tool_name=tool_name,
+                    params=params,
+                    step_index=pending.pending_plan_index if pending.pending_plan_index >= 0 else 0,
+                )
+            else:
+                self._task_runtime.on_approval_granted(tool_name, params)
+                exec_result = self._task_runtime.execute_tool_step(
+                    tool_name=tool_name,
+                    params=params,
+                    step_index=pending.pending_plan_index if pending.pending_plan_index >= 0 else 0,
+                    reason=pending.pending_tool_preview or tool_name,
+                    approved=True,
+                    finalize_if_no_checkpoint=False,
+                )
+            if exec_result and exec_result.blocked:
+                return exec_result.message or "승인 실행이 차단되었습니다."
+            result = AutomationToolResult(
+                exec_result.tool_success if exec_result else True,
+                exec_result.message if exec_result else "ok",
+            )
+        else:
+            result = self._run_tool_direct(
+                tool_name,
+                params,
+                summary=pending.pending_tool_preview or tool_name,
+                approved=True,
+            )
 
         push_activity_line(
             f"ComputerUse: resume after CRITICAL approval tool={tool_name!r}."
@@ -245,20 +304,12 @@ class ComputerUseAgent:
             tools_run=[tool_name],
             approvals=[f"approved:{tool_name}"],
         )
-
         step = ComputerUseStep(
             tool_name,
             params,
             pending.pending_tool_preview or tool_name,
         )
         ctx.steps_taken.append(step)
-        summary = step.reason or tool_name
-        result = self._run_tool_direct(
-            tool_name,
-            params,
-            summary=summary,
-            approved=True,
-        )
         obs = self._format_tool_observation(tool_name, result)
         ctx.observations.append(obs)
 
@@ -377,9 +428,22 @@ class ComputerUseAgent:
         if self._task_runtime is not None:
             if exit_tag == "approval":
                 pass  # waiting_approval 상태 유지
+            elif exit_tag == "ask_user":
+                self._task_runtime.on_cu_waiting_user(
+                    (ctx.final_message or exit_tag)[:500]
+                )
+            elif exit_tag == "max_steps":
+                self._task_runtime.on_cu_suspended(
+                    (ctx.final_message or exit_tag)[:500]
+                )
             elif exit_tag == "success":
                 self._task_runtime.on_cu_finished(
                     success=True,
+                    message=(ctx.final_message or exit_tag)[:500],
+                )
+            elif exit_tag in ("repair_exhausted",):
+                self._task_runtime.on_cu_finished(
+                    success=False,
                     message=(ctx.final_message or exit_tag)[:500],
                 )
             else:
@@ -1416,12 +1480,27 @@ class ComputerUseAgent:
         disp = str(slots.get("display_name") or "").strip() or display_name_for_key(
             app_key, self._assistant._db
         )
-        result = self._run_tool_direct(
-            "launch_app",
-            {"app_key": app_key, "display_name": disp},
-            summary=f"앱 실행: {disp}",
-            approved=True,
-        )
+        if self._task_runtime is not None:
+            tr = self._task_runtime.execute_tool_step(
+                tool_name="launch_app",
+                params={"app_key": app_key, "display_name": disp},
+                step_index=0,
+                reason=f"앱 실행: {disp}",
+                approved=True,
+                finalize_if_no_checkpoint=True,
+            )
+            if tr.approval_required:
+                return f"approval_required: {tr.message}"
+            if tr.blocked:
+                return None
+            result = AutomationToolResult(tr.tool_success, tr.message or "ok")
+        else:
+            result = self._run_tool_direct(
+                "launch_app",
+                {"app_key": app_key, "display_name": disp},
+                summary=f"앱 실행: {disp}",
+                approved=True,
+            )
         if result.success:
             return format_pending_tool_user_message("launch_app", result, disp)
         return None
@@ -1525,6 +1604,12 @@ class ComputerUseAgent:
                 )
                 if aid:
                     pending.slots["_task_approval_id"] = aid
+                if self._task_runtime.task_id:
+                    pending.slots["_task_id"] = self._task_runtime.task_id
+                if hasattr(self._task_runtime, "_last_proposal_id"):
+                    pid = getattr(self._task_runtime, "_last_proposal_id", None)
+                    if pid:
+                        pending.slots["_task_proposal_id"] = pid
             return f"approval_required: {user_msg}"
 
         result = self._run_tool_direct(

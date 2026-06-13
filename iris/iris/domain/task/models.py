@@ -72,15 +72,20 @@ class Plan:
     task_id: str
     version: int = 1
     revision_reason: str | None = None
+    previous_plan_id: str | None = None
+    superseded_at: str | None = None
     created_at: str = field(default_factory=utc_now_iso)
 
     def create_revision(self, reason: str) -> "Plan":
-        """실패·환경 변화 시 새 버전 Plan."""
-        return replace(
-            self,
-            id=self.id,  # 동일 plan_id 유지, version만 증가
+        """실패·환경 변화 시 새 Plan ID·버전."""
+        from iris.domain.shared.id_generator import new_id
+
+        return Plan(
+            id=new_id(),
+            task_id=self.task_id,
             version=self.version + 1,
             revision_reason=reason,
+            previous_plan_id=self.id,
             created_at=utc_now_iso(),
         )
 
@@ -103,14 +108,26 @@ class PlanStep:
     def mark_running(self) -> "PlanStep":
         return replace(self, status=StepStatus.RUNNING)
 
+    def mark_verifying(self) -> "PlanStep":
+        return replace(self, status=StepStatus.VERIFYING)
+
     def mark_waiting_approval(self) -> "PlanStep":
         return replace(self, status=StepStatus.WAITING_APPROVAL)
+
+    def mark_waiting_user(self) -> "PlanStep":
+        return replace(self, status=StepStatus.WAITING_USER)
 
     def mark_succeeded(self) -> "PlanStep":
         return replace(self, status=StepStatus.SUCCEEDED)
 
+    def mark_partially_succeeded(self) -> "PlanStep":
+        return replace(self, status=StepStatus.PARTIALLY_SUCCEEDED)
+
     def mark_failed(self) -> "PlanStep":
         return replace(self, status=StepStatus.FAILED)
+
+    def mark_cancelled(self) -> "PlanStep":
+        return replace(self, status=StepStatus.CANCELLED)
 
 
 @dataclass

@@ -164,11 +164,25 @@ def _migration_004_events_task_link(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE events ADD COLUMN related_action_attempt_id TEXT")
 
 
+def _migration_005_plan_integrity(conn: sqlite3.Connection) -> None:
+    """Plan revision·FK 무결성 강화."""
+    plan_cols = {row[1] for row in conn.execute("PRAGMA table_info(task_plans)").fetchall()}
+    if "previous_plan_id" not in plan_cols:
+        conn.execute("ALTER TABLE task_plans ADD COLUMN previous_plan_id TEXT")
+    if "superseded_at" not in plan_cols:
+        conn.execute("ALTER TABLE task_plans ADD COLUMN superseded_at TEXT")
+    # SQLite는 ALTER TABLE ADD CONSTRAINT FK 미지원 — 인덱스·앱 레벨 검증 병행
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_plans_previous ON task_plans(previous_plan_id)"
+    )
+
+
 MIGRATIONS: list[tuple[str, MigrationFn]] = [
     ("001_create_task_runtime", _migration_001_create_task_runtime),
     ("002_create_execution_records", _migration_002_create_execution_records),
     ("003_create_approval_records", _migration_003_create_approval_records),
     ("004_events_task_link", _migration_004_events_task_link),
+    ("005_plan_integrity", _migration_005_plan_integrity),
 ]
 
 

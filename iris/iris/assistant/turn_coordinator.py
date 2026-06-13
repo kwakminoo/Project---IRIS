@@ -424,6 +424,13 @@ class TurnCoordinator:
 
         if cls.decision is FollowupDecision.REJECT:
             push_activity_line("CU follow-up: user rejected pending action.")
+            task_id = self._assistant.ctx.active_task_id
+            if task_id:
+                adapter = self._assistant._ensure_task_runtime()
+                if adapter is not None and hasattr(self._assistant, "_task_runtime_bundle"):
+                    bundle = getattr(self._assistant, "_task_runtime_bundle", None)
+                    if bundle is not None:
+                        bundle.recovery.abandon_task(task_id)
             self._assistant.ctx.clear_pending_cu()
             return TurnResult(
                 turn_id=turn_id,
@@ -506,8 +513,18 @@ class TurnCoordinator:
 
         goal = pending.goal
         slots = dict(pending.slots)
+        task_id = self._assistant.ctx.active_task_id or slots.get("_task_id")
         self._assistant.ctx.clear_pending_cu()
         push_activity_line("CU follow-up: approved — resuming PAV loop.")
+        if task_id:
+            adapter = self._assistant._ensure_task_runtime()
+            if adapter is not None:
+                bundle = getattr(self._assistant, "_task_runtime_bundle", None)
+                if bundle is not None:
+                    existing = bundle.tasks.get_task(str(task_id))
+                    if existing is not None:
+                        bundle.tasks.resume_waiting_user_task(existing)
+                slots["_resume_task_id"] = str(task_id)
         reply = self._assistant.run_computer_use_loop(
             user_text,
             goal=goal,
@@ -806,11 +823,14 @@ def _finalize_cu_reply(
     question = extract_user_question(reply)
     if question:
         if dialogue_ctx is not None:
+            slot_copy = dict(slots)
+            if dialogue_ctx.active_task_id:
+                slot_copy["_task_id"] = dialogue_ctx.active_task_id
             dialogue_ctx.pending_cu = PendingComputerUseGoal(
                 goal=goal,
                 risk_hint=risk_hint,
                 prompt=question,
-                slots=dict(slots),
+                slots=slot_copy,
             )
         logs.append("pending_cu_ask_user")
         return f"Iris: {question}", False, logs

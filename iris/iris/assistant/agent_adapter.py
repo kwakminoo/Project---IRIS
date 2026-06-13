@@ -94,6 +94,13 @@ class IrisAssistant:
         """Task Runtime 서비스·Adapter lazy 초기화."""
         if self._cu_task_adapter is not None:
             return self._cu_task_adapter
+        import logging
+        import os
+
+        from iris.application.task_runtime_health import get_task_runtime_health
+
+        logger = logging.getLogger("iris.task_runtime")
+        health = get_task_runtime_health()
         try:
             from iris.application.runtime_factory import build_task_runtime
             from iris.infrastructure.adapters.cu_task_adapter import CuTaskAdapter
@@ -106,8 +113,23 @@ class IrisAssistant:
 
             self._task_runtime_bundle.events.subscribe(TaskStatusEventBridge())
             return self._cu_task_adapter
-        except Exception:
+        except Exception as exc:
+            logger.exception("Task Runtime initialization failed")
+            health.mark_failed(exc)
+            self._db.insert_log(
+                "task_runtime",
+                "init_failed",
+                f"{type(exc).__name__}: {exc}"[:500],
+            )
+            if os.environ.get("IRIS_STRICT_TASK_RUNTIME") == "1":
+                raise
             return None
+
+    @property
+    def task_runtime_health(self):
+        from iris.application.task_runtime_health import get_task_runtime_health
+
+        return get_task_runtime_health()
 
     def _create_computer_use_agent(self) -> object:
         from iris.assistant.computer_use_agent import ComputerUseAgent

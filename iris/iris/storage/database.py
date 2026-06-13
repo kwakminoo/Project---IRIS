@@ -35,6 +35,7 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=15000")
+            self._conn.execute("PRAGMA foreign_keys=ON")
             self._migrate_legacy_actions()
             self._init_schema()
             self._run_task_runtime_migrations()

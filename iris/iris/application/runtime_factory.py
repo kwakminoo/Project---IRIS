@@ -8,6 +8,7 @@ from typing import Any, Callable
 from iris.application.approval_service import ApprovalService
 from iris.application.execution_coordinator import ExecutionCoordinator
 from iris.application.recovery_service import RecoveryService
+from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 from iris.application.task_service import TaskApplicationService
 from iris.application.verification_service import VerificationService
 from iris.automation.tool_registry import AutomationToolRegistry
@@ -23,7 +24,7 @@ from iris.storage.database import Database
 class TaskRuntimeServices:
     """Task Runtime Application 서비스 묶음."""
 
-    repos: SqliteRepositoryBundle
+    repos: TaskRuntimeRepositories
     events: InMemoryEventDispatcher
     tasks: TaskApplicationService
     approvals: ApprovalService
@@ -56,8 +57,8 @@ def build_task_runtime(
 
     tasks = TaskApplicationService(repos, events)
     approvals = ApprovalService(repos, events)
-    verification = VerificationService(repos, events)
-    recovery = RecoveryService(repos, events)
+    verification = VerificationService(repos, events, task_service=tasks)
+    recovery = RecoveryService(repos, events, task_service=tasks)
     execution = ExecutionCoordinator(
         repos,
         events,
@@ -68,6 +69,8 @@ def build_task_runtime(
         verification,
         tool_context_factory=factory,
     )
+    verification.set_task_service(tasks)
+    recovery.set_task_service(tasks)
     return TaskRuntimeServices(
         repos=repos,
         events=events,
