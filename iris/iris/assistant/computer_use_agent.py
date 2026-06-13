@@ -123,6 +123,41 @@ class ComputerUseAgent:
         self._tier4_backend_override = tier4_backend
         # Task Runtime Adapter (None이면 기존 동작만)
         self._task_runtime = task_runtime
+        self._runtime_step_seq = 0
+
+    def run_tool_recorded(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        step_index: int | None = None,
+        summary: str,
+        approved: bool = True,
+        finalize_if_no_checkpoint: bool = False,
+    ) -> AutomationToolResult:
+        """Task Runtime 활성 시 Proposal→Attempt→Result 경로, 아니면 direct."""
+        idx = step_index if step_index is not None else self._runtime_step_seq
+        self._runtime_step_seq = max(self._runtime_step_seq, idx + 1)
+        if self._task_runtime is not None:
+            tr = self._task_runtime.execute_tool_step(
+                tool_name=tool_name,
+                params=dict(params),
+                step_index=idx,
+                reason=summary[:200],
+                approved=approved,
+                finalize_if_no_checkpoint=finalize_if_no_checkpoint,
+            )
+            if tr.approval_required:
+                return AutomationToolResult(False, tr.message or "approval_required")
+            if tr.blocked:
+                return AutomationToolResult(False, tr.message or "blocked")
+            return AutomationToolResult(tr.tool_success, tr.message or "ok")
+        return self._run_tool_direct(
+            tool_name,
+            params,
+            summary=summary,
+            approved=approved,
+        )
 
     def run(
         self,
@@ -137,7 +172,9 @@ class ComputerUseAgent:
             return "요청이 비어 있습니다."
 
         slot_map = dict(slots) if slots else {}
+        self._runtime_step_seq = 0
         self._on_user_notify = on_user_notify
+        self._runtime_step_seq = 0
         notify_delay = float(
             getattr(self._assistant._settings, "computer_use_input_notify_delay_seconds", 2.0)
             or 2.0
@@ -163,7 +200,8 @@ class ComputerUseAgent:
         if should_dispatch_skill(slot_map):
             skill_id = resolve_skill_id(slot_map) or ""
             push_activity_line(f"ComputerUse: skill={skill_id} fixed flow.")
-            return run_skill(skill_id, self, goal, slot_map)
+            skill_msg = run_skill(skill_id, self, goal, slot_map)
+            return self._finish_fast_path_session(skill_msg, goal, slot_map)
 
         # 사전 라우팅: 단순 앱 실행은 launch_app 1스텝 (복합·멀티스텝·스킬은 PAV)
         quick_msg = None
@@ -175,9 +213,7 @@ class ComputerUseAgent:
             self._assistant.memory.save_task_session(
                 goal[:200], tools_run=["launch_app"], observations=[quick_msg[:200]]
             )
-            if self._task_runtime is not None:
-                self._task_runtime.on_cu_finished(success=True, message=quick_msg[:500])
-            return quick_msg
+            return self._finish_fast_path_session(quick_msg, goal, slot_map)
 
         ctx = ComputerUseContext(goal=goal, slots=slot_map)
         ctx.observations.append(_format_goal_slots_hint(goal, slot_map))
@@ -220,6 +256,26 @@ class ComputerUseAgent:
             )
 
         return self._finish_cu_session(ctx, exit_tag=exit_tag)
+
+    def _finish_fast_path_session(
+        self,
+        message: str,
+        goal: str,
+        slots: dict[str, Any] | None = None,
+    ) -> str:
+        """Skill·Quick Launch 등 PAV 외 경로 — Task 종료/대기 상태 반영."""
+        if self._task_runtime is None:
+            return message
+        msg = message.strip()
+        if msg.startswith(USER_QUESTION_PREFIX):
+            self._task_runtime.on_cu_waiting_user(msg[len(USER_QUESTION_PREFIX) :].strip()[:500])
+        elif msg.startswith("approval_required:"):
+            pass  # WAITING_APPROVAL — on_approval_pending에서 이미 처리
+        elif msg.startswith("알 수 없는 스킬"):
+            self._task_runtime.on_cu_finished(success=False, message=msg[:500])
+        else:
+            self._task_runtime.on_cu_finished(success=True, message=msg[:500])
+        return message
 
     def resume_after_critical_approval(
         self,
@@ -1514,9 +1570,10 @@ class ComputerUseAgent:
         approved: bool = True,
     ) -> AutomationToolResult:
         """승인된 CRITICAL 도구 1스텝만 실행 (CU 루프 재시작 없음)."""
-        return self._run_tool_direct(
+        return self.run_tool_recorded(
             tool_name,
             dict(params),
+            step_index=0,
             summary=summary or tool_name,
             approved=approved,
         )
@@ -1557,19 +1614,18 @@ class ComputerUseAgent:
             cu_ctx.input_conflict_announced.add(step.tool)
 
         tr = None
-        if self._task_runtime is not None:
-            tr = self._task_runtime.on_tool_execute(
-                tool_name=step.tool,
-                params=dict(step.params),
-                step_index=step_idx,
-                reason=summary,
-                approved=False,
-                run_tool=False,
-            )
-            if tr.blocked:
-                return f"tool_fail: {tr.message}"
-
         if self._registry.needs_approval(step.tool, tool_ctx):
+            if self._task_runtime is not None:
+                tr = self._task_runtime.on_tool_execute(
+                    tool_name=step.tool,
+                    params=dict(step.params),
+                    step_index=step_idx,
+                    reason=summary,
+                    approved=False,
+                    run_tool=False,
+                )
+                if tr.blocked:
+                    return f"tool_fail: {tr.message}"
             preview = self._registry.preview(step.tool, tool_ctx)
             user_msg = format_user_approval_message(step.tool, preview, step.params)
             pending = PendingComputerUseGoal(
@@ -1612,21 +1668,20 @@ class ComputerUseAgent:
                         pending.slots["_task_proposal_id"] = pid
             return f"approval_required: {user_msg}"
 
-        result = self._run_tool_direct(
-            step.tool,
-            step.params,
-            summary=summary,
-            approved=True,
-        )
         if self._task_runtime is not None:
-            self._task_runtime.record_tool_result(
-                tool_name=step.tool,
-                params=dict(step.params),
+            result = self.run_tool_recorded(
+                step.tool,
+                step.params,
                 step_index=step_idx,
-                reason=summary,
-                success=result.success,
-                message=result.message,
-                detail=result.detail,
+                summary=summary,
+                approved=True,
+            )
+        else:
+            result = self._run_tool_direct(
+                step.tool,
+                step.params,
+                summary=summary,
+                approved=True,
             )
         if step.tool == "focus_window" and result.success:
             sub = str(step.params.get("title_sub") or "").strip()

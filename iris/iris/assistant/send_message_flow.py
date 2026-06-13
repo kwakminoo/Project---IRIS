@@ -348,7 +348,7 @@ class SendMessageFlow:
         *,
         summary: str,
     ) -> AutomationToolResult:
-        return self._agent._run_tool_direct(
+        return self._agent.run_tool_recorded(
             tool_name,
             params,
             summary=summary[:200],

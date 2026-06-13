@@ -206,6 +206,18 @@ class CuTaskAdapter:
             estimated_risk="critical" if tool_name == "run_shell" else "low",
         )
 
+    def _verify_launch_target(self, params: dict[str, Any]) -> bool:
+        """launch_app 후 대상 창 존재 여부 확인."""
+        display = str(params.get("display_name") or "").strip()
+        app_key = str(params.get("app_key") or "").strip()
+        title_hint = display or app_key
+        if not title_hint:
+            return False
+        from iris.automation import window_controller
+
+        wins = window_controller.find_windows_by_title_substring(title_hint)
+        return bool(wins)
+
     def execute_tool_step(
         self,
         *,
@@ -247,14 +259,19 @@ class CuTaskAdapter:
             and outcome.verification
             and outcome.step_status == StepStatus.VERIFYING
         ):
-            from iris.domain.execution.enums import VerificationStatus
-
+            achieved = True
+            gap = ""
+            if tool_name == "launch_app":
+                achieved = self._verify_launch_target(params)
+                if not achieved:
+                    gap = "target_window_not_found"
             vr = self._runtime.verification.record_checkpoint_result(
                 task_id=self._task.id,
                 attempt_id=outcome.attempt.id if outcome.attempt else "",
-                achieved=True,
+                achieved=achieved,
                 checkpoint_id="lightweight_tool_ok",
-                confidence=0.7,
+                gap=gap,
+                confidence=0.7 if achieved else 0.0,
             )
             self._runtime.verification.finalize_step_from_verification(
                 self._task, step, vr

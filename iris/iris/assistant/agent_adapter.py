@@ -115,14 +115,18 @@ class IrisAssistant:
             return self._cu_task_adapter
         except Exception as exc:
             logger.exception("Task Runtime initialization failed")
-            health.mark_failed(exc)
             self._db.insert_log(
                 "task_runtime",
                 "init_failed",
                 f"{type(exc).__name__}: {exc}"[:500],
             )
             if os.environ.get("IRIS_STRICT_TASK_RUNTIME") == "1":
+                health.mark_failed(exc)
                 raise
+            health.mark_degraded(
+                f"Task Runtime unavailable: {type(exc).__name__}: {exc}"
+            )
+            health.error_type = type(exc).__name__
             return None
 
     @property
@@ -185,19 +189,11 @@ class IrisAssistant:
         summary: str = "",
     ) -> str:
         """승인된 CRITICAL 도구 1스텝만 실행 (레거시·테스트용)."""
-        from iris.assistant.computer_use_agent import (
-            ComputerUseAgent,
-            format_pending_tool_user_message,
-        )
+        from iris.assistant.computer_use_agent import format_pending_tool_user_message
         from iris.config.app_index import display_name_for_key
 
         if not hasattr(self, "_computer_use_agent"):
-            self._computer_use_agent = ComputerUseAgent(
-                self,
-                self._gemma,
-                self._executor.tool_registry,
-                max_steps=20,
-            )
+            self._computer_use_agent = self._create_computer_use_agent()
         disp = ""
         if tool_name == "launch_app":
             key = str(params.get("app_key") or "")

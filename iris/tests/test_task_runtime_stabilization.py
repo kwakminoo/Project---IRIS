@@ -490,7 +490,7 @@ def test_task_runtime_init_failure_is_logged(tmp_path: Path, caplog, monkeypatch
     )
     result = assistant._ensure_task_runtime()
     assert result is None
-    assert get_task_runtime_health().status == "failed"
+    assert get_task_runtime_health().status == "degraded"
 
 
 def test_task_runtime_init_failure_sets_health_failed(tmp_path: Path):
