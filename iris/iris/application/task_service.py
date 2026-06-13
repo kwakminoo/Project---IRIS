@@ -6,6 +6,7 @@ from typing import Any
 
 from iris.application.task_runtime_repositories import TaskRuntimeRepositories
 from iris.domain.shared.id_generator import new_id
+from iris.domain.shared.time import utc_now_iso
 from iris.domain.task.enums import StepStatus, TaskStatus, TaskType
 from iris.domain.task.events import (
     PlanCreated,
@@ -17,7 +18,7 @@ from iris.domain.task.events import (
     TaskStatusChanged,
     TaskSuspended,
 )
-from iris.domain.task.models import Plan, PlanStep, Task, TaskResult
+from iris.domain.task.models import Plan, PlanStep, Task, TaskCheckpoint, TaskResult
 from iris.infrastructure.events.in_memory_dispatcher import InMemoryEventDispatcher
 
 
@@ -292,6 +293,31 @@ class TaskApplicationService:
 
     def resume_waiting_user_task(self, task: Task) -> Task:
         return self.resume_task(task)
+
+    def mark_task_interrupted(self, task: Task, reason: str = "interrupted") -> Task:
+        """비정상 종료·앱 재시작 시 RUNNING → INTERRUPTED."""
+        if task.status != TaskStatus.RUNNING:
+            return task
+        old = task.status
+        result = task.transition_to(TaskStatus.INTERRUPTED)
+        if not result.ok or result.value is None:
+            return task
+        updated = result.value
+        self._repos.tasks.update(updated)
+        self._events.publish(
+            TaskStatusChanged(
+                task_id=task.id, old_status=old, new_status=TaskStatus.INTERRUPTED
+            )
+        )
+        self._repos.checkpoints.save(
+            TaskCheckpoint(
+                id=new_id(),
+                task_id=task.id,
+                plan_version=1,
+                snapshot={"interrupted_at": utc_now_iso(), "reason": reason[:200]},
+            )
+        )
+        return updated
 
     def get_task(self, task_id: str) -> Task | None:
         return self._repos.tasks.get_by_id(task_id)

@@ -16,16 +16,23 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: Windows GUI 통합 테스트 (기본 실행 제외: pytest -m 'not integration')",
     )
+    config.addinivalue_line(
+        "markers",
+        "windows_smoke: 실제 Windows GUI 스모크 (기본 제외: pytest -m windows_smoke)",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """`-m` 미지정 시 integration 테스트 스킵."""
+    """`-m` 미지정 시 integration·windows_smoke 테스트 스킵."""
     if config.getoption("-m", default=None):
         return
-    skip = pytest.mark.skip(reason="integration (run: pytest -m integration)")
+    skip_int = pytest.mark.skip(reason="integration (run: pytest -m integration)")
+    skip_smoke = pytest.mark.skip(reason="windows_smoke (run: pytest -m windows_smoke)")
     for item in items:
         if "integration" in item.keywords:
-            item.add_marker(skip)
+            item.add_marker(skip_int)
+        if "windows_smoke" in item.keywords:
+            item.add_marker(skip_smoke)
 
 
 def load_test_settings(tmp_path: Path, **overrides: Any) -> Settings:

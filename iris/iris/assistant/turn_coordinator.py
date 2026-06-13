@@ -142,6 +142,18 @@ class TurnCoordinator:
             if cu_result is not None:
                 return cu_result
 
+        from iris.assistant.recovery_turn_handler import try_handle_recovery_turn
+
+        recovery_result = try_handle_recovery_turn(
+            self._assistant,
+            turn_id,
+            user_text,
+            logs,
+            on_user_notify=on_user_notify,
+        )
+        if recovery_result is not None:
+            return recovery_result
+
         frontier_spoke = False
         frontier_reply = ""
 

@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from iris.application.task_runtime_repositories import TaskRuntimeRepositories
+from iris.domain.execution.enums import ApprovalStatus
 from iris.domain.execution.models import ActionAttempt, ActionProposal, ApprovalRequest
 from iris.domain.shared.id_generator import new_id
+from iris.domain.shared.time import utc_now_iso
 from iris.domain.task.enums import TaskStatus
 from iris.domain.task.events import TaskCheckpointCreated, TaskResumed
 from iris.domain.task.models import Plan, PlanStep, Task, TaskCheckpoint
@@ -71,23 +73,36 @@ class RecoveryService:
     def get_latest(self, task_id: str) -> TaskCheckpoint | None:
         return self._repos.checkpoints.get_latest_for_task(task_id)
 
-    def list_recoverable_tasks(self) -> list[Task]:
+    def list_recoverable_tasks(self, *, normalize_running: bool = True) -> list[Task]:
         getter = getattr(self._repos.tasks, "get_recoverable", None)
         if callable(getter):
-            return getter()
-        return [
-            t
-            for t in self._repos.tasks.get_active()
-            if t.status
-            in (
-                TaskStatus.RUNNING,
-                TaskStatus.WAITING_APPROVAL,
-                TaskStatus.WAITING_USER,
-                TaskStatus.WAITING_RESOURCE,
-                TaskStatus.SUSPENDED,
-                TaskStatus.INTERRUPTED,
-            )
-        ]
+            tasks = getter()
+        else:
+            tasks = [
+                t
+                for t in self._repos.tasks.get_active()
+                if t.status
+                in (
+                    TaskStatus.RUNNING,
+                    TaskStatus.WAITING_APPROVAL,
+                    TaskStatus.WAITING_USER,
+                    TaskStatus.WAITING_RESOURCE,
+                    TaskStatus.SUSPENDED,
+                    TaskStatus.INTERRUPTED,
+                )
+            ]
+        if normalize_running and self._tasks is not None:
+            normalized: list[Task] = []
+            for t in tasks:
+                if t.status == TaskStatus.RUNNING:
+                    marked = self._tasks.mark_task_interrupted(  # type: ignore[attr-defined]
+                        t, "app_restart"
+                    )
+                    normalized.append(marked)
+                else:
+                    normalized.append(t)
+            return normalized
+        return tasks
 
     def load_recovery_snapshot(self, task_id: str) -> RecoverySnapshot | None:
         task = self._repos.tasks.get_by_id(task_id)
@@ -156,4 +171,21 @@ class RecoveryService:
         task = self._repos.tasks.get_by_id(task_id)
         if task is None or self._tasks is None:
             return None
-        return self._tasks.cancel_task(task, "abandoned_on_recovery")
+        pending = self._repos.approvals.get_pending_for_task(task_id)
+        if pending is not None:
+            self._repos.approvals.update_status(pending.id, ApprovalStatus.DENIED)
+        self._tasks.cancel_task(task, "abandoned_on_recovery")
+        cancelled = self._repos.tasks.get_by_id(task_id)
+        return cancelled
+
+    def normalize_startup_tasks(self) -> list[Task]:
+        """앱 시작 시 RUNNING → INTERRUPTED 정규화 후 복구 목록 반환."""
+        return self.list_recoverable_tasks(normalize_running=True)
+
+    def interrupted_at_for_task(self, task_id: str) -> str | None:
+        """최신 checkpoint 중단 시각."""
+        cp = self.get_latest(task_id)
+        if cp is None:
+            return None
+        raw = cp.snapshot.get("interrupted_at")
+        return str(raw) if raw else None

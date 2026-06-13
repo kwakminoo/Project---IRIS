@@ -159,6 +159,38 @@ class ComputerUseAgent:
             approved=approved,
         )
 
+    def record_skill_checkpoint(
+        self,
+        checkpoint_id: str,
+        *,
+        achieved: bool,
+        partial: bool = False,
+        gap: str = "",
+        attempt_id: str | None = None,
+        related_attempt_ids: list[str] | None = None,
+    ) -> None:
+        """Skill checkpoint → 공통 VerificationResult."""
+        if self._task_runtime is None:
+            return
+        aid = attempt_id
+        if aid is None and hasattr(self._task_runtime, "last_attempt_id"):
+            aid = self._task_runtime.last_attempt_id  # type: ignore[attr-defined]
+        on_skill = getattr(self._task_runtime, "on_skill_checkpoint_verified", None)
+        if callable(on_skill):
+            on_skill(
+                attempt_id=aid,
+                achieved=achieved,
+                checkpoint_id=checkpoint_id,
+                partial=partial,
+                gap=gap,
+                related_attempt_ids=related_attempt_ids,
+            )
+
+    def last_recorded_attempt_id(self) -> str | None:
+        if self._task_runtime is None:
+            return None
+        return getattr(self._task_runtime, "last_attempt_id", None)
+
     def run(
         self,
         goal: str,
@@ -273,8 +305,15 @@ class ComputerUseAgent:
             pass  # WAITING_APPROVAL — on_approval_pending에서 이미 처리
         elif msg.startswith("알 수 없는 스킬"):
             self._task_runtime.on_cu_finished(success=False, message=msg[:500])
+        elif msg.startswith("요청하신 작업을 실행하지 못했습니다"):
+            self._task_runtime.on_cu_finished(success=False, message=msg[:500])
         else:
-            self._task_runtime.on_cu_finished(success=True, message=msg[:500])
+            # Skill 성공 문자열만으로 완료하지 않음 — checkpoint 검증 결과 우선
+            skill_ok = getattr(self._task_runtime, "_skill_final_achieved", None)
+            if skill_ok is False:
+                self._task_runtime.on_cu_finished(success=False, message=msg[:500])
+            else:
+                self._task_runtime.on_cu_finished(success=True, message=msg[:500])
         return message
 
     def resume_after_critical_approval(

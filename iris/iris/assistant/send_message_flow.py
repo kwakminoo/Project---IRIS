@@ -30,6 +30,7 @@ class _SendCtx:
     last_type_verify: bool | None = None
     last_perception: Any = None
     observations: list[str] = field(default_factory=list)
+    attempt_ids: list[str] = field(default_factory=list)
 
 
 def should_run_send_message(slots: dict[str, Any] | None) -> bool:
@@ -79,6 +80,7 @@ class SendMessageFlow:
         db.insert_log("send_message_flow", "start", f"{app_key} len={len(message_text)}")
         push_activity_line(f"SendMessageFlow: start app={app_key}")
         ctx = _SendCtx(goal=goal, slots=flow_slots)
+        self._send_ctx = ctx
 
         # launch / focus
         self._perceive(ctx, reason="send_check_app")
@@ -160,6 +162,7 @@ class SendMessageFlow:
             cu_ctx=ctx,
         )
         if mech.status == "success":
+            self._record_checkpoint(ctx, "cp_message_sent", True)
             msg = format_pending_tool_user_message(
                 "send_message",
                 AutomationToolResult(True, f"{display_name}에 메시지를 보냈습니다."),
@@ -182,6 +185,7 @@ class SendMessageFlow:
                 max_attempts=1,
             )
             if verify and verify.achieved:
+                self._record_checkpoint(ctx, "cp_message_sent", True)
                 msg = format_pending_tool_user_message(
                     "send_message",
                     AutomationToolResult(True, f"{display_name}에 메시지를 보냈습니다."),
@@ -189,6 +193,7 @@ class SendMessageFlow:
                 db.insert_log("send_message_flow", "complete_llm", msg[:200])
                 return msg
 
+        self._record_checkpoint(ctx, "cp_message_sent", False, gap=mech.gap[:200])
         db.insert_log("send_message_flow", "verify_fail", mech.gap[:200])
         return (
             "요청하신 작업을 실행하지 못했습니다. "
@@ -347,10 +352,37 @@ class SendMessageFlow:
         params: dict[str, Any],
         *,
         summary: str,
+        ctx: _SendCtx | None = None,
     ) -> AutomationToolResult:
-        return self._agent.run_tool_recorded(
+        result = self._agent.run_tool_recorded(
             tool_name,
             params,
             summary=summary[:200],
             approved=True,
+        )
+        aid = self._agent.last_recorded_attempt_id()
+        target = ctx or getattr(self, "_send_ctx", None)
+        if aid and target is not None:
+            target.attempt_ids.append(aid)
+        return result
+
+    def _record_checkpoint(
+        self,
+        ctx: _SendCtx,
+        checkpoint_id: str,
+        achieved: bool,
+        *,
+        partial: bool = False,
+        gap: str = "",
+    ) -> None:
+        aid = ctx.attempt_ids[-1] if ctx.attempt_ids else self._agent.last_recorded_attempt_id()
+        if not aid:
+            return
+        self._agent.record_skill_checkpoint(
+            checkpoint_id,
+            achieved=achieved,
+            partial=partial,
+            gap=gap,
+            attempt_id=aid,
+            related_attempt_ids=list(ctx.attempt_ids),
         )

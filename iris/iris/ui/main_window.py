@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
             from iris.application.runtime_factory import build_task_runtime
 
             runtime = build_task_runtime(self._db, self._executor.tool_registry)
-            recoverable = runtime.recovery.list_recoverable_tasks()
+            recoverable = runtime.recovery.normalize_startup_tasks()
             if not recoverable:
                 return
             task = recoverable[0]

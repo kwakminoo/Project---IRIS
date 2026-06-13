@@ -119,10 +119,22 @@ class CuTaskAdapter:
         self._last_attempt_id: str | None = None
         self._last_approval_id: str | None = None
         self._last_proposal_id: str | None = None
+        self._skill_final_achieved: bool | None = None
 
     @property
     def task_id(self) -> str | None:
         return self._task.id if self._task else None
+
+    @property
+    def last_attempt_id(self) -> str | None:
+        return self._last_attempt_id
+
+    def proposal_has_completed_attempt(self, proposal_id: str) -> bool:
+        """이미 성공한 Attempt가 있으면 중복 실행 방지."""
+        from iris.domain.task.enums import AttemptStatus
+
+        attempts = self._runtime.repos.execution.get_attempts_for_proposal(proposal_id)
+        return any(a.status == AttemptStatus.SUCCEEDED for a in attempts)
 
     def begin_cu_session(self, goal: str, slots: dict[str, Any] | None) -> str:
         """모든 CU 경로 진입 전 Task + ad-hoc Plan 생성."""
@@ -486,6 +498,41 @@ class CuTaskAdapter:
                 self._task, step, vr
             )
 
+    def on_skill_checkpoint_verified(
+        self,
+        *,
+        attempt_id: str | None,
+        achieved: bool,
+        checkpoint_id: str,
+        partial: bool = False,
+        gap: str = "",
+        related_attempt_ids: list[str] | None = None,
+    ) -> None:
+        """Skill Flow checkpoint → VerificationResult."""
+        if self._task is None:
+            return
+        aid = attempt_id or self._last_attempt_id
+        if not aid:
+            return
+        vr = self._runtime.verification.record_skill_checkpoint(
+            task_id=self._task.id,
+            attempt_id=aid,
+            checkpoint_id=checkpoint_id,
+            achieved=achieved,
+            partial=partial,
+            gap=gap,
+            related_attempt_ids=related_attempt_ids,
+        )
+        step = self._adhoc_step
+        if step is None and self._step_by_index:
+            idx = max(self._step_by_index.keys())
+            step = self._step_by_index.get(idx)
+        if step is not None and vr.status.value != "unknown":
+            self._runtime.verification.finalize_step_from_verification(
+                self._task, step, vr
+            )
+        self._skill_final_achieved = achieved and not partial
+
     def on_cu_waiting_user(self, message: str) -> None:
         if self._task is None:
             return
@@ -499,6 +546,11 @@ class CuTaskAdapter:
     def on_cu_finished(self, *, success: bool, message: str) -> None:
         if self._task is None:
             return
+        # Skill checkpoint 실패 시 성공 문자열로 Task 완료 금지
+        if self._skill_final_achieved is False:
+            success = False
+        elif self._skill_final_achieved is True:
+            success = True
         if success:
             self._runtime.tasks.complete_task(self._task, message)
         elif self._task.status == TaskStatus.WAITING_USER:

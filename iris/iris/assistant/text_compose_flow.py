@@ -31,6 +31,7 @@ class _ComposeCtx:
     last_type_verify: bool | None = None
     last_perception: PerceptionObservation | None = None
     observations: list[str] = field(default_factory=list)
+    attempt_ids: list[str] = field(default_factory=list)
 
 
 def should_run_text_compose(slots: dict[str, Any] | None) -> bool:
@@ -75,6 +76,7 @@ class TextComposeFlow:
         db.insert_log("text_compose_flow", "start", f"{app_key} len={len(text)}")
         push_activity_line(f"TextComposeFlow: start app={app_key}")
         ctx = _ComposeCtx(goal=goal, slots=flow_slots)
+        self._compose_ctx = ctx
 
         # 1. list_open_windows + perceive — 앱 창 존재 확인
         self._perceive(ctx, reason="compose_check_app")
@@ -94,6 +96,8 @@ class TextComposeFlow:
             if not launch_res.success:
                 return format_pending_tool_user_message("launch_app", launch_res, display_name)
             self._perceive(ctx, reason="compose_after_launch")
+        else:
+            self._record_checkpoint(ctx, "cp_app_open", open_mech.status == "success")
 
         # 3. focus_window
         focus_res = self._run_tool(
@@ -115,6 +119,12 @@ class TextComposeFlow:
                 f"요청하신 작업을 실행하지 못했습니다. "
                 f"{display_name} 창에 포커스하지 못했습니다."
             )
+        self._record_checkpoint(
+            ctx,
+            "cp_focus",
+            focus_mech.status == "success",
+            partial=focus_mech.status == "inconclusive",
+        )
 
         # 4. (선택) uia_snapshot
         self._run_tool(
@@ -164,6 +174,7 @@ class TextComposeFlow:
                 break
 
         if verify_status == "success" and last_type_res is not None:
+            self._record_checkpoint(ctx, "cp_text_typed", True)
             msg = format_pending_tool_user_message(
                 "type_text",
                 last_type_res,
@@ -180,6 +191,7 @@ class TextComposeFlow:
         reason = "입력 내용을 화면에서 확인하지 못했습니다."
         if last_type_res and not last_type_res.success:
             reason = last_type_res.message or reason
+        self._record_checkpoint(ctx, "cp_text_typed", False, gap=reason)
         db.insert_log("text_compose_flow", "verify_fail", reason[:200])
         return f"요청하신 작업을 실행하지 못했습니다. {reason}"
 
@@ -226,10 +238,37 @@ class TextComposeFlow:
         params: dict[str, Any],
         *,
         summary: str,
+        ctx: _ComposeCtx | None = None,
     ) -> AutomationToolResult:
-        return self._agent.run_tool_recorded(
+        result = self._agent.run_tool_recorded(
             tool_name,
             params,
             summary=summary[:200],
             approved=True,
+        )
+        aid = self._agent.last_recorded_attempt_id()
+        target = ctx or getattr(self, "_compose_ctx", None)
+        if aid and target is not None:
+            target.attempt_ids.append(aid)
+        return result
+
+    def _record_checkpoint(
+        self,
+        ctx: _ComposeCtx,
+        checkpoint_id: str,
+        achieved: bool,
+        *,
+        partial: bool = False,
+        gap: str = "",
+    ) -> None:
+        aid = ctx.attempt_ids[-1] if ctx.attempt_ids else self._agent.last_recorded_attempt_id()
+        if not aid:
+            return
+        self._agent.record_skill_checkpoint(
+            checkpoint_id,
+            achieved=achieved,
+            partial=partial,
+            gap=gap,
+            attempt_id=aid,
+            related_attempt_ids=list(ctx.attempt_ids),
         )
