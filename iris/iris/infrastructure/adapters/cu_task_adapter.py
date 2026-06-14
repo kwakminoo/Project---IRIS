@@ -219,7 +219,7 @@ class CuTaskAdapter:
         )
 
     def _verify_launch_target(self, params: dict[str, Any]) -> bool:
-        """launch_app 후 대상 창 존재 여부 확인."""
+        """launch_app 후 대상 창 존재 여부 확인 — 짧은 폴링."""
         display = str(params.get("display_name") or "").strip()
         app_key = str(params.get("app_key") or "").strip()
         title_hint = display or app_key
@@ -227,8 +227,18 @@ class CuTaskAdapter:
             return False
         from iris.automation import window_controller
 
-        wins = window_controller.find_windows_by_title_substring(title_hint)
-        return bool(wins)
+        hints: list[str] = []
+        for h in (title_hint, app_key, "메모장", "Notepad"):
+            if h and h not in hints:
+                hints.append(h)
+        import time
+
+        for _ in range(24):
+            for hint in hints:
+                if window_controller.find_windows_by_title_substring(hint):
+                    return True
+            time.sleep(0.25)
+        return False
 
     def execute_tool_step(
         self,

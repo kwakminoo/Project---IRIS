@@ -21,6 +21,10 @@ class AutomationToolRegistry:
     def get(self, name: str) -> AutomationTool | None:
         return self._tools.get(name)
 
+    def register_tool(self, tool: AutomationTool) -> None:
+        """테스트·확장용 도구 등록 (동일 name은 덮어씀)."""
+        self._tools[tool.name] = tool
+
     def list_tools(self) -> list[str]:
         return sorted(self._tools.keys())
 

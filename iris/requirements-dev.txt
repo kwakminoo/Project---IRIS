@@ -1,0 +1,4 @@
+# Iris — 개발·테스트 의존성
+pytest>=9.0.0
+pytest-timeout>=2.3.0
+pytest-cov>=6.0.0

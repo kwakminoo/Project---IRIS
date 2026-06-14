@@ -1,0 +1,6 @@
+# Iris — Windows 전용 자동화·UI 의존성
+pygetwindow>=0.0.9
+pywinauto>=0.6.8
+pyautogui>=0.9.54
+pywin32>=306
+screeninfo>=0.8.1

@@ -3,33 +3,73 @@ name: Windows Smoke
 on:
   workflow_dispatch:
 
+env:
+  IRIS_SMOKE_ARTIFACTS: artifacts/windows-smoke
+  IRIS_SMOKE_SCREENSHOTS: "1"
+
 jobs:
   windows-smoke:
+    name: windows-smoke
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: iris/requirements.txt
+          cache-dependency-path: |
+            iris/requirements.txt
+            iris/requirements-base.txt
+            iris/requirements-windows.txt
+            iris/requirements-dev.txt
+
+      - name: Log environment
+        shell: pwsh
+        run: |
+          Write-Host "OS:" (Get-CimInstance Win32_OperatingSystem).Caption
+          Write-Host "Resolution:" (Get-CimInstance Win32_VideoController).CurrentHorizontalResolution "x" (Get-CimInstance Win32_VideoController).CurrentVerticalResolution
+          python --version
 
       - name: Install dependencies
         working-directory: iris
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+
+      - name: Verify pytest-timeout
+        working-directory: iris
+        run: python -m pytest --help | findstr /C:"--timeout"
+
+      - name: Prepare artifact directory
+        working-directory: iris
+        run: |
+          if (Test-Path artifacts/windows-smoke) { Remove-Item -Recurse -Force artifacts/windows-smoke }
+          New-Item -ItemType Directory -Force -Path artifacts/windows-smoke | Out-Null
 
       - name: Run Windows smoke tests
+        id: smoke
         working-directory: iris
-        run: python -m pytest -m windows_smoke -q --timeout=120
+        run: |
+          python -m pytest tests/windows_smoke -m windows_smoke -v --timeout=120 `
+            --junitxml=artifacts/windows-smoke/junit.xml `
+            2>&1 | Tee-Object -FilePath artifacts/windows-smoke/pytest.log
 
-      - name: Upload smoke log on failure
-        if: failure()
+      - name: Cleanup test notepad processes
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Process notepad -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowTitle -match 'IRIS_SMOKE|무제|Notepad' } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Upload smoke artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-smoke-log
-          path: iris/.pytest_cache/
+          name: windows-smoke-artifacts
+          path: |
+            iris/artifacts/windows-smoke/
+            iris/.pytest_cache/
+          if-no-files-found: warn

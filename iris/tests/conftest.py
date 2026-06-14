@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,14 +13,22 @@ from iris.config.settings import Settings, load_settings
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "integration: Windows GUI 통합 테스트 (기본 실행 제외: pytest -m 'not integration')",
-    )
-    config.addinivalue_line(
-        "markers",
-        "windows_smoke: 실제 Windows GUI 스모크 (기본 제외: pytest -m windows_smoke)",
-    )
+    # pytest.ini에 marker가 정의되어 있으면 중복 등록하지 않음
+    ini_markers = config.getini("markers") or []
+    if not ini_markers:
+        config.addinivalue_line(
+            "markers",
+            "integration: Windows GUI 통합 테스트 (기본 실행 제외: pytest -m 'not integration')",
+        )
+        config.addinivalue_line(
+            "markers",
+            "windows_only: Windows에서만 실행되는 테스트",
+        )
+        config.addinivalue_line(
+            "markers",
+            "windows_smoke: 실제 Windows GUI 스모크 (기본 제외: pytest -m windows_smoke)",
+        )
+        config.addinivalue_line("markers", "slow: 상대적으로 오래 걸리는 테스트")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -28,11 +37,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip_int = pytest.mark.skip(reason="integration (run: pytest -m integration)")
     skip_smoke = pytest.mark.skip(reason="windows_smoke (run: pytest -m windows_smoke)")
+    skip_win = pytest.mark.skip(reason="windows_only (Windows 전용)")
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip_int)
         if "windows_smoke" in item.keywords:
             item.add_marker(skip_smoke)
+        if "windows_only" in item.keywords and "windows_smoke" not in item.keywords:
+            if platform.system() != "Windows":
+                item.add_marker(skip_win)
 
 
 def load_test_settings(tmp_path: Path, **overrides: Any) -> Settings:
