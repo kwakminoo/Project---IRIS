@@ -177,6 +177,8 @@ class Settings:
     # Media Ranker — 창 스크린샷 멀티모달 (DB·디스크 저장 없음, HTTP body만)
     media_ranker_use_screenshot: bool
     media_ranker_vision_model: str  # 비어 있으면 gemma_model_name
+    # 내장 IDE — Theia workspace 루트 (비어 있으면 저장소 루트)
+    ide_workspace_path: str
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -323,6 +325,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         media_ranker_vision_model=os.getenv(
             "IRIS_MEDIA_RANKER_VISION_MODEL", ""
         ).strip(),
+        ide_workspace_path=os.getenv("IRIS_IDE_WORKSPACE_PATH", "").strip(),
     )
 
 

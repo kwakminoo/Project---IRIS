@@ -1,0 +1,21 @@
+{
+  "name": "@iris-ide/iris-product",
+  "version": "0.1.0",
+  "private": true,
+  "main": "lib/index.js",
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/iris-product-frontend-module"
+    }
+  ],
+  "dependencies": {
+    "@theia/core": "1.55.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.4.5"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "tsc -b -w"
+  }
+}

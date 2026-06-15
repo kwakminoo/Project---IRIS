@@ -1,0 +1,35 @@
+"""IDE Workspace 경로 해석."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from iris.config.settings import Settings
+
+
+def _find_repo_root() -> Path:
+  """iris 패키지 기준 저장소 루트 추정."""
+  here = Path(__file__).resolve()
+  for parent in here.parents:
+    if (parent / "iris-ide").is_dir() or (parent / ".git").is_dir():
+      return parent
+    if parent.name == "iris" and (parent.parent / "iris").is_dir():
+      return parent.parent
+  return Path.cwd()
+
+
+def resolve_ide_workspace(settings: Settings) -> Path:
+  """
+  Settings.ide_workspace_path 우선, 없으면 저장소 루트.
+  존재·디렉터리·읽기 가능 검증.
+  """
+  raw = (settings.ide_workspace_path or "").strip()
+  if raw:
+    path = Path(raw).expanduser().resolve()
+  else:
+    path = _find_repo_root().resolve()
+  if not path.exists():
+    raise FileNotFoundError(f"IDE workspace 경로가 없습니다: {path}")
+  if not path.is_dir():
+    raise NotADirectoryError(f"IDE workspace는 디렉터리여야 합니다: {path}")
+  return path

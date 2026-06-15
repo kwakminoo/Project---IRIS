@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -69,7 +70,13 @@ from iris.ui.settings_dialog import SettingsDialog
 from iris.ui.bridge_signals import UiBridge
 from iris.ui.visualizer import Visualizer
 from iris.ui.unified_monitor_panel import UnifiedMonitorPanel
-from iris.ui.window_list_panel import WindowListPanel
+from iris.infrastructure.ide.ide_backend_manager import IdeBackendManager
+from iris.infrastructure.ide.ide_bridge_client import IdeBridgeClient
+from iris.infrastructure.ide.ide_workspace_resolver import resolve_ide_workspace
+from iris.system.metrics_worker import MetricsWorker
+from iris.ui.left_sidebar_panel import LeftSidebarPanel
+from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
+from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
 
 
@@ -248,6 +255,12 @@ class MainWindow(QMainWindow):
         self._stream_reply_ready = False
         self._stream_add_iris_prefix = False
         self._stream_final_visible = ""
+        self._workspace_mode: str = "assistant"
+        self._assistant_splitter_state = b""
+        self._ide_splitter_state = b""
+        self._ide_backend = IdeBackendManager()
+        self._ide_bridge = IdeBridgeClient()
+        self._ide_bridge.start()
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -292,15 +305,19 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(8)
 
-        # 좌측 통합 사이드바 — 실행 중인 창 목록
-        self._window_sidebar = WindowListPanel()
-        splitter.addWidget(self._window_sidebar)
+        # 좌측 Persistent Sidebar — workspace 전환과 무관하게 유지
+        self._left_sidebar = LeftSidebarPanel()
+        splitter.addWidget(self._left_sidebar)
 
-        left = QWidget()
-        left.setObjectName("WorkspacePanel")
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(10)
+        self._assistant_page = AssistantWorkspacePage()
+        self._ide_page = IdeWorkspacePage()
+        self._workspace_stack = QStackedWidget()
+        self._workspace_stack.addWidget(self._assistant_page)
+        self._workspace_stack.addWidget(self._ide_page)
+        splitter.addWidget(self._workspace_stack)
+
+        left_lay = self._assistant_page.center_layout
+        right_lay = self._assistant_page.right_layout
 
         self._viz = Visualizer()
         self._viz.setMinimumHeight(300)
@@ -333,26 +350,34 @@ class MainWindow(QMainWindow):
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
         left_lay.addWidget(self._chat, 2)
-        splitter.addWidget(left)
 
-        right = QWidget()
-        right.setObjectName("WorkspacePanel")
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(10)
-
-        # 실행 화면 + 모니터링 통합 (세로 1열)
         self._monitor = UnifiedMonitorPanel()
         self._monitor.set_database(self._db)
 
         self._notif_policy = NotificationPolicy(self._db)
         self._notes = NotificationPanel(policy=self._notif_policy)
-        rl.addWidget(self._monitor, 2)
-        rl.addWidget(self._notes, 1)
-        splitter.addWidget(right)
-        # [사이드바 | 메인 좌측 | 우측 모니터]
-        splitter.setSizes([230, 760, 390])
-        splitter.setCollapsible(0, False)  # 사이드바는 접히지 않도록
+        right_lay.addWidget(self._monitor, 2)
+        right_lay.addWidget(self._notes, 1)
+
+        # [사이드바 | workspace stack]
+        splitter.setSizes([230, 1150])
+        splitter.setCollapsible(0, False)
+
+        self._left_sidebar.utility.actions.add_action(
+            action_id="ide",
+            title="IDE",
+            tooltip="Iris IDE 작업공간으로 전환",
+            callback=self._on_ide_toggle,
+        )
+        self._ide_page.theia_retry.connect(self._start_ide_backend_and_load)
+        self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
+        self._ide_page.theia_view_log.connect(self._show_ide_log)
+        self._ide_page.coding_panel.chat.send_clicked.connect(self._on_coding_user_text)
+        self._continuous_listen.mic_level.connect(self._ide_page.coding_panel.set_mic_level)
+
+        self._metrics_worker = MetricsWorker(parent=self)
+        self._metrics_worker.snapshot_ready.connect(self._on_metrics_snapshot)
+        self._metrics_worker.start()
 
         root.addWidget(splitter, 1)
 
@@ -656,6 +681,7 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, s: object) -> None:
         if isinstance(s, AppState):
             self._viz.set_state(s)
+            self._ide_page.coding_panel.set_app_state(s)
             self._system_sounds.play_state(s, QDateTime.currentMSecsSinceEpoch())
             self._status_label.setText(f"상태: {s.name}")
             push_activity_line(f"UI: app state → {s.name}.")
@@ -787,6 +813,8 @@ class MainWindow(QMainWindow):
             spoken_text = spoken.strip() or body
 
         self._chat.append_message_typed("Iris", body, speech_sync=True)
+        if self._workspace_mode == "ide":
+            self._ide_page.coding_panel.chat.append_message_typed("Iris", body, speech_sync=True)
         self._speak(
             spoken_text,
             on_complete=on_complete,
@@ -835,20 +863,26 @@ class MainWindow(QMainWindow):
         *,
         from_voice: bool = False,
         already_shown: bool = False,
+        use_coding_panel: bool = False,
     ) -> None:
         text = text.strip()
+        chat = (
+            self._ide_page.coding_panel.chat
+            if use_coding_panel
+            else self._active_chat_panel()
+        )
         if not text:
             if from_voice:
-                self._chat.cancel_user_listening()
+                chat.cancel_user_listening()
             self._resume_voice_input()
             return
         self._pause_voice_input()
         self._state.set_state(AppState.LISTENING)
         if not already_shown:
             if from_voice:
-                self._chat.complete_user_message_typed(text)
+                chat.complete_user_message_typed(text)
             else:
-                self._chat.append_message_instant("나", text)
+                chat.append_message_instant("나", text)
         # 진행 중 턴은 memory에 넣지 않음 — 턴 완료 시 user+assistant 한꺼번에 커밋
         self._db.insert_log("user", text, None)
         push_activity_line(
@@ -1313,8 +1347,95 @@ class MainWindow(QMainWindow):
         self._commit_completed_turn(text, store_history=store_history)
         self._iris_reply(text, from_llm=store_history)
 
+    def current_workspace(self) -> str:
+        return self._workspace_mode
+
+    def switch_to_assistant_workspace(self) -> None:
+        if self._workspace_mode == "assistant":
+            return
+        self._ide_splitter_state = self._ide_page.save_splitter_state()
+        self._workspace_stack.setCurrentWidget(self._assistant_page)
+        self._workspace_mode = "assistant"
+        self._left_sidebar.utility.actions.update_action(
+            "ide",
+            title="IDE",
+            tooltip="Iris IDE 작업공간으로 전환",
+        )
+        self._assistant_page.restore_splitter_state(self._assistant_splitter_state)
+        self._metrics_worker.set_active(True)
+
+    def switch_to_ide_workspace(self) -> None:
+        if self._workspace_mode == "ide":
+            return
+        self._assistant_splitter_state = self._assistant_page.save_splitter_state()
+        self._workspace_stack.setCurrentWidget(self._ide_page)
+        self._workspace_mode = "ide"
+        self._left_sidebar.utility.actions.update_action(
+            "ide",
+            title="돌아가기",
+            tooltip="기존 Iris 화면으로 복귀",
+        )
+        self._ide_page.restore_splitter_state(self._ide_splitter_state)
+        ctx = self._ide_bridge.get_context()
+        self._ide_page.coding_panel.chat.set_workspace_context(ctx.summary_line())
+        self._metrics_worker.set_active(True)
+
+    def _on_ide_toggle(self) -> None:
+        if self._workspace_mode == "ide":
+            self.switch_to_assistant_workspace()
+            return
+        self._start_ide_backend_and_load()
+
+    def _start_ide_backend_and_load(self) -> None:
+        self._ide_page.theia.set_starting()
+        try:
+            workspace = resolve_ide_workspace(self._settings)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            self._ide_page.theia.set_error(str(exc))
+            return
+        status = self._ide_backend.ensure_running(workspace)
+        if not status.running:
+            self._ide_page.theia.set_error(status.error, log_path=status.log_path)
+            return
+        bridge_url = self._ide_bridge.base_url
+        url = f"{status.frontend_url}?irisBridgePort={self._ide_bridge.port}"
+        if self._ide_page.theia.load_url(url):
+            self.switch_to_ide_workspace()
+            self._ide_page.theia.run_javascript(
+                f"window.__IRIS_BRIDGE_URL__ = {json.dumps(bridge_url)};"
+            )
+
+    def _show_ide_log(self) -> None:
+        path = self._ide_page.theia.last_log_path() or str(
+            Path.home() / ".iris" / "logs" / "ide-backend.log"
+        )
+        self._chat.append_message_instant("Iris", f"IDE 로그: {path}")
+
+    @pyqtSlot(object)
+    def _on_metrics_snapshot(self, snap: object) -> None:
+        from iris.system.metrics_snapshot import MetricsSnapshot
+
+        if isinstance(snap, MetricsSnapshot):
+            self._left_sidebar.utility.metrics.apply_snapshot(snap)
+
+    def _on_coding_user_text(self, text: str) -> None:
+        ctx_block = self._ide_bridge.build_message_context_block()
+        if ctx_block:
+            text = f"{text}\n\n{ctx_block}"
+        self._on_user_text(text, from_voice=False, use_coding_panel=True)
+
+    def _active_chat_panel(self):
+        if self._workspace_mode == "ide":
+            return self._ide_page.coding_panel.chat
+        return self._chat
+
     def closeEvent(self, event: QCloseEvent) -> None:
         register_activity_sink(None)
+        self._metrics_worker.set_active(False)
+        self._metrics_worker.request_stop()
+        self._metrics_worker.wait(2000)
+        self._ide_bridge.stop()
+        self._ide_backend.shutdown()
         self._monitor_mgr.stop()
         self._continuous_listen.stop()
         self._tts.stop()

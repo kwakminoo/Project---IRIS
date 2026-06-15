@@ -1,0 +1,36 @@
+{
+  "private": true,
+  "name": "iris-ide",
+  "version": "0.1.0",
+  "license": "EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0",
+  "workspaces": [
+    "applications/*",
+    "theia-extensions/*"
+  ],
+  "scripts": {
+    "build": "yarn build:extensions && yarn build:browser",
+    "build:browser": "yarn workspace @iris-ide/browser-app build",
+    "build:extensions": "yarn workspace @iris-ide/iris-bridge build && yarn workspace @iris-ide/iris-product build",
+    "start": "yarn workspace @iris-ide/browser-app start",
+    "watch": "yarn workspace @iris-ide/browser-app watch"
+  },
+  "devDependencies": {
+    "lerna": "^8.1.2"
+  },
+  "resolutions": {
+    "@theia/core": "1.55.0",
+    "@theia/editor": "1.55.0",
+    "@theia/filesystem": "1.55.0",
+    "@theia/workspace": "1.55.0",
+    "@theia/navigator": "1.55.0",
+    "@theia/search-in-workspace": "1.55.0",
+    "@theia/terminal": "1.55.0",
+    "@theia/output": "1.55.0",
+    "@theia/markers": "1.55.0",
+    "@theia/debug": "1.55.0",
+    "@theia/preferences": "1.55.0",
+    "@theia/scm": "1.55.0",
+    "@theia/git": "1.55.0",
+    "@theia/plugin-ext": "1.55.0"
+  }
+}

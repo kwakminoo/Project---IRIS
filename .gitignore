@@ -25,6 +25,12 @@ Thumbs.db
 dist/
 build/
 
+# Iris IDE (Theia)
+iris-ide/node_modules/
+iris-ide/lib/
+iris-ide/*.log
+.iris/logs/
+
 # 로컬 앱 데이터
 .iris/
 

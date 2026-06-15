@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IrisIdeEvents",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "editor.open" },
+        "uri": { "type": "string" },
+        "selection": { "type": "object" }
+      },
+      "required": ["type", "uri"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "editor.goto" },
+        "uri": { "type": "string" },
+        "line": { "type": "integer" },
+        "character": { "type": "integer" }
+      },
+      "required": ["type", "uri", "line"]
+    }
+  ]
+}
