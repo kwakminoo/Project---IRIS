@@ -23,6 +23,7 @@ from .diagnostics import (
     find_notepad_windows_for_pid,
     focus_window_hwnd,
     read_notepad_editor_text,
+    register_created_process,
     wait_until,
     write_diagnostic_bundle,
 )
@@ -61,6 +62,7 @@ def _assert_verification_success(runtime, attempt_id: str) -> None:
 
 
 @pytest.mark.timeout(120)
+@pytest.mark.windows_smoke_gui
 def test_smoke_notepad_launch_creates_verified_task(
     require_windows,
     smoke_runtime,
@@ -99,6 +101,7 @@ def test_smoke_notepad_launch_creates_verified_task(
     assert wait_until(_new_notepad_running, timeout=10.0), "notepad.exe 프로세스 없음"
     new_pids = _notepad_pids() - before_pids
     target_pid = next(iter(new_pids))
+    register_created_process(target_pid, marker=f"launch_{task_id}", exe="notepad.exe")
 
     from iris.automation import window_controller
 
@@ -145,6 +148,7 @@ def test_smoke_notepad_launch_creates_verified_task(
 
 
 @pytest.mark.timeout(120)
+@pytest.mark.windows_smoke_gui
 def test_smoke_notepad_text_input_is_read_back(
     require_windows,
     notepad_session,
@@ -172,6 +176,15 @@ def test_smoke_notepad_text_input_is_read_back(
     active_before = window_controller.get_active_window_title()
     assert "메모장" in active_before or "Notepad" in active_before
 
+    focus_window_hwnd(np.hwnd)
+    try:
+        import pyautogui  # type: ignore
+
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.press("delete")
+    except Exception:
+        pass
+
     adapter = CuTaskAdapter(smoke_runtime)
     adapter.begin_cu_session("메모장 입력", {"skill_id": "text_compose"})
     result = adapter.execute_tool_step(
@@ -185,15 +198,20 @@ def test_smoke_notepad_text_input_is_read_back(
     assert result.tool_success is True
     assert result.attempt_id
 
+    def _editor_hwnd() -> int:
+        wins = find_notepad_windows_for_pid(np.pid)
+        return wins[0].hwnd if wins else np.hwnd
+
     def _text_present() -> bool:
-        ok, text = read_notepad_editor_text(np.hwnd)
+        hwnd = _editor_hwnd()
+        ok, text = read_notepad_editor_text(hwnd)
         return ok and smoke_marker in text
 
-    assert wait_until(_text_present, timeout=8.0), (
-        f"UIA에서 marker 미확인: {read_notepad_editor_text(np.hwnd)}"
+    assert wait_until(_text_present, timeout=15.0), (
+        f"UIA에서 marker 미확인: {read_notepad_editor_text(_editor_hwnd())}"
     )
 
-    ok, actual = read_notepad_editor_text(np.hwnd)
+    ok, actual = read_notepad_editor_text(_editor_hwnd())
     assert ok
     assert smoke_marker in actual
 

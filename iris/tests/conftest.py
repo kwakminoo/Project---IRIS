@@ -11,38 +11,91 @@ import pytest
 from iris.ai.gemma_client import ChatMessage
 from iris.config.settings import Settings, load_settings
 
+# integration Job 대상 — 모듈 전체가 컴포넌트 연결 검증인 파일
+_INTEGRATION_MODULES = frozenset({
+    "test_task_runtime_real_integration",
+    "test_task_runtime_phase1_injection",
+    "test_task_runtime_phase2_task_creation",
+    "test_task_runtime_phase3_recording",
+    "test_task_runtime_skill_verification",
+    "test_execution_coordinator",
+    "test_cu_task_adapter",
+})
+
+# 혼합 모듈 내 integration 대상 개별 테스트
+_INTEGRATION_TESTS = frozenset({
+    ("test_task_runtime_stabilization", "test_quick_launch_creates_task"),
+    ("test_task_runtime_stabilization", "test_action_skill_creates_task"),
+    ("test_task_runtime_stabilization", "test_approved_action_records_attempt_and_result"),
+    ("test_task_runtime_stabilization", "test_approval_resume_uses_existing_proposal"),
+    ("test_task_runtime_stabilization", "test_checkpoint_success_completes_step"),
+    ("test_task_runtime_stabilization", "test_foreign_key_check_has_no_errors"),
+    ("test_task_runtime_stabilization", "test_migration_failure_is_not_silently_ignored"),
+    ("test_task_runtime_stabilization", "test_running_task_is_discovered_after_restart"),
+    ("test_task_runtime_stabilization", "test_waiting_approval_task_restores_pending_proposal"),
+    ("test_task_runtime_stabilization", "test_resume_continues_same_task_id"),
+    ("test_task_runtime_recovery_commands", "test_startup_discovers_recoverable_task"),
+    ("test_task_runtime_recovery_commands", "test_continue_command_resumes_same_task_id"),
+    ("test_task_runtime_recovery_commands", "test_waiting_approval_restores_existing_proposal"),
+    ("test_task_runtime_recovery_commands", "test_resume_does_not_duplicate_completed_attempt"),
+    ("test_sqlite_task_repositories", "test_plan_and_steps_persist"),
+    ("test_sqlite_task_repositories", "test_schema_migrations_applied"),
+})
+
 
 def pytest_configure(config: pytest.Config) -> None:
-    # pytest.ini에 marker가 정의되어 있으면 중복 등록하지 않음
     ini_markers = config.getini("markers") or []
     if not ini_markers:
         config.addinivalue_line(
             "markers",
-            "integration: Windows GUI 통합 테스트 (기본 실행 제외: pytest -m 'not integration')",
+            "integration: Iris 컴포넌트 간 실제 연결을 검증하는 테스트",
+        )
+        config.addinivalue_line("markers", "windows_only: Windows API가 필요한 테스트")
+        config.addinivalue_line(
+            "markers",
+            "windows_smoke: 실제 Windows 앱과 UI를 조작하는 테스트",
         )
         config.addinivalue_line(
             "markers",
-            "windows_only: Windows에서만 실행되는 테스트",
+            "windows_smoke_gui: Windows GUI 세션이 필요한 스모크 테스트",
         )
         config.addinivalue_line(
             "markers",
-            "windows_smoke: 실제 Windows GUI 스모크 (기본 제외: pytest -m windows_smoke)",
+            "external_service: 외부 API 또는 네트워크 서비스가 필요한 테스트",
+        )
+        config.addinivalue_line(
+            "markers",
+            "requires_model: 실제 AI 모델 실행이 필요한 테스트",
         )
         config.addinivalue_line("markers", "slow: 상대적으로 오래 걸리는 테스트")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """`-m` 미지정 시 integration·windows_smoke 테스트 스킵."""
+    """integration 마커 자동 부착 및 `-m` 미지정 시 선택적 skip."""
+    for item in items:
+        module_stem = Path(str(item.fspath)).stem
+        if module_stem in _INTEGRATION_MODULES or (module_stem, item.name) in _INTEGRATION_TESTS:
+            if "integration" not in item.keywords:
+                item.add_marker(pytest.mark.integration)
+
     if config.getoption("-m", default=None):
         return
+
     skip_int = pytest.mark.skip(reason="integration (run: pytest -m integration)")
     skip_smoke = pytest.mark.skip(reason="windows_smoke (run: pytest -m windows_smoke)")
+    skip_ext = pytest.mark.skip(reason="external_service")
+    skip_model = pytest.mark.skip(reason="requires_model")
     skip_win = pytest.mark.skip(reason="windows_only (Windows 전용)")
+
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip_int)
         if "windows_smoke" in item.keywords:
             item.add_marker(skip_smoke)
+        if "external_service" in item.keywords:
+            item.add_marker(skip_ext)
+        if "requires_model" in item.keywords:
+            item.add_marker(skip_model)
         if "windows_only" in item.keywords and "windows_smoke" not in item.keywords:
             if platform.system() != "Windows":
                 item.add_marker(skip_win)

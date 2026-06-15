@@ -2,6 +2,15 @@ name: Windows Smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      include_gui:
+        description: "GUI smoke (Notepad·UIA) 포함 — Hosted Runner에서 불안정할 수 있음"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 env:
   IRIS_SMOKE_ARTIFACTS: artifacts/windows-smoke
@@ -44,25 +53,36 @@ jobs:
 
       - name: Prepare artifact directory
         working-directory: iris
+        shell: pwsh
         run: |
           if (Test-Path artifacts/windows-smoke) { Remove-Item -Recurse -Force artifacts/windows-smoke }
           New-Item -ItemType Directory -Force -Path artifacts/windows-smoke | Out-Null
+          Set-Content -Path artifacts/windows-smoke/created-processes.json -Value "[]" -Encoding utf8
 
-      - name: Run Windows smoke tests
-        id: smoke
+      - name: Run non-GUI smoke tests
+        id: smoke_nogui
         working-directory: iris
+        shell: pwsh
         run: |
-          python -m pytest tests/windows_smoke -m windows_smoke -v --timeout=120 `
-            --junitxml=artifacts/windows-smoke/junit.xml `
-            2>&1 | Tee-Object -FilePath artifacts/windows-smoke/pytest.log
+          python -m pytest tests/windows_smoke -m "windows_smoke and not windows_smoke_gui" -v --timeout=120 `
+            --junitxml=artifacts/windows-smoke/junit-nogui.xml `
+            2>&1 | Tee-Object -FilePath artifacts/windows-smoke/pytest-nogui.log
 
-      - name: Cleanup test notepad processes
+      - name: Run GUI smoke tests
+        id: smoke_gui
+        if: inputs.include_gui == 'true'
+        working-directory: iris
+        shell: pwsh
+        run: |
+          python -m pytest tests/windows_smoke -m windows_smoke_gui -v --timeout=120 `
+            --junitxml=artifacts/windows-smoke/junit-gui.xml `
+            2>&1 | Tee-Object -FilePath artifacts/windows-smoke/pytest-gui.log
+
+      - name: Cleanup registered smoke processes
         if: always()
         shell: pwsh
         run: |
-          Get-Process notepad -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowTitle -match 'IRIS_SMOKE|무제|Notepad' } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+          & "${{ github.workspace }}/scripts/cleanup-smoke-processes.ps1" -ArtifactsRoot "${{ github.workspace }}/iris/artifacts/windows-smoke"
 
       - name: Upload smoke artifacts
         if: always()

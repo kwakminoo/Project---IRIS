@@ -57,7 +57,11 @@ CRITICAL_RISK examples:
 ## 요구 사항
 
 - Python 3.11+
-- Windows
+- **Primary supported development platform: Windows 11**
+- Required CI platform: Windows (`test / windows-py311`, `test / windows-py312`, `test / windows-integration`)
+- Linux CI: experimental / deferred — `linux-experimental.yml` 수동 실행
+
+자세한 테스트 정책: [docs/testing/windows-ci-policy.md](../docs/testing/windows-ci-policy.md)
 
 ## 설치
 

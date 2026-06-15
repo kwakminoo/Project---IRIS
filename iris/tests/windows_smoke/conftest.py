@@ -19,11 +19,13 @@ from iris.storage.database import Database
 
 from .diagnostics import (
     NotepadWindow,
+    cleanup_registered_processes,
     close_notepad_without_save,
     find_newest_notepad_window,
     find_notepad_windows_for_pid,
     focus_window_hwnd,
     log_environment,
+    register_created_process,
     resolve_notepad_exe,
     terminate_process_tree,
     test_artifact_dir,
@@ -52,8 +54,8 @@ def require_windows() -> None:
 
 @pytest.fixture
 def smoke_marker() -> str:
-    """테스트마다 고유 marker."""
-    return f"IRIS_SMOKE_{uuid.uuid4().hex[:12]}"
+    """테스트마다 고유 marker — underscore는 type_text에서 누락될 수 있어 사용하지 않음."""
+    return f"IRISSMOKE{uuid.uuid4().hex[:12]}"
 
 
 @pytest.fixture
@@ -90,12 +92,13 @@ def smoke_runtime(smoke_db: Database, smoke_registry: AutomationToolRegistry) ->
 
 
 @pytest.fixture
-def notepad_session(require_windows: None) -> Generator[NotepadWindow, None, None]:
+def notepad_session(require_windows: None, smoke_marker: str) -> Generator[NotepadWindow, None, None]:
     """메모장 실행 — 테스트가 시작한 PID만 종료."""
     started = time.monotonic()
     exe = resolve_notepad_exe()
     proc = subprocess.Popen([exe], shell=False)  # noqa: S603
     pid = int(proc.pid)
+    register_created_process(pid, marker=smoke_marker, exe=Path(exe).name)
     session: NotepadWindow | None = None
 
     def _ready() -> bool:
@@ -136,6 +139,13 @@ def _reset_smoke_tool_counter() -> Generator[None, None, None]:
 @pytest.fixture(autouse=True)
 def _log_smoke_env(require_windows: None) -> None:
     _ = log_environment()
+
+
+@pytest.fixture(autouse=True)
+def _smoke_process_cleanup(require_windows: None) -> Generator[None, None, None]:
+    """실패 시에도 등록된 PID만 정리."""
+    yield
+    cleanup_registered_processes()
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)

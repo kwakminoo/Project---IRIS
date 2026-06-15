@@ -24,6 +24,89 @@ def smoke_artifacts_root() -> Path:
     return root
 
 
+def created_processes_path() -> Path:
+    """스모크 테스트가 직접 생성한 PID 목록."""
+    return smoke_artifacts_root() / "created-processes.json"
+
+
+def register_created_process(
+    pid: int,
+    *,
+    marker: str = "",
+    exe: str = "notepad.exe",
+    create_time: float | None = None,
+) -> None:
+    """테스트가 시작한 프로세스만 cleanup 대상으로 등록."""
+    if pid <= 0:
+        return
+    path = created_processes_path()
+    entries: list[dict[str, Any]] = []
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                entries = [e for e in raw if isinstance(e, dict)]
+        except Exception:
+            entries = []
+    ct = create_time
+    if ct is None:
+        try:
+            import psutil
+
+            ct = float(psutil.Process(pid).create_time())
+        except Exception:
+            ct = time.time()
+    entry = {
+        "pid": int(pid),
+        "marker": marker,
+        "exe": exe,
+        "create_time": ct,
+        "registered_at": time.time(),
+    }
+    if not any(int(e.get("pid", -1)) == pid for e in entries):
+        entries.append(entry)
+    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_created_processes() -> list[dict[str, Any]]:
+    path = created_processes_path()
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+    except Exception:
+        return []
+
+
+def cleanup_registered_processes() -> list[int]:
+    """등록된 PID만 종료 — PID 재사용 방지를 위해 create_time 확인."""
+    terminated: list[int] = []
+    for entry in load_created_processes():
+        pid = int(entry.get("pid") or 0)
+        if pid <= 0:
+            continue
+        expected_ct = entry.get("create_time")
+        try:
+            import psutil
+
+            proc = psutil.Process(pid)
+            proc_name = (proc.name() or "").lower()
+            if proc_name != str(entry.get("exe") or "notepad.exe").lower():
+                continue
+            if expected_ct is not None:
+                if abs(float(proc.create_time()) - float(expected_ct)) > 1.0:
+                    continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            pass
+        terminate_process_tree(pid)
+        terminated.append(pid)
+    created_processes_path().write_text("[]", encoding="utf-8")
+    return terminated
+
+
 def test_artifact_dir(test_name: str) -> Path:
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in test_name)
     d = smoke_artifacts_root() / safe

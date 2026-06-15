@@ -40,7 +40,7 @@ jobs:
 
       - name: Run tests
         working-directory: iris
-        run: python -m pytest -q -m "not windows_smoke and not integration"
+        run: python -m pytest -q -m "not windows_smoke and not external_service and not requires_model"
 
       - name: Upload pytest log on failure
         if: failure()
@@ -72,12 +72,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        working-directory: iris
+        run: python -m pytest --help | findstr /C:"--timeout"
+
       - name: Compile
         run: python -m compileall iris -q
 
       - name: Run tests
         working-directory: iris
-        run: python -m pytest -q -m "not windows_smoke and not integration"
+        run: python -m pytest -q -m "not windows_smoke and not external_service and not requires_model"
 
       - name: Upload pytest log on failure
         if: failure()
@@ -86,9 +90,9 @@ jobs:
           name: pytest-log-windows-py312
           path: iris/.pytest_cache/
 
-  linux-domain:
-    name: test / linux-domain
-    runs-on: ubuntu-latest
+  windows-integration:
+    name: test / windows-integration
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -98,33 +102,27 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: |
+            iris/requirements.txt
             iris/requirements-base.txt
+            iris/requirements-windows.txt
             iris/requirements-dev.txt
 
-      - name: Install OS dependencies (PyQt6 headless)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
-            libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
-            libxcb-xfixes0 libxcb-shape0 libdbus-1-3
-
-      - name: Install dependencies (base + dev only)
+      - name: Install dependencies
         working-directory: iris
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-base.txt -r requirements-dev.txt
+          pip install -r requirements.txt
 
       - name: Compile
         run: python -m compileall iris -q
 
-      - name: Run tests (non-Windows)
+      - name: Run integration tests
         working-directory: iris
-        run: python -m pytest -q -m "not windows_smoke and not integration and not windows_only"
+        run: python -m pytest -v -m "integration and not windows_smoke and not external_service and not requires_model" --timeout=180
 
       - name: Upload pytest log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-linux-domain
+          name: pytest-log-windows-integration
           path: iris/.pytest_cache/

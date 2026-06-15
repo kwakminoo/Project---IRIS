@@ -6,16 +6,18 @@
 |------|----------|--------|-----|
 | `.github/workflows/test.yml` | `test / windows-py311` | push, PR, dispatch | windows-latest |
 | `.github/workflows/test.yml` | `test / windows-py312` | push, PR, dispatch | windows-latest |
-| `.github/workflows/test.yml` | `test / linux-domain` | push, PR, dispatch | ubuntu-latest |
+| `.github/workflows/linux-experimental.yml` | `experimental / linux-domain` | workflow_dispatch | ubuntu-latest |
 | `.github/workflows/windows-smoke.yml` | `windows-smoke` | workflow_dispatch | windows-latest |
 
 ## Branch Protection (권장 Required Checks)
 
 - `test / windows-py311`
 - `test / windows-py312`
-- `test / linux-domain`
+- `test / windows-integration`
 
-`windows-smoke`는 수동 실행 — 초기 Required Check 아님.
+`windows-smoke`는 수동 실행. `linux-experimental`은 다음 단계 필수 조건 아님.
+
+**Primary platform: Windows 11** — 자세한 내용은 [windows-ci-policy.md](windows-ci-policy.md).
 
 ## 의존성 설치
 
@@ -41,7 +43,7 @@ Windows 전용 패키지(`pywin32`, `pywinauto` 등)는 설치하지 않음.
 
 ```bash
 python -m compileall iris -q
-cd iris && python -m pytest -q -m "not windows_smoke and not integration"
+cd iris && python -m pytest -q -m "not windows_smoke and not external_service and not requires_model"
 ```
 
 Linux 추가 제외:
