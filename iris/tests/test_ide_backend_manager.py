@@ -35,7 +35,8 @@ def test_backend_manager_does_not_use_shell(tmp_path: Path) -> None:
 
 def test_backend_failure_does_not_close_iris(tmp_path: Path) -> None:
     mgr = IdeBackendManager()
-    status = mgr.ensure_running(tmp_path)
+    with patch.object(mgr, "_find_backend_entry", return_value=None):
+        status = mgr.ensure_running(tmp_path)
     assert not status.running
     mgr.shutdown()
 

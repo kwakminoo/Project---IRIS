@@ -1,8 +1,9 @@
-"""Animated Iris core visualizer."""
+"""Animated Iris core visualizer — 사이버스페이스 입자 네트워크 orb."""
 
 from __future__ import annotations
 
 import math
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -10,73 +11,92 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import QWidget
 
-
+# 상태별 시각 프로필 — 보라/마젠타/청색 네온 계열
 _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
     "IDLE": {
-        "pulse": 0.025,
-        "glow": 0.34,
-        "ring": 0.22,
-        "speed": 0.75,
-        "accent": (56, 189, 248),
+        "pulse": 0.022,
+        "glow": 0.38,
+        "ring": 0.20,
+        "speed": 0.65,
+        "accent": (168, 85, 247),
     },
     "LISTENING": {
-        "pulse": 0.070,
-        "glow": 0.58,
-        "ring": 0.42,
-        "speed": 1.35,
+        "pulse": 0.065,
+        "glow": 0.62,
+        "ring": 0.44,
+        "speed": 1.25,
         "accent": (34, 211, 238),
     },
     "PROCESSING": {
-        "pulse": 0.050,
-        "glow": 0.70,
-        "ring": 0.62,
-        "speed": 2.15,
-        "accent": (129, 140, 248),
+        "pulse": 0.048,
+        "glow": 0.74,
+        "ring": 0.58,
+        "speed": 2.0,
+        "accent": (192, 132, 252),
     },
     "EXECUTING": {
-        "pulse": 0.085,
-        "glow": 0.80,
-        "ring": 0.72,
-        "speed": 2.65,
-        "accent": (96, 165, 250),
+        "pulse": 0.080,
+        "glow": 0.82,
+        "ring": 0.70,
+        "speed": 2.5,
+        "accent": (56, 189, 248),
     },
     "RESPONDING": {
-        "pulse": 0.075,
-        "glow": 0.66,
-        "ring": 0.50,
-        "speed": 1.65,
-        "accent": (125, 211, 252),
+        "pulse": 0.070,
+        "glow": 0.68,
+        "ring": 0.48,
+        "speed": 1.55,
+        "accent": (232, 121, 249),
     },
     "MONITORING": {
-        "pulse": 0.040,
-        "glow": 0.54,
-        "ring": 0.46,
-        "speed": 1.05,
-        "accent": (45, 212, 191),
+        "pulse": 0.035,
+        "glow": 0.50,
+        "ring": 0.40,
+        "speed": 0.95,
+        "accent": (129, 140, 248),
     },
     "ALERTING": {
-        "pulse": 0.110,
-        "glow": 0.95,
-        "ring": 0.88,
-        "speed": 3.05,
+        "pulse": 0.100,
+        "glow": 0.90,
+        "ring": 0.85,
+        "speed": 2.8,
         "accent": (251, 191, 36),
     },
     "ERROR": {
-        "pulse": 0.080,
-        "glow": 0.72,
-        "ring": 0.68,
-        "speed": 2.20,
-        "accent": (168, 85, 247),
+        "pulse": 0.075,
+        "glow": 0.76,
+        "ring": 0.65,
+        "speed": 2.1,
+        "accent": (248, 113, 113),
     },
 }
+
+_PARTICLE_COUNT = 52
+_CONNECT_DIST = 0.38
 
 
 def _asset_path(relative_path: str) -> Path:
     return Path(__file__).resolve().parents[2] / "assets" / relative_path
 
 
+def _fibonacci_sphere(n: int, seed: int = 42) -> list[tuple[float, float, float]]:
+    """구 표면 균등 분포 좌표."""
+    rng = random.Random(seed)
+    pts: list[tuple[float, float, float]] = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    for i in range(n):
+        y = 1.0 - (i / float(max(n - 1, 1))) * 2.0
+        r = math.sqrt(max(0.0, 1.0 - y * y))
+        theta = golden * i
+        x = math.cos(theta) * r
+        z = math.sin(theta) * r
+        jitter = 0.04 * rng.random()
+        pts.append((x + jitter, y + jitter, z + jitter))
+    return pts
+
+
 class ParticleVisualizer(QWidget):
-    """Central animated orb that reacts to Iris state changes."""
+    """중앙 사이버스페이스 orb — 입자 네트워크 + 상태 반응."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -89,12 +109,16 @@ class ParticleVisualizer(QWidget):
         self._cx = 0.0
         self._cy = 0.0
         self._core_r = 120.0
+        self._sphere_pts = _fibonacci_sphere(_PARTICLE_COUNT)
         self._core_image = QPixmap(str(_asset_path("visuals/iris_core.png")))
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(25)
-        self._timer.timeout.connect(self._tick)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -133,18 +157,18 @@ class ParticleVisualizer(QWidget):
     def _recompute_geometry(self) -> None:
         width, height = max(self.width(), 1), max(self.height(), 1)
         self._cx = width * 0.5
-        self._cy = height * 0.5
-        self._core_r = min(width, height) * 0.38
+        self._cy = height * 0.48
+        self._core_r = min(width, height) * 0.36
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])
 
     def _tick(self) -> None:
         speed = float(self._profile()["speed"]) * self._activity_level
-        self._t += 0.028 * max(0.35, speed)
-        self._smooth_audio += (self._audio_level - self._smooth_audio) * 0.16
-        self._audio_level *= 0.90
-        self._state_burst *= 0.91
+        self._t += 0.026 * max(0.35, speed)
+        self._smooth_audio += (self._audio_level - self._smooth_audio) * 0.14
+        self._audio_level *= 0.88
+        self._state_burst *= 0.90
         if self._state_burst < 0.01:
             self._state_burst = 0.0
         self.update()
@@ -155,19 +179,90 @@ class ParticleVisualizer(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        painter.fillRect(0, 0, self.width(), self.height(), QColor(11, 18, 32, 36))
-
         cx, cy = self._cx, self._cy
         profile = self._profile()
         accent = profile["accent"]
         assert isinstance(accent, tuple)
         synthetic_voice = self._synthetic_voice_level()
-        energy = min(1.0, max(self._smooth_audio, synthetic_voice) + self._state_burst * 0.35)
+        energy = min(1.0, max(self._smooth_audio, synthetic_voice) + self._state_burst * 0.32)
 
         self._draw_back_glow(painter, cx, cy, accent, energy)
+        projected = self._draw_particle_network(painter, cx, cy, accent, energy)
+        self._draw_orbit_rings(painter, cx, cy, accent, energy)
+        self._draw_state_effects(painter, cx, cy, accent, energy)
         self._draw_core_image(painter, cx, cy, energy)
+        self._draw_front_sheen(painter, cx, cy, accent, energy, projected)
 
         painter.end()
+
+    def _project_sphere(
+        self,
+        cx: float,
+        cy: float,
+        radius: float,
+        energy: float,
+    ) -> list[tuple[float, float, float, float]]:
+        """3D 구 좌표 → 2D (x, y, depth, size)."""
+        rot_y = self._t * 0.55
+        rot_x = self._t * 0.28
+        cos_y, sin_y = math.cos(rot_y), math.sin(rot_y)
+        cos_x, sin_x = math.cos(rot_x), math.sin(rot_x)
+        out: list[tuple[float, float, float, float]] = []
+        scale = radius * (1.0 + float(self._profile()["pulse"]) * math.sin(self._t * 1.6))
+        for px, py, pz in self._sphere_pts:
+            x1 = px * cos_y + pz * sin_y
+            z1 = -px * sin_y + pz * cos_y
+            y2 = py * cos_x - z1 * sin_x
+            z2 = py * sin_x + z1 * cos_x
+            depth = (z2 + 1.0) * 0.5
+            sx = cx + x1 * scale
+            sy = cy + y2 * scale * 0.92
+            size = 1.2 + depth * 1.8 + energy * 0.4
+            out.append((sx, sy, depth, size))
+        return out
+
+    def _draw_particle_network(
+        self,
+        painter: QPainter,
+        cx: float,
+        cy: float,
+        accent: tuple[int, int, int],
+        energy: float,
+    ) -> list[tuple[float, float, float, float]]:
+        projected = self._project_sphere(cx, cy, self._core_r * 1.05, energy)
+        n = len(projected)
+        connect_sq = (_CONNECT_DIST * self._core_r) ** 2
+
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+
+        for i in range(n):
+            x1, y1, d1, _ = projected[i]
+            for j in range(i + 1, n):
+                x2, y2, d2, _ = projected[j]
+                dx, dy = x2 - x1, y2 - y1
+                if dx * dx + dy * dy > connect_sq:
+                    continue
+                avg_d = (d1 + d2) * 0.5
+                alpha = int((12 + 28 * energy) * avg_d)
+                pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
+                pen.setWidthF(0.6)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+        for x, y, depth, size in projected:
+            alpha = int(40 + 180 * depth + 60 * energy)
+            r = size * (0.9 + energy * 0.25)
+            grad = QRadialGradient(x, y, r * 2)
+            grad.setColorAt(0.0, QColor(255, 255, 255, min(255, alpha + 40)))
+            grad.setColorAt(0.35, QColor(accent[0], accent[1], accent[2], alpha))
+            grad.setColorAt(1.0, QColor(accent[0], accent[1], accent[2], 0))
+            painter.setBrush(grad)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
+
+        painter.restore()
+        return projected
 
     def _synthetic_voice_level(self) -> float:
         if self._state_name == "LISTENING":
@@ -191,15 +286,13 @@ class ParticleVisualizer(QWidget):
         energy: float,
     ) -> None:
         glow = float(self._profile()["glow"])
-        radius = self._core_r * (1.55 + energy * 0.28)
+        radius = self._core_r * (1.65 + energy * 0.35)
         gradient = QRadialGradient(cx, cy, radius)
-        gradient.setColorAt(0.0, QColor(accent[0], accent[1], accent[2], int(52 + glow * 42)))
-        gradient.setColorAt(0.45, QColor(34, 211, 238, int(16 + 38 * energy)))
-        gradient.setColorAt(1.0, QColor(8, 47, 73, 0))
-        painter.fillRect(
-            QRectF(cx - radius, cy - radius, radius * 2, radius * 2),
-            gradient,
-        )
+        gradient.setColorAt(0.0, QColor(accent[0], accent[1], accent[2], int(65 + glow * 50)))
+        gradient.setColorAt(0.35, QColor(109, 40, 217, int(28 + 42 * energy)))
+        gradient.setColorAt(0.65, QColor(45, 10, 58, int(12 + 20 * energy)))
+        gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(QRectF(cx - radius, cy - radius, radius * 2, radius * 2), gradient)
 
     def _draw_orbit_rings(
         self,
@@ -212,12 +305,12 @@ class ParticleVisualizer(QWidget):
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         ring_strength = float(self._profile()["ring"])
-        for idx, scale in enumerate((0.82, 1.02, 1.22)):
-            wobble = 1.0 + math.sin(self._t * (1.1 + idx * 0.25) + idx) * 0.018
-            radius = self._core_r * scale * wobble * (1.0 + self._state_burst * 0.12)
-            alpha = int((26 + 34 * energy) * ring_strength / (idx + 1))
+        for idx, scale in enumerate((0.88, 1.08, 1.28)):
+            wobble = 1.0 + math.sin(self._t * (1.0 + idx * 0.22) + idx) * 0.015
+            radius = self._core_r * scale * wobble * (1.0 + self._state_burst * 0.10)
+            alpha = int((18 + 28 * energy) * ring_strength / (idx + 1))
             pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-            pen.setWidthF(1.0 + energy * 1.2)
+            pen.setWidthF(0.7 + energy * 0.5)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
@@ -251,17 +344,17 @@ class ParticleVisualizer(QWidget):
         accent: tuple[int, int, int],
         energy: float,
     ) -> None:
-        for idx, radius_scale in enumerate((1.02, 1.18)):
+        for idx, radius_scale in enumerate((1.04, 1.20)):
             radius = self._core_r * radius_scale
-            pen = QPen(QColor(accent[0], accent[1], accent[2], int(70 + energy * 90)))
-            pen.setWidthF(1.7 + idx * 0.6)
+            pen = QPen(QColor(accent[0], accent[1], accent[2], int(55 + energy * 75)))
+            pen.setWidthF(1.2 + idx * 0.4)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
-            start = int((self._t * (140 + idx * 80) + idx * 130) * 16)
-            span = int((58 + energy * 42) * 16)
+            start = int((self._t * (130 + idx * 70) + idx * 120) * 16)
+            span = int((52 + energy * 38) * 16)
             painter.drawArc(rect, start, span)
-            painter.drawArc(rect, start + int(180 * 16), int(span * 0.52))
+            painter.drawArc(rect, start + int(180 * 16), int(span * 0.5))
 
     def _draw_voice_ripples(
         self,
@@ -272,11 +365,11 @@ class ParticleVisualizer(QWidget):
         energy: float,
     ) -> None:
         for idx in range(3):
-            phase = (self._t * 0.8 + idx / 3) % 1.0
-            radius = self._core_r * (0.76 + phase * 0.62)
-            alpha = int((1.0 - phase) * (38 + 80 * energy))
+            phase = (self._t * 0.75 + idx / 3) % 1.0
+            radius = self._core_r * (0.78 + phase * 0.58)
+            alpha = int((1.0 - phase) * (32 + 70 * energy))
             pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-            pen.setWidthF(1.1 + energy * 1.4)
+            pen.setWidthF(0.9 + energy * 1.0)
             painter.setPen(pen)
             painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
 
@@ -288,20 +381,21 @@ class ParticleVisualizer(QWidget):
         accent: tuple[int, int, int],
     ) -> None:
         phase = 1.0 - self._state_burst
-        radius = self._core_r * (0.78 + phase * 0.72)
-        alpha = int(self._state_burst * 150)
+        radius = self._core_r * (0.80 + phase * 0.68)
+        alpha = int(self._state_burst * 130)
         pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-        pen.setWidthF(2.4)
+        pen.setWidthF(1.8)
         painter.setPen(pen)
         painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
 
     def _draw_core_image(self, painter: QPainter, cx: float, cy: float, energy: float) -> None:
         if self._core_image.isNull():
+            self._draw_procedural_core(painter, cx, cy, energy)
             return
 
         pulse = float(self._profile()["pulse"])
-        breathe = math.sin(self._t * 1.7)
-        side = self._core_r * 2.42 * (1.0 + pulse * breathe + energy * 0.035)
+        breathe = math.sin(self._t * 1.5)
+        side = self._core_r * 2.2 * (1.0 + pulse * breathe + energy * 0.03)
         rect = QRectF(cx - side / 2, cy - side / 2, side, side)
 
         source_side = min(self._core_image.width(), self._core_image.height()) * 0.92
@@ -314,15 +408,14 @@ class ParticleVisualizer(QWidget):
 
         outer_clip = QPainterPath()
         outer_clip.addEllipse(rect)
-        inner_side = side * 0.56
+        inner_side = side * 0.52
         inner_rect = QRectF(cx - inner_side / 2, cy - inner_side / 2, inner_side, inner_side)
         inner_clip = QPainterPath()
         inner_clip.addEllipse(inner_rect)
-
-        rotation = self._t * 3.4
+        rotation = self._t * 2.8
 
         painter.save()
-        painter.setOpacity(0.58 + min(0.18, energy * 0.18))
+        painter.setOpacity(0.50 + min(0.22, energy * 0.20))
         painter.setClipPath(outer_clip.subtracted(inner_clip))
         painter.translate(cx, cy)
         painter.rotate(rotation)
@@ -331,33 +424,24 @@ class ParticleVisualizer(QWidget):
         painter.restore()
 
         painter.save()
-        painter.setOpacity(0.98)
+        painter.setOpacity(0.95)
         painter.setClipPath(inner_clip)
         painter.drawPixmap(rect, self._core_image, source_rect)
         painter.restore()
 
-    def _draw_outer_rotation_highlight(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        painter.save()
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-        radius = self._core_r * 1.08
-        rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
-        for idx in range(2):
-            pen = QPen(QColor(accent[0], accent[1], accent[2], int(28 + energy * 46)))
-            pen.setWidthF(1.1 + idx * 0.35)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            direction = 1 if idx == 0 else -1
-            start = int((self._t * direction * (18 + idx * 8) + idx * 180) * 16)
-            span = int((34 + energy * 20) * 16)
-            painter.drawArc(rect, start, span)
-        painter.restore()
+    def _draw_procedural_core(self, painter: QPainter, cx: float, cy: float, energy: float) -> None:
+        """에셋 없을 때 절차적 코어."""
+        r = self._core_r * 0.42 * (1.0 + energy * 0.06)
+        grad = QRadialGradient(cx, cy, r)
+        profile = self._profile()
+        accent = profile["accent"]
+        assert isinstance(accent, tuple)
+        grad.setColorAt(0.0, QColor(255, 255, 255, int(180 + 40 * energy)))
+        grad.setColorAt(0.35, QColor(accent[0], accent[1], accent[2], int(140 + 60 * energy)))
+        grad.setColorAt(1.0, QColor(accent[0], accent[1], accent[2], 0))
+        painter.setBrush(grad)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
 
     def _draw_front_sheen(
         self,
@@ -366,13 +450,14 @@ class ParticleVisualizer(QWidget):
         cy: float,
         accent: tuple[int, int, int],
         energy: float,
+        projected: list[tuple[float, float, float, float]],
     ) -> None:
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-        radius = self._core_r * (0.58 + energy * 0.08)
-        sheen = QRadialGradient(cx - radius * 0.22, cy - radius * 0.28, radius)
-        sheen.setColorAt(0.0, QColor(255, 255, 255, int(22 + energy * 34)))
-        sheen.setColorAt(0.34, QColor(accent[0], accent[1], accent[2], int(10 + energy * 22)))
+        radius = self._core_r * (0.55 + energy * 0.06)
+        sheen = QRadialGradient(cx - radius * 0.2, cy - radius * 0.26, radius)
+        sheen.setColorAt(0.0, QColor(255, 255, 255, int(18 + energy * 28)))
+        sheen.setColorAt(0.34, QColor(accent[0], accent[1], accent[2], int(8 + energy * 18)))
         sheen.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(QRectF(cx - radius, cy - radius, radius * 2, radius * 2), sheen)
         painter.restore()

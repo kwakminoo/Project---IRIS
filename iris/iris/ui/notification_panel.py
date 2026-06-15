@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from iris.automation import window_controller
+from iris.ui.theme_tokens import TOKENS
 
 if TYPE_CHECKING:
     from iris.monitoring.notification_policy import NotificationPolicy
@@ -56,18 +56,20 @@ class NotificationPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("NotificationPanel")
         self.setStyleSheet(
-            """
-            QWidget#NotificationPanel {
-                background-color: #0f172a;
-                border: 1px solid #1e293b;
-                border-radius: 8px;
-            }
-            QWidget#NotificationPanel QListWidget {
-                background-color: #111827;
-                border: 1px solid #243247;
-                border-radius: 6px;
+            f"""
+            QWidget#NotificationPanel {{
+                background: {TOKENS.panel_overlay};
+                border: 1px solid {TOKENS.border_subtle};
+                border-radius: 4px;
+            }}
+            QWidget#NotificationPanel QListWidget {{
+                background: rgba(8, 6, 18, 0.5);
+                border: 1px solid {TOKENS.border_subtle};
+                border-radius: 4px;
                 padding: 4px;
-            }
+                color: {TOKENS.text_secondary};
+                font-size: {TOKENS.font_size_micro};
+            }}
             """
         )
         self._cooldown_sec = cooldown_seconds
@@ -75,7 +77,9 @@ class NotificationPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
-        lay.addWidget(QLabel("알림"))
+        hdr = QLabel("ALERTS")
+        hdr.setObjectName("PanelTitle")
+        lay.addWidget(hdr)
         self._list = QListWidget()
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._context_menu)

@@ -9,6 +9,7 @@ from PyQt6.QtGui import QColor, QFont, QPalette, QTextCursor
 from PyQt6.QtWidgets import QFrame, QLabel, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
 
 from iris.core.activity_privacy import prepare_activity_line
+from iris.ui.theme_tokens import TOKENS
 
 
 class UiActivityRelay(QObject):
@@ -55,8 +56,8 @@ class LiveActivityPanel(QWidget):
         hdr.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         hdr.setAutoFillBackground(False)
         hdr.setStyleSheet(
-            "color: rgba(226,232,240,0.55); font-size: 11px; font-weight: 600;"
-            "background: transparent;"
+            f"color: {TOKENS.text_hud_label}; font-size: {TOKENS.font_size_hud}; font-weight: 500;"
+            " letter-spacing: 1px; background: transparent;"
         )
         lay.addWidget(hdr)
 

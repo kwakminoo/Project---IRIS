@@ -15,7 +15,11 @@
     "watch": "yarn workspace @iris-ide/browser-app watch"
   },
   "devDependencies": {
-    "lerna": "^8.1.2"
+    "@vscode/ripgrep": "1.15.9",
+    "lerna": "^8.1.2",
+    "node": "20.18.1",
+    "node-win-x64": "20.18.1",
+    "reflect-metadata": "0.2.2"
   },
   "resolutions": {
     "@theia/core": "1.55.0",
@@ -31,6 +35,9 @@
     "@theia/preferences": "1.55.0",
     "@theia/scm": "1.55.0",
     "@theia/git": "1.55.0",
-    "@theia/plugin-ext": "1.55.0"
+    "@theia/plugin-ext": "1.55.0",
+    "@vscode/ripgrep": "1.15.9",
+    "reflect-metadata": "0.2.2",
+    "**/inversify": "6.0.2"
   }
 }

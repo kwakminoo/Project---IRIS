@@ -27,7 +27,12 @@ build/
 
 # Iris IDE (Theia)
 iris-ide/node_modules/
+iris-ide/**/node_modules/
 iris-ide/lib/
+iris-ide/applications/browser/lib/
+iris-ide/theia-extensions/*/lib/
+iris-ide/applications/browser/src-gen/
+iris-ide/bin/
 iris-ide/*.log
 .iris/logs/
 
@@ -41,3 +46,6 @@ docs/발표 영상.mp4
 .pytest_cache/
 .coverage
 htmlcov/
+iris/tmp_*.json
+iris/tmp_dbg/
+iris/artifacts/

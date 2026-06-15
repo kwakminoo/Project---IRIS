@@ -2,6 +2,7 @@ import { injectable, inject } from '@theia/core/shared/inversify';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { EditorManager } from '@theia/editor/lib/browser/editor-manager';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
+import { URI } from '@theia/core/lib/common/uri';
 
 interface IrisContextPayload {
     type: 'context.update';
@@ -34,25 +35,45 @@ export class IrisBridgeContribution implements FrontendApplicationContribution {
         this.pushContext();
     }
 
-  onStop(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+    onStop(): void {
+        if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+        }
     }
-  }
 
     protected async pushContext(): Promise<void> {
-        const editor = this.editorManager.currentEditor;
-        const uri = editor?.editor.uri.toString() ?? '';
-        const selection = editor?.editor.selection ?? undefined;
-        const selectedText = selection ? editor?.editor.getSelectedText() ?? '' : '';
+        const widget = this.editorManager.currentEditor;
+        const textEditor = widget?.editor as unknown as {
+            uri: URI;
+            selection?: { start: { line: number; character: number }; end: { line: number; character: number } };
+            document: {
+                getText: (range?: unknown) => string;
+                languageId?: string;
+                dirty?: boolean;
+            };
+        } | undefined;
+
+        const uri = textEditor?.uri.toString() ?? '';
+        const selection = textEditor?.selection;
+        let selectedText = '';
+        if (textEditor && selection) {
+            try {
+                selectedText = textEditor.document.getText(selection);
+            } catch {
+                selectedText = '';
+            }
+        }
+
         const payload: IrisContextPayload = {
             type: 'context.update',
             workspace_path: this.workspaceService.workspace?.resource?.toString() ?? '',
             active_file_uri: uri,
-            active_file_language: editor?.editor.document.languageId ?? '',
+            active_file_language: textEditor?.document.languageId ?? '',
             selected_text: selectedText,
-            selection_range: selection ? { start: selection.start, end: selection.end } : {},
-            dirty_state: editor?.editor.document.dirty ?? false,
+            selection_range: selection
+                ? { start: selection.start, end: selection.end }
+                : {},
+            dirty_state: Boolean(textEditor?.document.dirty),
         };
         try {
             await fetch(`${this.bridgeBase}/context`, {
@@ -71,7 +92,7 @@ export class IrisBridgeContribution implements FrontendApplicationContribution {
             if (!res.ok) {
                 return;
             }
-            const data = await res.json() as { commands?: Array<Record<string, unknown>> };
+            const data = (await res.json()) as { commands?: Array<Record<string, unknown>> };
             for (const cmd of data.commands ?? []) {
                 await this.handleCommand(cmd);
             }
@@ -82,7 +103,7 @@ export class IrisBridgeContribution implements FrontendApplicationContribution {
 
     protected async handleCommand(cmd: Record<string, unknown>): Promise<void> {
         if (cmd.type === 'editor.open' && typeof cmd.uri === 'string') {
-            await this.editorManager.open(new (await import('@theia/core/lib/common/uri')).URI(cmd.uri));
+            await this.editorManager.open(new URI(cmd.uri));
         }
     }
 }

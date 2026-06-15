@@ -88,6 +88,29 @@ cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\IRIS\iris"
 
 또는 `run.bat` 더블클릭.
 
+## Iris IDE (내장 Theia)
+
+IDE는 구현되어 있습니다. 좌측 사이드바 **IDE** 버튼으로 Theia 작업공간으로 전환합니다.
+
+**최초 1회** (`iris` 폴더 또는 저장소 루트 `IRIS` 폴더에서):
+
+```powershell
+.\scripts\setup-iris-ide.ps1
+.\scripts\build-iris-ide.ps1
+```
+
+`iris` 폴더에서 실행하면 `iris/scripts/` 래퍼가 저장소 루트의 스크립트를 호출합니다.
+
+**빌드 실패 (`EBUSY`, `drivelist.node`)** — Iris를 완전히 종료한 뒤 다시 `build-iris-ide.ps1`을 실행하세요. Iris IDE 백엔드가 `.node` 파일을 잡고 있으면 webpack이 덮어쓰지 못합니다. `Failed to resolve module: @theia/electron` 경고는 Browser 앱에서는 무시해도 됩니다.
+
+추가 Python 패키지:
+
+```powershell
+pip install PyQt6-WebEngine
+```
+
+Node.js 18+와 Yarn이 필요합니다. Yarn이 없으면 setup 스크립트가 `npm install -g yarn`을 시도합니다.
+
 ## 설정
 
 우측 상단 설정 아이콘에서 다음을 바꿀 수 있습니다.

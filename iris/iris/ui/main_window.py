@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QDateTime, QEvent, Qt, QTimer, pyqtSlot
-from PyQt6.QtGui import QAction, QColor, QCloseEvent, QPalette
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -74,119 +74,12 @@ from iris.infrastructure.ide.ide_backend_manager import IdeBackendManager
 from iris.infrastructure.ide.ide_bridge_client import IdeBridgeClient
 from iris.infrastructure.ide.ide_workspace_resolver import resolve_ide_workspace
 from iris.system.metrics_worker import MetricsWorker
+from iris.ui.cyberspace_background import CyberspaceBackground
+from iris.ui.cyberspace_theme import apply_cyberspace_theme
 from iris.ui.left_sidebar_panel import LeftSidebarPanel
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
-
-
-def _apply_dark_theme(w: QWidget) -> None:
-    pal = QPalette()
-    pal.setColor(QPalette.ColorRole.Window, QColor("#0b1220"))
-    pal.setColor(QPalette.ColorRole.WindowText, QColor("#e2e8f0"))
-    pal.setColor(QPalette.ColorRole.Base, QColor("#111827"))
-    pal.setColor(QPalette.ColorRole.Text, QColor("#e2e8f0"))
-    pal.setColor(QPalette.ColorRole.Button, QColor("#1e293b"))
-    pal.setColor(QPalette.ColorRole.ButtonText, QColor("#e2e8f0"))
-    w.setPalette(pal)
-    w.setStyleSheet(
-        """
-        QWidget {
-            background-color: #0b1220;
-            color: #e2e8f0;
-            font-family: "Noto Sans KR", "Segoe UI Variable", "Segoe UI", "Malgun Gothic";
-            font-size: 13px;
-        }
-        QTextEdit, QListWidget, QLineEdit {
-            background-color: #111827; border: 1px solid #334155; border-radius: 6px;
-        }
-        QWidget#LiveActivityPanel,
-        QPlainTextEdit#LiveActivityLog {
-            background: transparent;
-            background-color: transparent;
-            border: none;
-        }
-        QPushButton {
-            background-color: #312e81; color: #e0e7ff; border-radius: 6px; padding: 6px 12px;
-        }
-        QPushButton:hover { background-color: #4338ca; }
-        QFrame#StatusHeader {
-            background-color: #0f172a;
-            border: 1px solid #1e293b;
-            border-radius: 8px;
-        }
-        QFrame#StatusHeader QLabel {
-            background-color: transparent;
-        }
-        QFrame#WorkspacePanel {
-            background-color: #0b1220;
-            border: none;
-        }
-        QLabel#StatusPill {
-            background-color: transparent;
-            border: none;
-            border-radius: 0;
-            padding: 0;
-            color: #dbeafe;
-        }
-        QLabel#BackendStatus { color: #dbeafe; }
-        QLabel#TtsStatus { color: #cbd5e1; }
-        QSplitter::handle {
-            background-color: #111827;
-            margin: 8px 2px;
-            border-radius: 2px;
-        }
-        QScrollBar:vertical {
-            background: #0b1220;
-            width: 14px;
-            margin: 2px;
-            border-radius: 7px;
-        }
-        QScrollBar:horizontal {
-            background: #0b1220;
-            height: 14px;
-            margin: 2px;
-            border-radius: 7px;
-        }
-        QScrollBar::handle:vertical,
-        QScrollBar::handle:horizontal {
-            background: #334155;
-            border: 1px solid #475569;
-            border-radius: 7px;
-            min-height: 36px;
-            min-width: 36px;
-        }
-        QScrollBar::handle:vertical:hover,
-        QScrollBar::handle:horizontal:hover {
-            background: #3b82f6;
-            border-color: #60a5fa;
-        }
-        QScrollBar::add-line,
-        QScrollBar::sub-line,
-        QScrollBar::add-page,
-        QScrollBar::sub-page {
-            background: transparent;
-            border: none;
-            width: 0px;
-            height: 0px;
-        }
-        QPushButton#WinCtrl {
-            background-color: #1e293b;
-            padding: 0;
-            min-width: 34px;
-            max-width: 34px;
-            min-height: 28px;
-            max-height: 28px;
-            font-size: 14px;
-            font-weight: 600;
-        }
-        QPushButton#WinCtrl:hover { background-color: #334155; }
-        QPushButton#WinCtrl:pressed { background-color: #475569; }
-        QLabel#DragTitle { font-weight: 700; font-size: 16px; color: #c4b5fd; }
-        QLabel#PanelTitle { font-weight: 600; color: #93c5fd; }
-        QLabel#ModelStatus { color: #a5b4fc; font-weight: 600; }
-        """
-    )
 
 
 class MainWindow(QMainWindow):
@@ -262,10 +155,10 @@ class MainWindow(QMainWindow):
         self._ide_bridge = IdeBridgeClient()
         self._ide_bridge.start()
 
-        central = QWidget()
+        central = CyberspaceBackground()
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(14, 10, 14, 10)
+        root.setSpacing(8)
 
         self._drag = DragTab(self)
         self._drag.settings_clicked.connect(self._open_settings_dialog)
@@ -276,8 +169,8 @@ class MainWindow(QMainWindow):
         status_header = QFrame()
         status_header.setObjectName("StatusHeader")
         status_header_lay = QVBoxLayout(status_header)
-        status_header_lay.setContentsMargins(12, 10, 12, 10)
-        status_header_lay.setSpacing(8)
+        status_header_lay.setContentsMargins(4, 6, 4, 6)
+        status_header_lay.setSpacing(4)
         status_top = QHBoxLayout()
         status_top.setContentsMargins(0, 0, 0, 0)
         status_top.setSpacing(8)
@@ -384,7 +277,7 @@ class MainWindow(QMainWindow):
         shell = FramelessShell(self)
         shell.set_center_widget(central)
         self.setCentralWidget(shell)
-        _apply_dark_theme(self)
+        apply_cyberspace_theme(self)
 
         self._chat.send_clicked.connect(lambda t: self._on_user_text(t, from_voice=False))
 
@@ -1361,6 +1254,7 @@ class MainWindow(QMainWindow):
             title="IDE",
             tooltip="Iris IDE 작업공간으로 전환",
         )
+        self._left_sidebar.utility.actions.set_action_active("ide", False)
         self._assistant_page.restore_splitter_state(self._assistant_splitter_state)
         self._metrics_worker.set_active(True)
 
@@ -1376,6 +1270,7 @@ class MainWindow(QMainWindow):
             tooltip="기존 Iris 화면으로 복귀",
         )
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
+        self._left_sidebar.utility.actions.set_action_active("ide", True)
         ctx = self._ide_bridge.get_context()
         self._ide_page.coding_panel.chat.set_workspace_context(ctx.summary_line())
         self._metrics_worker.set_active(True)
@@ -1384,6 +1279,8 @@ class MainWindow(QMainWindow):
         if self._workspace_mode == "ide":
             self.switch_to_assistant_workspace()
             return
+        # 백엔드 준비/오류 UI를 보여주려면 성공 여부와 관계없이 IDE 페이지로 먼저 전환
+        self.switch_to_ide_workspace()
         self._start_ide_backend_and_load()
 
     def _start_ide_backend_and_load(self) -> None:
@@ -1400,7 +1297,6 @@ class MainWindow(QMainWindow):
         bridge_url = self._ide_bridge.base_url
         url = f"{status.frontend_url}?irisBridgePort={self._ide_bridge.port}"
         if self._ide_page.theia.load_url(url):
-            self.switch_to_ide_workspace()
             self._ide_page.theia.run_javascript(
                 f"window.__IRIS_BRIDGE_URL__ = {json.dumps(bridge_url)};"
             )

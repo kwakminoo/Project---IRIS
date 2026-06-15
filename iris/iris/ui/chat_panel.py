@@ -20,12 +20,16 @@ from PyQt6.QtWidgets import (
 from iris.ui.chat_display import (
     TYPING_CHARS_PER_TICK,
     TYPING_INTERVAL_MS,
+    TYPING_SPEECH_MAX_CHARS_PER_TICK,
     chat_body_to_html,
     effective_typing_duration_ms,
     extend_typing_timeline_ms,
+    markdown_to_chat_html,
     normalize_chat_body,
     scale_typing_duration_ms,
+    typing_body_to_html,
     typing_target_index,
+    visible_typing_text,
 )
 from iris.ui.mic_waveform_bar import MicWaveformBar
 
@@ -192,6 +196,8 @@ class ChatPanel(QWidget):
         self._stream_active = False
         self._stream_who = "Iris"
         self._stream_block_start: int | None = None
+        self._typing_body_start: int | None = None
+        self._typing_render_markdown = False
         self._user_listening_active = False
         self._input_area = _ChatInputArea()
         self._input = self._input_area.input_bar.input
@@ -258,9 +264,9 @@ class ChatPanel(QWidget):
         self._user_listening_active = False
 
     def complete_user_message_typed(self, text: str) -> None:
-        """음성 인식 완료 — 플레이스홀더 제거 후 타이핑 효과로 본문 표시."""
+        """음성 인식 완료 — 플레이스홀더 제거 후 본문 즉시 표시."""
         self.cancel_user_listening()
-        self.append_message_typed("나", text)
+        self.append_message_instant("나", text)
 
     @property
     def typing_buffer_text(self) -> str:
@@ -268,8 +274,26 @@ class ChatPanel(QWidget):
         return self._typing_text
 
     def append_message(self, who: str, text: str) -> None:
-        """즉시 전체 표시 대신 타이핑 효과로 출력."""
+        """Iris 등 — 타이핑 효과로 출력 (TTS 동기화 없음)."""
         self.append_message_typed(who, text, speech_sync=False)
+
+    def append_message_instant(self, who: str, text: str) -> None:
+        """사용자 입력 등 — 타이핑 없이 본문 전체를 즉시 표시."""
+        self.finish_typing()
+        body = normalize_chat_body(who, text)
+        if not body:
+            return
+        cursor = self._log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if self._log.toPlainText().strip():
+            cursor.insertBlock()
+        cursor.insertHtml(f"<b>{html.escape(who)}</b>: ")
+        if who.strip().lower() == "iris":
+            cursor.insertHtml(markdown_to_chat_html(body))
+        else:
+            cursor.insertHtml(chat_body_to_html(body))
+        self._log.setTextCursor(cursor)
+        self._scroll_log_to_bottom()
 
     def begin_stream_message(self, who: str) -> None:
         """LLM 스트리밍 — 헤더만 표시, 본문은 버퍼에 쌓고 TTS 시작 시 타이핑."""
@@ -282,6 +306,8 @@ class ChatPanel(QWidget):
             cursor.insertBlock()
         cursor.insertHtml(f"<b>{html.escape(who)}</b>: ")
         self._stream_block_start = cursor.position()
+        self._typing_body_start = cursor.position()
+        self._typing_render_markdown = who.strip().lower() == "iris"
         self._log.setTextCursor(cursor)
         self._typing_text = ""
         self._typing_index = 0
@@ -328,6 +354,8 @@ class ChatPanel(QWidget):
         if self._log.toPlainText().strip():
             cursor.insertBlock()
         cursor.insertHtml(f"<b>{html.escape(who)}</b>: ")
+        self._typing_body_start = cursor.position()
+        self._typing_render_markdown = who.strip().lower() == "iris"
         self._log.setTextCursor(cursor)
         self._typing_text = body
         self._typing_index = 0
@@ -402,17 +430,18 @@ class ChatPanel(QWidget):
         if not self._typing_timer.isActive() and not self._typing_text:
             return
         self._typing_timer.stop()
-        remaining = self._typing_text[self._typing_index :]
-        if remaining:
-            cursor = self._log.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            self._insert_body_fragment(cursor, remaining)
-            self._log.setTextCursor(cursor)
+        if self._typing_render_markdown and self._typing_body_start is not None:
+            self._render_markdown_body()
+        elif self._typing_index < len(self._typing_text):
+            self._typing_index = len(self._typing_text)
+            self._replace_typing_body()
         self._typing_text = ""
         self._typing_index = 0
         self._typing_speech_sync = False
         self._typing_speech_duration_ms = None
         self._typing_speech_start = None
+        self._typing_body_start = None
+        self._typing_render_markdown = False
         self._scroll_log_to_bottom()
 
     def _remove_user_listening_line(self) -> None:
@@ -471,20 +500,49 @@ class ChatPanel(QWidget):
         self._typing_timer.setInterval(TYPING_INTERVAL_MS)
         self._typing_timer.start()
 
-    def _insert_body_fragment(self, cursor: QTextCursor, fragment: str) -> None:
-        """본문 조각 삽입 — insertText(\\n) 문단 간격 문제를 피하기 위해 HTML <br> 사용."""
-        if not fragment:
+    def _replace_typing_body(self) -> None:
+        """타이핑 본문 영역을 현재 인덱스까지의 평문으로 갱신."""
+        if self._typing_body_start is None:
             return
-        cursor.insertHtml(chat_body_to_html(fragment))
+        visible = visible_typing_text(
+            self._typing_text,
+            self._typing_index,
+            render_markdown=self._typing_render_markdown,
+        )
+        cursor = self._log.textCursor()
+        cursor.setPosition(self._typing_body_start)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.End,
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        cursor.removeSelectedText()
+        if visible:
+            cursor.insertHtml(typing_body_to_html(visible))
+        self._log.setTextCursor(cursor)
+
+    def _render_markdown_body(self) -> None:
+        """타이핑 완료 후 마크다운 원문을 렌더링된 HTML로 교체."""
+        if self._typing_body_start is None or not self._typing_text:
+            return
+        cursor = self._log.textCursor()
+        cursor.setPosition(self._typing_body_start)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertHtml(markdown_to_chat_html(self._typing_text))
+        self._log.setTextCursor(cursor)
 
     def _type_next_chunk(self) -> None:
         if self._typing_index >= len(self._typing_text):
             self._typing_timer.stop()
+            if self._typing_render_markdown and self._typing_body_start is not None:
+                self._render_markdown_body()
             self._typing_text = ""
             self._typing_index = 0
             self._typing_speech_sync = False
             self._typing_speech_duration_ms = None
             self._typing_speech_start = None
+            self._typing_body_start = None
+            self._typing_render_markdown = False
             return
 
         if self._typing_speech_sync and self._typing_speech_duration_ms:
@@ -498,18 +556,18 @@ class ChatPanel(QWidget):
             )
             if target_index <= self._typing_index:
                 return
-            chunk = self._typing_text[self._typing_index : target_index]
-            self._typing_index = target_index
+            # TTS 타임라인을 따르되 한 틱에 너무 많이 점프하지 않게 제한
+            self._typing_index = min(
+                target_index,
+                self._typing_index + TYPING_SPEECH_MAX_CHARS_PER_TICK,
+            )
         else:
-            chunk = self._typing_text[
-                self._typing_index : self._typing_index + TYPING_CHARS_PER_TICK
-            ]
-            self._typing_index += len(chunk)
+            self._typing_index = min(
+                len(self._typing_text),
+                self._typing_index + TYPING_CHARS_PER_TICK,
+            )
 
-        cursor = self._log.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self._insert_body_fragment(cursor, chunk)
-        self._log.setTextCursor(cursor)
+        self._replace_typing_body()
         self._scroll_log_to_bottom()
 
     def _on_input_changed(self, text: str) -> None:

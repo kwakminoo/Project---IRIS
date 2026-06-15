@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
+from iris.core.markdown_text import markdown_to_plain
 from iris.core.state_machine import AppState
 
 # 문어체 → 구어체 (부분 일치 순서: 긴 패턴 우선)
@@ -154,6 +155,7 @@ def format_speech(text: str, tone: AppState, *, max_sentences: int = 3) -> str:
     """
     raw = (text or "").strip()
     raw = re.sub(r"^Iris:\s*", "", raw, flags=re.IGNORECASE)
+    raw = markdown_to_plain(raw)
     raw = _strip_non_speech_markup(raw)
     # 채팅에 표시되는 출처(“출처: ...”, “출처에서 확인되지 않았습니다” 등)는
     # TTS에서는 읽지 않도록 제거한다.

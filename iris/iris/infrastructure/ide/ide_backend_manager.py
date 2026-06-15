@@ -163,4 +163,13 @@ class IdeBackendManager:
 def _find_node() -> Optional[str]:
   import shutil
 
+  root = _find_repo_root()
+  # Theia native modules(node-pty 등)는 Node 20 ABI로 빌드됨 — 번들 Node 우선
+  bundled = [
+    root / "iris-ide" / "node_modules" / "node-win-x64" / "bin" / "node.exe",
+    root / "iris-ide" / "node_modules" / "node" / "bin" / "node.exe",
+  ]
+  for candidate in bundled:
+    if candidate.is_file():
+      return str(candidate)
   return shutil.which("node")

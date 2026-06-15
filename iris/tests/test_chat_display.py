@@ -1,3 +1,4 @@
+from iris.core.markdown_text import markdown_to_plain_partial
 from iris.ui.chat_display import (
     chat_body_to_html,
     effective_typing_duration_ms,
@@ -6,7 +7,9 @@ from iris.ui.chat_display import (
     normalize_chat_body,
     scale_typing_duration_ms,
     strip_speaker_prefix,
+    typing_body_to_html,
     typing_target_index,
+    visible_typing_text,
 )
 
 
@@ -22,9 +25,17 @@ def test_markdown_to_plain() -> None:
     assert markdown_to_plain("- 항목") == "항목"
 
 
-def test_normalize_chat_body() -> None:
+def test_normalize_chat_body_keeps_markdown() -> None:
     raw = "Iris: 현재 *입력 중인* 내용은 읽을 수 없습니다."
-    assert normalize_chat_body("Iris", raw) == "현재 입력 중인 내용은 읽을 수 없습니다."
+    assert normalize_chat_body("Iris", raw) == "현재 *입력 중인* 내용은 읽을 수 없습니다."
+
+
+def test_markdown_to_chat_html_renders_bold() -> None:
+    from iris.core.markdown_text import markdown_to_chat_html
+
+    rendered = markdown_to_chat_html("**굵게** 보통")
+    assert "<strong>굵게</strong>" in rendered
+    assert "**" not in rendered
 
 
 def test_chat_body_to_html_uses_br_not_raw_newlines() -> None:
@@ -53,3 +64,22 @@ def test_scale_typing_duration_ms_scales_visible_to_spoken() -> None:
 def test_extend_typing_timeline_ms_adds_segment_budget() -> None:
     total = extend_typing_timeline_ms(500.0, 20, 2000.0, min_chars_per_sec=12.0)
     assert total > 500.0
+
+
+def test_markdown_to_plain_partial_strips_incomplete_markers() -> None:
+    assert markdown_to_plain_partial("안녕 **굵") == "안녕"
+    assert markdown_to_plain_partial("**굵게** 보통") == "굵게 보통"
+
+
+def test_visible_typing_text_preserves_spaces_during_markdown() -> None:
+    source = "현재 *입력 중인* 내용은 읽을 수 없습니다."
+    # 마크다운 토큰 없이 평문 띄어쓰기가 타이핑 중에도 유지
+    partial = visible_typing_text(source, 10, render_markdown=True)
+    assert " " in partial
+    assert "*" not in partial
+
+
+def test_typing_body_to_html_preserves_spaces() -> None:
+    rendered = typing_body_to_html("안녕 하세요")
+    assert "안녕 하세요" in rendered
+    assert "white-space:pre-wrap" in rendered

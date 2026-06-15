@@ -2,6 +2,9 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $IdeDir = Join-Path $Root "iris-ide"
+$Node20 = Join-Path $IdeDir "node_modules\node-win-x64\bin\node.exe"
+$NodeGyp = Join-Path $IdeDir "node_modules\node-gyp\bin\node-gyp.js"
+$NativePkgs = @("keytar", "drivelist", "node-pty")
 
 function Require-Command($name, $minVersion = $null) {
     $cmd = Get-Command $name -ErrorAction SilentlyContinue
@@ -17,12 +20,44 @@ function Require-Command($name, $minVersion = $null) {
     }
 }
 
+function Rebuild-NativeModules {
+    if (-not (Test-Path $Node20)) {
+        Write-Host "Node 20 runtime not found — run yarn install first." -ForegroundColor Yellow
+        return
+    }
+    foreach ($pkg in $NativePkgs) {
+        $dir = Join-Path $IdeDir "node_modules\$pkg"
+        if (-not (Test-Path $dir)) { continue }
+        Write-Host "Rebuilding native module: $pkg (Node 20)..." -ForegroundColor Cyan
+        Push-Location $dir
+        try {
+            & $Node20 $NodeGyp rebuild | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "node-gyp rebuild failed for $pkg" }
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
 Require-Command "node" 18
+if (-not (Get-Command yarn -ErrorAction SilentlyContinue)) {
+    Write-Host "Yarn not found — installing via npm..." -ForegroundColor Yellow
+    npm install -g yarn
+}
 Require-Command "yarn"
 
 Push-Location $IdeDir
 try {
-    yarn install
+    yarn install --ignore-scripts
+    if ($LASTEXITCODE -ne 0) { throw "yarn install failed" }
+
+    $RipgrepPost = Join-Path $IdeDir "node_modules\@vscode\ripgrep\lib\postinstall.js"
+    if (Test-Path $RipgrepPost) {
+        Write-Host "Ensuring ripgrep binary..." -ForegroundColor Yellow
+        node $RipgrepPost
+    }
+
+    Rebuild-NativeModules
     Write-Host "Iris IDE dependencies installed." -ForegroundColor Green
 } finally {
     Pop-Location

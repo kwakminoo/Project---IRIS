@@ -1,12 +1,4 @@
-"""실행 중인 창 목록 — 메인 창 내부 좌측 통합 사이드바.
-
-설계:
-- 별도 윈도우가 아닌 메인 창의 첫 번째 컬럼으로 내장
-- 다크 테마 안에서 살짝 더 어두운 톤으로 시각적 분리
-- 각 항목: [창 제목 버튼] [×]
-- 항목 클릭 → 해당 창 포커스(MEDIUM_RISK)
-- × 클릭 → WM_CLOSE 전송(HIGH_RISK, 정상 종료 루틴 따름)
-"""
+"""실행 중인 창 목록 — HUD 스타일 좌측 사이드바."""
 
 from __future__ import annotations
 
@@ -29,6 +21,7 @@ from iris.automation.window_controller import (
     focus_window_by_hwnd,
     list_visible_windows,
 )
+from iris.ui.theme_tokens import TOKENS
 
 _REFRESH_MS = 2_500
 _MAX_ITEMS = 30
@@ -36,44 +29,32 @@ _SIDEBAR_WIDTH = 220
 
 
 class WindowListPanel(QWidget):
-    """메인 창 좌측에 통합되는 실행 창 목록 사이드바."""
+    """메인 창 좌측에 통합되는 실행 창 목록 — 사이버스페이스 HUD."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("WindowListPanel")
         self.setFixedWidth(_SIDEBAR_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet(
-            "QWidget#WindowListPanel {"
-            "  background: #060c1a;"
-            "  border-right: 1px solid #1e293b;"
-            "}"
-            "QLabel#SidebarTitle {"
-            "  color: #c4b5fd;"
-            "  font-size: 12px;"
-            "  font-weight: 700;"
-            "  padding: 6px 4px 4px 6px;"
-            "}"
-            "QScrollArea { background: transparent; border: none; }"
-            "QWidget#SidebarInner { background: transparent; }"
-        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 6, 4, 6)
         root.setSpacing(4)
 
-        title = QLabel("실행 중인 창")
+        title = QLabel("RUNNING WINDOWS")
         title.setObjectName("SidebarTitle")
         root.addWidget(title)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self._inner = QWidget()
         self._inner.setObjectName("SidebarInner")
         self._inner_lay = QVBoxLayout(self._inner)
         self._inner_lay.setContentsMargins(0, 0, 0, 0)
-        self._inner_lay.setSpacing(3)
+        self._inner_lay.setSpacing(0)
         self._inner_lay.addStretch(1)
         self._scroll.setWidget(self._inner)
         root.addWidget(self._scroll, 1)
@@ -85,10 +66,6 @@ class WindowListPanel(QWidget):
         self._timer.start()
         self._refresh()
 
-    # ------------------------------------------------------------------
-    # private
-    # ------------------------------------------------------------------
-
     def _refresh(self) -> None:
         try:
             wins = list_visible_windows()
@@ -96,7 +73,6 @@ class WindowListPanel(QWidget):
             wins = []
         wins = wins[:_MAX_ITEMS]
 
-        # 변경 없으면 UI 갱신 생략
         signature = tuple((w.hwnd, w.title) for w in wins)
         if signature == self._prev_signature:
             return
@@ -109,9 +85,10 @@ class WindowListPanel(QWidget):
                 w.deleteLater()
 
         if not wins:
-            hint = QLabel("실행 중인 창 없음")
+            hint = QLabel("— no active windows")
             hint.setStyleSheet(
-                "color: #475569; font-size: 11px; padding: 8px; background: transparent;"
+                f"color: {TOKENS.text_muted}; font-size: {TOKENS.font_size_micro};"
+                " padding: 8px 4px; background: transparent;"
             )
             self._inner_lay.addWidget(hint)
         else:
@@ -136,25 +113,13 @@ class WindowListPanel(QWidget):
             QTimer.singleShot(300, self._refresh)
 
 
-# ----------------------------------------------------------------------
-# helpers
-# ----------------------------------------------------------------------
-
-
 def _make_row(info: WindowInfo, on_focus, on_close) -> QFrame:
-    """[제목 버튼] [×] 한 줄."""
+    """HUD 리스트 행 — [제목] [×]"""
     fr = QFrame()
-    fr.setStyleSheet(
-        "QFrame {"
-        "  background: #0f172a;"
-        "  border: 1px solid #1e293b;"
-        "  border-radius: 4px;"
-        "}"
-        "QFrame:hover { border-color: #4338ca; background: #1e1b4b; }"
-    )
+    fr.setObjectName("HudWindowRow")
 
     h = QHBoxLayout(fr)
-    h.setContentsMargins(2, 0, 2, 0)
+    h.setContentsMargins(2, 2, 2, 2)
     h.setSpacing(2)
 
     display = info.title if len(info.title) <= 24 else info.title[:22] + "…"
@@ -163,15 +128,19 @@ def _make_row(info: WindowInfo, on_focus, on_close) -> QFrame:
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     btn.setStyleSheet(
-        "QPushButton {"
-        "  text-align: left;"
-        "  padding: 4px 6px;"
-        "  background: transparent;"
-        "  border: none;"
-        "  color: #cbd5e1;"
-        "  font-size: 11px;"
-        "}"
-        "QPushButton:hover { color: #e0e7ff; }"
+        f"""
+        QPushButton {{
+            text-align: left;
+            padding: 4px 6px;
+            background: transparent;
+            border: none;
+            color: {TOKENS.text_secondary};
+            font-size: {TOKENS.font_size_micro};
+        }}
+        QPushButton:hover {{
+            color: {TOKENS.neon_cyan};
+        }}
+        """
     )
     btn.clicked.connect(lambda _=False, i=info: on_focus(i))
     h.addWidget(btn, 1)
@@ -181,14 +150,15 @@ def _make_row(info: WindowInfo, on_focus, on_close) -> QFrame:
     x.setCursor(Qt.CursorShape.PointingHandCursor)
     x.setToolTip(f"창 닫기: {info.title}")
     x.setStyleSheet(
-        "QPushButton {"
-        "  background: transparent;"
-        "  border: none;"
-        "  color: #64748b;"
-        "  font-size: 14px;"
-        "  font-weight: 700;"
-        "}"
-        "QPushButton:hover { color: #ef4444; }"
+        f"""
+        QPushButton {{
+            background: transparent;
+            border: none;
+            color: {TOKENS.text_muted};
+            font-size: 14px;
+        }}
+        QPushButton:hover {{ color: {TOKENS.error}; }}
+        """
     )
     x.clicked.connect(lambda _=False, i=info: on_close(i))
     h.addWidget(x, 0)

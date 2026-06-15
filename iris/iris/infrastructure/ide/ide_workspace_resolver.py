@@ -11,10 +11,10 @@ def _find_repo_root() -> Path:
   """iris 패키지 기준 저장소 루트 추정."""
   here = Path(__file__).resolve()
   for parent in here.parents:
-    if (parent / "iris-ide").is_dir() or (parent / ".git").is_dir():
+    if (parent / "iris-ide").is_dir():
       return parent
-    if parent.name == "iris" and (parent.parent / "iris").is_dir():
-      return parent.parent
+    if (parent / ".git").is_dir():
+      return parent
   return Path.cwd()
 
 

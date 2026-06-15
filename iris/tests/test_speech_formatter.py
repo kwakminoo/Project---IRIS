@@ -71,3 +71,11 @@ def test_speech_formatter_strips_source_failure_sentence() -> None:
     )
     assert "출처" in spoken
     assert "확인" in spoken
+
+
+def test_speech_formatter_strips_markdown_markup() -> None:
+    spoken = format_speech("**굵게**와 `코드`를 설명합니다.", AppState.IDLE)
+    assert "**" not in spoken
+    assert "`" not in spoken
+    assert "굵게" in spoken
+    assert "코드" in spoken

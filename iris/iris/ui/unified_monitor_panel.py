@@ -36,6 +36,8 @@ from iris.monitoring.screen_capture import (
     capture_window_by_hwnd,
 )
 
+from iris.ui.theme_tokens import TOKENS
+
 if TYPE_CHECKING:
     from iris.storage.database import Database
 
@@ -91,16 +93,16 @@ class UnifiedMonitorPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("UnifiedMonitorPanel")
         self.setStyleSheet(
-            """
-            QWidget#UnifiedMonitorPanel {
-                background-color: #0f172a;
-                border: 1px solid #1e293b;
-                border-radius: 8px;
-            }
-            QScrollArea {
+            f"""
+            QWidget#UnifiedMonitorPanel {{
+                background: {TOKENS.panel_overlay};
+                border: 1px solid {TOKENS.border_subtle};
+                border-radius: 4px;
+            }}
+            QScrollArea {{
                 background: transparent;
                 border: none;
-            }
+            }}
             """
         )
         self._db: Optional["Database"] = None
@@ -109,7 +111,7 @@ class UnifiedMonitorPanel(QWidget):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        title = QLabel("실행 화면 / 모니터링")
+        title = QLabel("MONITOR / SCREEN")
         title.setObjectName("PanelTitle")
         root.addWidget(title)
 
