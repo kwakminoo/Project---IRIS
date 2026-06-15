@@ -81,6 +81,7 @@ from iris.infrastructure.ide.ide_bridge_client import IdeBridgeClient
 from iris.infrastructure.ide.ide_env_recovery import recover_webengine
 from iris.infrastructure.ide.ide_preflight import format_preflight_error, run_ide_preflight
 from iris.infrastructure.ide.ide_workspace_resolver import _find_repo_root, resolve_ide_workspace
+from iris.ui.ide.embedded_theia_view import TheiaViewState
 from iris.ui.ide.iris_webengine_page import tail_webengine_log
 from iris.system.metrics_worker import MetricsWorker
 from iris.ui.cyberspace_background import CyberspaceBackground
@@ -273,7 +274,7 @@ class MainWindow(QMainWindow):
             tooltip="Iris IDE 작업공간으로 전환",
             callback=self._on_ide_toggle,
         )
-        self._ide_page.theia_retry.connect(self._start_ide_backend_and_load)
+        self._ide_page.theia_retry.connect(lambda: self._start_ide_backend_and_load(force_reload=True))
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
         self._ide_page.theia_view_log.connect(self._show_ide_log)
         self._ide_page.theia.diagnose_requested.connect(self._run_ide_diagnose)
@@ -1295,15 +1296,29 @@ class MainWindow(QMainWindow):
             return
         # 백엔드 준비/오류 UI를 보여주려면 성공 여부와 관계없이 IDE 페이지로 먼저 전환
         self.switch_to_ide_workspace()
+        self._ensure_ide_visible()
+
+    def _ensure_ide_visible(self) -> None:
+        """IDE 진입 — READY면 즉시 WebView 복원, 아니면 Backend+Frontend 로드."""
+        if self._ide_page.theia.resume_or_continue():
+            if self._ide_page.theia.state == TheiaViewState.READY:
+                self._on_theia_ready()
+            return
         self._start_ide_backend_and_load()
 
-    def _start_ide_backend_and_load(self) -> None:
-        self._ide_page.theia.reset_view()
-        self._ide_page.theia.set_starting()
+    def _start_ide_backend_and_load(self, *, force_reload: bool = False) -> None:
+        # 재시도(force)만 전체 초기화 — 일반 재진입은 READY WebView 유지
+        if force_reload or self._ide_page.theia.state == TheiaViewState.ERROR:
+            self._ide_page.theia.reset_view(force=True)
+        elif self._ide_page.theia.resume_or_continue():
+            if self._ide_page.theia.state == TheiaViewState.READY:
+                self._on_theia_ready()
+            return
+        self._ide_page.theia.set_preflight("Iris IDE 환경을 확인하는 중…")
         try:
             workspace = resolve_ide_workspace(self._settings)
         except (FileNotFoundError, NotADirectoryError) as exc:
-            self._ide_page.theia.set_error(str(exc))
+            self._ide_page.theia.set_error(str(exc), failure_kind="BackendFailure")
             return
 
         preflight_log = Path.home() / ".iris" / "logs" / "ide-preflight.log"
@@ -1312,7 +1327,21 @@ class MainWindow(QMainWindow):
             self._ide_page.theia.set_error(
                 format_preflight_error(report),
                 log_path=str(preflight_log),
+                failure_kind="BackendFailure",
             )
+            return
+
+        self._ide_page.theia.set_starting("Theia Backend를 시작하는 중…")
+
+        # 이미 동일 workspace Backend가 살아 있으면 Worker 없이 Frontend만 재로드
+        if self._ide_backend.is_running:
+            status = BackendStatus(
+                True,
+                self._ide_backend.frontend_url,
+                port=0,
+                log_path=str(Path.home() / ".iris" / "logs" / "ide-backend.log"),
+            )
+            self._on_ide_backend_ready(status)
             return
 
         self._stop_ide_backend_worker()
@@ -1350,7 +1379,11 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _on_ide_backend_failed(self, status: object) -> None:
         if isinstance(status, BackendStatus):
-            self._ide_page.theia.set_error(status.error, log_path=status.log_path)
+            self._ide_page.theia.set_error(
+                status.error,
+                log_path=status.log_path,
+                failure_kind="BackendFailure",
+            )
 
     def _on_theia_ready(self) -> None:
         bridge_url = getattr(self, "_pending_bridge_url", "")

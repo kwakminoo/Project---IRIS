@@ -150,7 +150,6 @@ def _smoke_process_cleanup(require_windows: None) -> Generator[None, None, None]
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Generator[None, None, None]:
-    """실패 시 진단 artifact 저장."""
     outcome = yield
     report = outcome.get_result()
     if report.when == "call" and report.failed and "windows_smoke" in item.keywords:
@@ -162,3 +161,22 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Gener
             if "smoke_db" in item.funcargs and "smoke_runtime" in item.funcargs:
                 pass
         write_diagnostic_bundle(item.name, failure=str(report.longrepr), **extra)
+
+
+_IDE_E2E_TEST_ORDER = {
+    "test_ready_state_switches_stack_to_webview": 10,
+    "test_load_progress_does_not_hide_ready_webview": 11,
+    "test_embedded_theia_shell_readiness": 20,
+    "test_explorer_editor_terminal_dom": 21,
+    "test_workspace_state_preserved_on_hide": 22,
+    "test_resume_or_continue_from_ready": 23,
+    "test_reset_view_preserves_ready_without_force": 24,
+    "test_theia_backend_health": 30,
+    "test_backend_reuse_same_workspace": 31,
+    "test_webengine_local_html": 90,
+}
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """WebEngine E2E — shared view 테스트를 local HTML보다 먼저 실행."""
+    items.sort(key=lambda item: (_IDE_E2E_TEST_ORDER.get(item.name, 1000), item.name))
