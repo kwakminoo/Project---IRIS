@@ -15,6 +15,13 @@ $py = Join-Path $venvPath "Scripts\python.exe"
 & $py -m pip install --upgrade pip
 & $py -m pip install -r requirements.txt
 
+# WebEngine — IDE 임베드 필수 (Windows)
+$weCheck = & $py -c "from PyQt6.QtWebEngineWidgets import QWebEngineView" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "PyQt6-WebEngine 설치 중..." -ForegroundColor Yellow
+    & $py -m pip install "PyQt6-WebEngine==6.11.0"
+}
+
 Write-Host "Playwright Chromium 설치(선택)..."
 & $py -m playwright install chromium
 

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QEvent, Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import QDateTime, QEvent, Qt, QThread, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QFrame,
@@ -70,9 +71,17 @@ from iris.ui.settings_dialog import SettingsDialog
 from iris.ui.bridge_signals import UiBridge
 from iris.ui.visualizer import Visualizer
 from iris.ui.unified_monitor_panel import UnifiedMonitorPanel
-from iris.infrastructure.ide.ide_backend_manager import IdeBackendManager
+from iris.infrastructure.ide.ide_backend_manager import (
+    BackendStatus,
+    IdeBackendManager,
+    tail_backend_log,
+)
+from iris.infrastructure.ide.ide_backend_worker import IdeBackendWorker
 from iris.infrastructure.ide.ide_bridge_client import IdeBridgeClient
-from iris.infrastructure.ide.ide_workspace_resolver import resolve_ide_workspace
+from iris.infrastructure.ide.ide_env_recovery import recover_webengine
+from iris.infrastructure.ide.ide_preflight import format_preflight_error, run_ide_preflight
+from iris.infrastructure.ide.ide_workspace_resolver import _find_repo_root, resolve_ide_workspace
+from iris.ui.ide.iris_webengine_page import tail_webengine_log
 from iris.system.metrics_worker import MetricsWorker
 from iris.ui.cyberspace_background import CyberspaceBackground
 from iris.ui.cyberspace_theme import apply_cyberspace_theme
@@ -152,6 +161,8 @@ class MainWindow(QMainWindow):
         self._assistant_splitter_state = b""
         self._ide_splitter_state = b""
         self._ide_backend = IdeBackendManager()
+        self._ide_backend_thread: QThread | None = None
+        self._ide_backend_worker: IdeBackendWorker | None = None
         self._ide_bridge = IdeBridgeClient()
         self._ide_bridge.start()
 
@@ -265,6 +276,9 @@ class MainWindow(QMainWindow):
         self._ide_page.theia_retry.connect(self._start_ide_backend_and_load)
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
         self._ide_page.theia_view_log.connect(self._show_ide_log)
+        self._ide_page.theia.diagnose_requested.connect(self._run_ide_diagnose)
+        self._ide_page.theia.recover_env_requested.connect(self._run_ide_env_recovery)
+        self._ide_page.theia.ready.connect(self._on_theia_ready)
         self._ide_page.coding_panel.chat.send_clicked.connect(self._on_coding_user_text)
         self._continuous_listen.mic_level.connect(self._ide_page.coding_panel.set_mic_level)
 
@@ -1284,28 +1298,121 @@ class MainWindow(QMainWindow):
         self._start_ide_backend_and_load()
 
     def _start_ide_backend_and_load(self) -> None:
+        self._ide_page.theia.reset_view()
         self._ide_page.theia.set_starting()
         try:
             workspace = resolve_ide_workspace(self._settings)
         except (FileNotFoundError, NotADirectoryError) as exc:
             self._ide_page.theia.set_error(str(exc))
             return
-        status = self._ide_backend.ensure_running(workspace)
-        if not status.running:
-            self._ide_page.theia.set_error(status.error, log_path=status.log_path)
+
+        preflight_log = Path.home() / ".iris" / "logs" / "ide-preflight.log"
+        report = run_ide_preflight(workspace, log_path=preflight_log)
+        if not report.ready:
+            self._ide_page.theia.set_error(
+                format_preflight_error(report),
+                log_path=str(preflight_log),
+            )
+            return
+
+        self._stop_ide_backend_worker()
+        thread = QThread(self)
+        worker = IdeBackendWorker(self._ide_backend)
+        worker.moveToThread(thread)
+        thread.started.connect(lambda: worker.start_backend(workspace))
+        worker.backend_ready.connect(self._on_ide_backend_ready)
+        worker.backend_failed.connect(self._on_ide_backend_failed)
+        worker.backend_ready.connect(thread.quit)
+        worker.backend_failed.connect(thread.quit)
+        worker.backend_ready.connect(worker.deleteLater)
+        worker.backend_failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._ide_backend_thread = thread
+        self._ide_backend_worker = worker
+        thread.start()
+
+    def _stop_ide_backend_worker(self) -> None:
+        if self._ide_backend_thread is not None and self._ide_backend_thread.isRunning():
+            self._ide_backend_thread.quit()
+            self._ide_backend_thread.wait(3000)
+        self._ide_backend_thread = None
+        self._ide_backend_worker = None
+
+    @pyqtSlot(object)
+    def _on_ide_backend_ready(self, status: object) -> None:
+        if not isinstance(status, BackendStatus) or not status.running:
             return
         bridge_url = self._ide_bridge.base_url
         url = f"{status.frontend_url}?irisBridgePort={self._ide_bridge.port}"
         if self._ide_page.theia.load_url(url):
+            self._pending_bridge_url = bridge_url
+
+    @pyqtSlot(object)
+    def _on_ide_backend_failed(self, status: object) -> None:
+        if isinstance(status, BackendStatus):
+            self._ide_page.theia.set_error(status.error, log_path=status.log_path)
+
+    def _on_theia_ready(self) -> None:
+        bridge_url = getattr(self, "_pending_bridge_url", "")
+        if bridge_url:
             self._ide_page.theia.run_javascript(
                 f"window.__IRIS_BRIDGE_URL__ = {json.dumps(bridge_url)};"
             )
 
-    def _show_ide_log(self) -> None:
-        path = self._ide_page.theia.last_log_path() or str(
-            Path.home() / ".iris" / "logs" / "ide-backend.log"
+    def _run_ide_diagnose(self) -> None:
+        root = _find_repo_root()
+        script = root / "scripts" / "diagnose-iris-ide.ps1"
+        if script.is_file():
+            subprocess_run = __import__("subprocess").run
+            subprocess_run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                ],
+                shell=False,
+            )
+        else:
+            py = root / "iris" / "scripts" / "diagnose_webengine.py"
+            if py.is_file():
+                __import__("subprocess").run([sys.executable, str(py)], shell=False)
+
+    def _run_ide_env_recovery(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "IDE 환경 복구",
+            "Iris 가상환경에 PyQt6-WebEngine(6.11.0)을 설치합니다.\n"
+            "Theia 빌드는 포함하지 않습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        self._chat.append_message_instant("Iris", f"IDE 로그: {path}")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        result = recover_webengine(install_theia=False)
+        self._chat.append_message_instant(
+            "Iris",
+            f"{result.message}\n로그: {result.log_path}",
+        )
+        if result.success:
+            self._start_ide_backend_and_load()
+
+    def _show_ide_log(self) -> None:
+        logs_dir = Path.home() / ".iris" / "logs"
+        preflight = (logs_dir / "ide-preflight.log").read_text(encoding="utf-8", errors="replace") if (logs_dir / "ide-preflight.log").is_file() else ""
+        backend_tail = tail_backend_log(max_lines=120)
+        web_tail = tail_webengine_log(max_lines=120)
+        path = self._ide_page.theia.last_log_path() or str(logs_dir / "ide-backend.log")
+        body = (
+            f"=== ide-preflight.log ===\n{preflight[-2000:]}\n\n"
+            f"=== ide-backend.log (tail) ===\n{backend_tail}\n\n"
+            f"=== ide-webengine.log (tail) ===\n{web_tail}\n\n"
+            f"전체 경로: {path}"
+        )
+        self._chat.append_message_instant("Iris", body[:6000])
 
     @pyqtSlot(object)
     def _on_metrics_snapshot(self, snap: object) -> None:
@@ -1331,6 +1438,7 @@ class MainWindow(QMainWindow):
         self._metrics_worker.request_stop()
         self._metrics_worker.wait(2000)
         self._ide_bridge.stop()
+        self._stop_ide_backend_worker()
         self._ide_backend.shutdown()
         self._monitor_mgr.stop()
         self._continuous_listen.stop()

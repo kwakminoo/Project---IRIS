@@ -46,6 +46,16 @@ if (-not (Get-Command yarn -ErrorAction SilentlyContinue)) {
 }
 Require-Command "yarn"
 
+# Iris venv WebEngine 사전 점검
+$IrisPy = Join-Path $Root "iris\.venv\Scripts\python.exe"
+if (Test-Path $IrisPy) {
+    & $IrisPy -c "from PyQt6.QtWebEngineWidgets import QWebEngineView" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Installing PyQt6-WebEngine into Iris venv..." -ForegroundColor Yellow
+        & $IrisPy -m pip install "PyQt6==6.11.0" "PyQt6-WebEngine==6.11.0"
+    }
+}
+
 Push-Location $IdeDir
 try {
     yarn install --ignore-scripts
