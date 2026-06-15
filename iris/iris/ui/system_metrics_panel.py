@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
+from iris.ui.section_header import (
+    SECTION_CONTENT_GAP,
+    apply_section_panel_layout,
+    make_section_header,
+)
 from iris.system.metrics_snapshot import MetricsSnapshot
 from iris.ui.theme_tokens import TOKENS
+
+_METRIC_LABEL_GAP = SECTION_CONTENT_GAP
 
 
 class SystemMetricsPanel(QWidget):
@@ -14,13 +22,13 @@ class SystemMetricsPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("SystemMetricsPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 8, 6, 4)
-        lay.setSpacing(8)
+        apply_section_panel_layout(lay)
 
-        hdr = QLabel("SYSTEM METRICS")
-        hdr.setObjectName("HudSectionTitle")
-        lay.addWidget(hdr)
+        lay.addWidget(
+            make_section_header("SYSTEM METRICS", title_object_name="SidebarTitle")
+        )
 
         self._cpu_label = QLabel("CPU")
         self._cpu_bar = self._make_bar(TOKENS.metric_fill_cpu)
@@ -36,10 +44,19 @@ class SystemMetricsPanel(QWidget):
         ):
             label.setStyleSheet(
                 f"color: {TOKENS.text_hud_label}; font-size: {TOKENS.font_size_micro};"
-                " letter-spacing: 0.8px; background: transparent;"
+                " letter-spacing: 0.8px; background: transparent; border: none;"
             )
-            lay.addWidget(label)
-            lay.addWidget(bar)
+            lay.addWidget(self._make_metric_row(label, bar))
+
+    def _make_metric_row(self, label: QLabel, bar: QProgressBar) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet("background: transparent; border: none;")
+        row_lay = QVBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(_METRIC_LABEL_GAP)
+        row_lay.addWidget(label)
+        row_lay.addWidget(bar)
+        return row
 
     def _make_bar(self, fill_color: str) -> QProgressBar:
         bar = QProgressBar()

@@ -21,11 +21,11 @@ from iris.automation.window_controller import (
     focus_window_by_hwnd,
     list_visible_windows,
 )
+from iris.ui.section_header import apply_section_panel_layout, make_section_header
 from iris.ui.theme_tokens import TOKENS
 
 _REFRESH_MS = 2_500
 _MAX_ITEMS = 30
-_SIDEBAR_WIDTH = 220
 
 
 class WindowListPanel(QWidget):
@@ -34,20 +34,19 @@ class WindowListPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("WindowListPanel")
-        self.setFixedWidth(_SIDEBAR_WIDTH)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 6, 4, 6)
-        root.setSpacing(4)
+        apply_section_panel_layout(root)
 
-        title = QLabel("RUNNING WINDOWS")
-        title.setObjectName("SidebarTitle")
-        root.addWidget(title)
+        root.addWidget(
+            make_section_header("RUNNING WINDOWS", title_object_name="SidebarTitle")
+        )
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self._inner = QWidget()

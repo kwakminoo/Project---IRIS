@@ -24,7 +24,7 @@ class IdeWorkspacePage(QWidget):
 
     self._splitter = QSplitter(Qt.Orientation.Horizontal)
     self._splitter.setChildrenCollapsible(False)
-    self._splitter.setHandleWidth(8)
+    self._splitter.setHandleWidth(0)
 
     self.theia = EmbeddedTheiaView(self)
     self.coding_panel = IrisCodingPanel(self)

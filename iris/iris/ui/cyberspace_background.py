@@ -1,8 +1,9 @@
-"""사이버스페이스 배경 — 성운·지평선 그리드 페인트."""
+"""사이버스페이스 배경 — 성운·지평선 그리드 + 구체·UI 오버레이 레이어."""
 
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QRadialGradient
@@ -17,11 +18,43 @@ class CyberspaceBackground(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._phase = 0.0
+        self._orb_layer: Optional[QWidget] = None
+        self._ui_overlay: Optional[QWidget] = None
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(False)
         self._timer = QTimer(self)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._tick)
+
+    def set_orb_layer(self, widget: QWidget) -> None:
+        """구체 비주얼라이저 — 창 전체를 채우는 최하단 레이어."""
+        self._orb_layer = widget
+        widget.setParent(self)
+        widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        widget.lower()
+        widget.show()
+        self._sync_layers()
+
+    def set_ui_overlay(self, widget: QWidget) -> None:
+        """모든 HUD·패널 — 구체 위 투명 오버레이."""
+        self._ui_overlay = widget
+        widget.setParent(self)
+        widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        widget.raise_()
+        widget.show()
+        self._sync_layers()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_layers()
+
+    def _sync_layers(self) -> None:
+        rect = self.rect()
+        if self._orb_layer is not None:
+            self._orb_layer.setGeometry(rect)
+        if self._ui_overlay is not None:
+            self._ui_overlay.setGeometry(rect)
+            self._ui_overlay.raise_()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -58,15 +91,15 @@ class CyberspaceBackground(QWidget):
         nebula_r = max(w, h) * 0.55
         nebula = QRadialGradient(cx, cy, nebula_r)
         pulse = 0.5 + 0.5 * math.sin(self._phase * 0.7)
-        nebula.setColorAt(0.0, QColor(168, 85, 247, int(28 + 10 * pulse)))
-        nebula.setColorAt(0.25, QColor(109, 40, 217, int(14 + 6 * pulse)))
-        nebula.setColorAt(0.55, QColor(45, 10, 58, int(8 + 4 * pulse)))
+        nebula.setColorAt(0.0, QColor(56, 189, 248, int(28 + 10 * pulse)))
+        nebula.setColorAt(0.25, QColor(37, 99, 235, int(14 + 6 * pulse)))
+        nebula.setColorAt(0.55, QColor(13, 40, 71, int(8 + 4 * pulse)))
         nebula.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(0, 0, w, h, nebula)
 
-        # 보조 마젠타 성운
+        # 보조 시안 성운
         nebula2 = QRadialGradient(w * 0.72, h * 0.28, nebula_r * 0.45)
-        nebula2.setColorAt(0.0, QColor(232, 121, 249, int(10 + 5 * pulse)))
+        nebula2.setColorAt(0.0, QColor(34, 211, 238, int(10 + 5 * pulse)))
         nebula2.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(0, 0, w, h, nebula2)
 
@@ -80,7 +113,7 @@ class CyberspaceBackground(QWidget):
         vanish_x = w * 0.5
 
         # 지평선 글로우 라인
-        painter.setPen(QColor(139, 92, 246, 22))
+        painter.setPen(QColor(56, 189, 248, 22))
         painter.drawLine(0, int(horizon_y), w, int(horizon_y))
 
         # 원근 그리드
@@ -94,7 +127,7 @@ class CyberspaceBackground(QWidget):
             painter.drawLine(0, int(y), w, int(y))
 
         for col in range(-cols // 2, cols // 2 + 1):
-            painter.setPen(QColor(167, 139, 250, 10))
+            painter.setPen(QColor(96, 165, 250, 10))
             top_x = vanish_x + col * (w * 0.04)
             bottom_x = vanish_x + col * (w * 0.22)
             painter.drawLine(int(top_x), int(horizon_y * 0.92), int(bottom_x), h)

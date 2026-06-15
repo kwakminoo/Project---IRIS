@@ -6,7 +6,7 @@ import html
 import time
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtGui import QColor, QPalette, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
@@ -40,10 +40,11 @@ class _ChatInputBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ChatInputBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(
             """
             QWidget#ChatInputBar {
-                background-color: #111827;
+                background: transparent;
                 border: none;
             }
             """
@@ -58,9 +59,8 @@ class _ChatInputBar(QWidget):
         self._input_shell.setStyleSheet(
             """
             QWidget#ChatInputShell {
-                background-color: #1a1c24;
-                border: 1px solid #3f3f5f;
-                border-radius: 6px;
+                background: transparent;
+                border: none;
             }
             """
         )
@@ -69,6 +69,7 @@ class _ChatInputBar(QWidget):
         shell_row.setSpacing(4)
 
         self.input = QLineEdit()
+        self.input.setObjectName("ChatInput")
         self.input.setPlaceholderText("Iris에게 메시지를 입력하세요…")
         self.input.setStyleSheet(
             """
@@ -122,12 +123,12 @@ class _ChatInputArea(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ChatInputArea")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(
             """
             QWidget#ChatInputArea {
-                background-color: #0f172a;
-                border: 1px solid #3b82f6;
-                border-radius: 10px;
+                background: transparent;
+                border: none;
             }
             """
         )
@@ -140,10 +141,8 @@ class _ChatInputArea(QWidget):
         self.waveform.setStyleSheet(
             """
             MicWaveformBar {
-                background-color: #0b1220;
-                border-top: 1px solid #1e3a5f;
-                border-bottom-left-radius: 10px;
-                border-bottom-right-radius: 10px;
+                background: transparent;
+                border: none;
             }
             """
         )
@@ -161,7 +160,11 @@ class ChatPanel(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("ChatPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._log = QTextEdit()
+        self._log.setObjectName("ChatLog")
+        self._log.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._log.setReadOnly(True)
         self._log.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -170,6 +173,11 @@ class ChatPanel(QWidget):
         # 스크롤바는 숨기고 마우스 휠로만 스크롤
         self._log.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._log.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        transparent = QColor(0, 0, 0, 0)
+        log_pal = self._log.palette()
+        log_pal.setColor(QPalette.ColorRole.Base, transparent)
+        log_pal.setColor(QPalette.ColorRole.Window, transparent)
+        self._log.setPalette(log_pal)
         self._log.setMinimumHeight(80)
         self._log.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -177,11 +185,10 @@ class ChatPanel(QWidget):
         )
         self._log.setStyleSheet(
             """
-            QTextEdit {
-                background-color: #0f172a;
-                border: 1px solid #243247;
-                border-radius: 8px;
-                padding: 8px;
+            QTextEdit#ChatLog {
+                background: transparent;
+                border: none;
+                padding: 8px 4px;
             }
             """
         )

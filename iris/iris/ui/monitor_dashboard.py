@@ -24,7 +24,7 @@ _STATUS_COLOR = {
     "GENERATION_FAILED": "#ef4444",
     "TASK_STALLED": "#f97316",
     "RESPONSE_READY": "#3b82f6",
-    "BUILD_NOT_STARTED": "#a855f7",
+    "BUILD_NOT_STARTED": "#3b82f6",
     "USER_ACTION_REQUIRED": "#eab308",
     "UNKNOWN": "#64748b",
 }
@@ -40,6 +40,8 @@ class MonitorDashboard(QWidget):
         root.addWidget(title)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._inner = QWidget()
         self._inner_lay = QVBoxLayout(self._inner)
         self._inner_lay.addStretch(1)

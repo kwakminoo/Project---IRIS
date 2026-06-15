@@ -40,7 +40,9 @@ class LiveActivityPanel(QWidget):
         self.setObjectName("LiveActivityPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(72)
+        self.setMaximumHeight(90)
         self.setStyleSheet(
             """
             QWidget#LiveActivityPanel {
@@ -101,8 +103,6 @@ class LiveActivityPanel(QWidget):
             """
         )
         lay.addWidget(self._editor, 1)
-        self.setMinimumHeight(100)
-        self.setMaximumHeight(200)
 
         self._queue: deque[str] = deque()
         self._current_line: str = ""

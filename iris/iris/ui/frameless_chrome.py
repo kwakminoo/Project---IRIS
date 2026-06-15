@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import sys
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor, QMouseEvent
-from PyQt6.QtWidgets import QApplication, QGridLayout, QSizePolicy, QWidget
+from PyQt6.QtWidgets import QApplication, QWidget
 
 _RESIZE_MARGIN = 8
+
+# 가장자리 그립 배치 순서: TL, T, TR, L, R, BL, B, BR
+_GRIP_EDGES: tuple[Qt.Edge, ...] = (
+    Qt.Edge.TopEdge | Qt.Edge.LeftEdge,
+    Qt.Edge.TopEdge,
+    Qt.Edge.TopEdge | Qt.Edge.RightEdge,
+    Qt.Edge.LeftEdge,
+    Qt.Edge.RightEdge,
+    Qt.Edge.BottomEdge | Qt.Edge.LeftEdge,
+    Qt.Edge.BottomEdge,
+    Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
+)
 
 
 def _cursor_for_edges(edges: Qt.Edge) -> Qt.CursorShape:
@@ -25,6 +39,40 @@ def _cursor_for_edges(edges: Qt.Edge) -> Qt.CursorShape:
     return Qt.CursorShape.ArrowCursor
 
 
+def suppress_native_window_border(window: QWidget) -> None:
+    """Windows DWM 1px 테두리 제거 — frameless 창."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = int(window.winId())
+    except (AttributeError, TypeError, RuntimeError):
+        return
+    if hwnd == 0:
+        return
+    try:
+        import ctypes
+
+        dwm = ctypes.windll.dwmapi
+        # DWMWA_BORDER_COLOR — Win11 기본 리사이즈 테두리 숨김
+        border_color = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
+        dwm.DwmSetWindowAttribute(
+            hwnd,
+            34,
+            ctypes.byref(border_color),
+            ctypes.sizeof(border_color),
+        )
+        # DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED
+        policy = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(
+            hwnd,
+            2,
+            ctypes.byref(policy),
+            ctypes.sizeof(policy),
+        )
+    except (OSError, AttributeError):
+        pass
+
+
 class _ResizeGrip(QWidget):
     """투명 리사이즈 핸들 — startSystemResize 위임."""
 
@@ -34,7 +82,7 @@ class _ResizeGrip(QWidget):
         self._edges = edges
         self.setCursor(QCursor(_cursor_for_edges(edges)))
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self.setStyleSheet("background: transparent;")
+        self.setStyleSheet("background: transparent; border: none;")
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and not self._host.isMaximized():
@@ -46,43 +94,58 @@ class _ResizeGrip(QWidget):
 
 
 class FramelessShell(QWidget):
-    """콘텐츠를 감싸는 프레임리스 리사이즈 테두리."""
+    """콘텐츠를 창 전체에 깔고 가장자리 리사이즈 그립만 겹친다."""
 
     def __init__(self, host: QWidget, margin: int = _RESIZE_MARGIN, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._host = host
         self._margin = margin
-        self._grid = QGridLayout(self)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(0)
-        self._center_slot: tuple[int, int] = (1, 1)
+        self.setObjectName("FramelessShell")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._content: QWidget | None = None
+        self._grips: list[_ResizeGrip] = []
 
     def set_center_widget(self, content: QWidget) -> None:
-        """본문 위젯을 중앙에 배치하고 가장자리 그립을 깐다."""
-        m = self._margin
-        grips: list[tuple[int, int, Qt.Edge, int | None, int | None]] = [
-            (0, 0, Qt.Edge.TopEdge | Qt.Edge.LeftEdge, m, m),
-            (0, 1, Qt.Edge.TopEdge, None, m),
-            (0, 2, Qt.Edge.TopEdge | Qt.Edge.RightEdge, m, m),
-            (1, 0, Qt.Edge.LeftEdge, m, None),
-            (1, 2, Qt.Edge.RightEdge, m, None),
-            (2, 0, Qt.Edge.BottomEdge | Qt.Edge.LeftEdge, m, m),
-            (2, 1, Qt.Edge.BottomEdge, None, m),
-            (2, 2, Qt.Edge.BottomEdge | Qt.Edge.RightEdge, m, m),
-        ]
-        for row, col, edges, w, h in grips:
-            grip = _ResizeGrip(self._host, edges, self)
-            if w is not None:
-                grip.setFixedWidth(w)
-            if h is not None:
-                grip.setFixedHeight(h)
-            if w is None:
-                grip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            if h is None:
-                grip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-            self._grid.addWidget(grip, row, col)
+        """본문을 전체 영역에 배치하고 투명 리사이즈 그립을 가장자리에 겹친다."""
+        self._content = content
         content.setParent(self)
-        self._grid.addWidget(content, *self._center_slot)
+        content.lower()
+
+        for edges in _GRIP_EDGES:
+            grip = _ResizeGrip(self._host, edges, self)
+            self._grips.append(grip)
+
+        self._sync_layout()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_layout()
+
+    def _sync_layout(self) -> None:
+        if self._content is not None:
+            self._content.setGeometry(0, 0, self.width(), self.height())
+
+        if not self._grips:
+            return
+
+        m = self._margin
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        inner_w = max(1, w - 2 * m)
+        inner_h = max(1, h - 2 * m)
+        rects = (
+            (0, 0, m, m),
+            (m, 0, inner_w, m),
+            (w - m, 0, m, m),
+            (0, m, m, inner_h),
+            (w - m, m, m, inner_h),
+            (0, h - m, m, m),
+            (m, h - m, inner_w, m),
+            (w - m, h - m, m, m),
+        )
+        for grip, (x, y, gw, gh) in zip(self._grips, rects, strict=True):
+            grip.setGeometry(x, y, gw, gh)
+            grip.raise_()
 
 
 def center_on_screen(widget: QWidget) -> None:

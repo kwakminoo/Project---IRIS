@@ -117,7 +117,8 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(
             """
             QScrollArea {
@@ -127,39 +128,11 @@ class SettingsDialog(QDialog):
             QScrollArea > QWidget > QWidget {
                 background: transparent;
             }
-            QScrollBar:vertical {
-                background: #0b1220;
-                width: 14px;
-                margin: 2px;
-                border-radius: 7px;
-            }
+            QScrollBar:vertical,
             QScrollBar:horizontal {
-                background: #0b1220;
-                height: 14px;
-                margin: 2px;
-                border-radius: 7px;
-            }
-            QScrollBar::handle:vertical,
-            QScrollBar::handle:horizontal {
-                background: #334155;
-                border: 1px solid #475569;
-                border-radius: 7px;
-                min-height: 36px;
-                min-width: 36px;
-            }
-            QScrollBar::handle:vertical:hover,
-            QScrollBar::handle:horizontal:hover {
-                background: #3b82f6;
-                border-color: #60a5fa;
-            }
-            QScrollBar::add-line,
-            QScrollBar::sub-line,
-            QScrollBar::add-page,
-            QScrollBar::sub-page {
-                background: transparent;
-                border: none;
                 width: 0px;
                 height: 0px;
+                background: transparent;
             }
             """
         )

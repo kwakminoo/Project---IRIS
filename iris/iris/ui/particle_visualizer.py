@@ -11,14 +11,14 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import QWidget
 
-# 상태별 시각 프로필 — 보라/마젠타/청색 네온 계열
+# 상태별 시각 프로필 — 청색·시안 네온 계열
 _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
     "IDLE": {
         "pulse": 0.022,
         "glow": 0.38,
         "ring": 0.20,
         "speed": 0.65,
-        "accent": (168, 85, 247),
+        "accent": (59, 130, 246),
     },
     "LISTENING": {
         "pulse": 0.065,
@@ -32,7 +32,7 @@ _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
         "glow": 0.74,
         "ring": 0.58,
         "speed": 2.0,
-        "accent": (192, 132, 252),
+        "accent": (96, 165, 250),
     },
     "EXECUTING": {
         "pulse": 0.080,
@@ -46,7 +46,7 @@ _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
         "glow": 0.68,
         "ring": 0.48,
         "speed": 1.55,
-        "accent": (232, 121, 249),
+        "accent": (34, 211, 238),
     },
     "MONITORING": {
         "pulse": 0.035,
@@ -108,7 +108,7 @@ class ParticleVisualizer(QWidget):
         self._state_burst = 0.0
         self._cx = 0.0
         self._cy = 0.0
-        self._core_r = 120.0
+        self._core_r = 60.0
         self._sphere_pts = _fibonacci_sphere(_PARTICLE_COUNT)
         self._core_image = QPixmap(str(_asset_path("visuals/iris_core.png")))
 
@@ -158,7 +158,7 @@ class ParticleVisualizer(QWidget):
         width, height = max(self.width(), 1), max(self.height(), 1)
         self._cx = width * 0.5
         self._cy = height * 0.48
-        self._core_r = min(width, height) * 0.36
+        self._core_r = min(width, height) * 0.18
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])
@@ -187,11 +187,10 @@ class ParticleVisualizer(QWidget):
         energy = min(1.0, max(self._smooth_audio, synthetic_voice) + self._state_burst * 0.32)
 
         self._draw_back_glow(painter, cx, cy, accent, energy)
-        projected = self._draw_particle_network(painter, cx, cy, accent, energy)
         self._draw_orbit_rings(painter, cx, cy, accent, energy)
         self._draw_state_effects(painter, cx, cy, accent, energy)
         self._draw_core_image(painter, cx, cy, energy)
-        self._draw_front_sheen(painter, cx, cy, accent, energy, projected)
+        self._draw_front_sheen(painter, cx, cy, accent, energy)
 
         painter.end()
 
@@ -289,8 +288,8 @@ class ParticleVisualizer(QWidget):
         radius = self._core_r * (1.65 + energy * 0.35)
         gradient = QRadialGradient(cx, cy, radius)
         gradient.setColorAt(0.0, QColor(accent[0], accent[1], accent[2], int(65 + glow * 50)))
-        gradient.setColorAt(0.35, QColor(109, 40, 217, int(28 + 42 * energy)))
-        gradient.setColorAt(0.65, QColor(45, 10, 58, int(12 + 20 * energy)))
+        gradient.setColorAt(0.35, QColor(37, 99, 235, int(28 + 42 * energy)))
+        gradient.setColorAt(0.65, QColor(13, 40, 71, int(12 + 20 * energy)))
         gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(QRectF(cx - radius, cy - radius, radius * 2, radius * 2), gradient)
 
@@ -450,7 +449,6 @@ class ParticleVisualizer(QWidget):
         cy: float,
         accent: tuple[int, int, int],
         energy: float,
-        projected: list[tuple[float, float, float, float]],
     ) -> None:
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)

@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -64,7 +65,7 @@ from iris.memory.memory_manager import commit_turn_pair, strip_iris_prefix
 from iris.storage.database import Database
 from iris.ui.chat_panel import ChatPanel
 from iris.ui.drag_tab import DragTab
-from iris.ui.frameless_chrome import FramelessShell, center_on_screen
+from iris.ui.frameless_chrome import FramelessShell, center_on_screen, suppress_native_window_border
 from iris.ui.live_activity_panel import LiveActivityPanel, UiActivityRelay
 from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
@@ -96,7 +97,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Iris")
-        self.setMinimumSize(1100, 720)
+        self.setMinimumSize(960, 640)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
 
         self._env_path = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -168,7 +169,15 @@ class MainWindow(QMainWindow):
         self._ide_bridge.start()
 
         central = CyberspaceBackground()
-        root = QVBoxLayout(central)
+        self._viz = Visualizer(central)
+        self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
+
+        ui_overlay = QWidget()
+        ui_overlay.setObjectName("UiOverlay")
+        central.set_orb_layer(self._viz)
+        central.set_ui_overlay(ui_overlay)
+
+        root = QVBoxLayout(ui_overlay)
         root.setContentsMargins(14, 10, 14, 10)
         root.setSpacing(8)
 
@@ -208,7 +217,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(8)
+        splitter.setHandleWidth(0)
 
         # 좌측 Persistent Sidebar — workspace 전환과 무관하게 유지
         self._left_sidebar = LeftSidebarPanel()
@@ -224,16 +233,22 @@ class MainWindow(QMainWindow):
         left_lay = self._assistant_page.center_layout
         right_lay = self._assistant_page.right_layout
 
-        self._viz = Visualizer()
-        self._viz.setMinimumHeight(300)
-        self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
-        left_lay.addWidget(self._viz, 1)
+        # 구체는 전체 창 오버레이 — 레이아웃에는 투명 여백만 유지(이전 Visualizer 자리)
+        orb_spacer = QWidget()
+        orb_spacer.setObjectName("OrbLayoutSpacer")
+        orb_spacer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        orb_spacer.setMinimumHeight(160)
+        orb_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        left_lay.addWidget(orb_spacer, 2)
 
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
         self._activity_relay.line.connect(self._live_activity.enqueue_typed_line)
         register_activity_sink(self._activity_relay.push)
-        left_lay.addWidget(self._live_activity)
+        left_lay.addWidget(self._live_activity, 0)
 
         if os.environ.get("IRIS_DEBUG_PARTICLE") == "1":
             dbg = QWidget()
@@ -254,18 +269,22 @@ class MainWindow(QMainWindow):
         self._chat = ChatPanel()
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
-        left_lay.addWidget(self._chat, 2)
+        left_lay.addWidget(self._chat, 3)
 
         self._monitor = UnifiedMonitorPanel()
         self._monitor.set_database(self._db)
+        self._monitor.setMinimumHeight(160)
 
         self._notif_policy = NotificationPolicy(self._db)
         self._notes = NotificationPanel(policy=self._notif_policy)
+        self._notes.setMinimumHeight(120)
         right_lay.addWidget(self._monitor, 2)
         right_lay.addWidget(self._notes, 1)
 
         # [사이드바 | workspace stack]
-        splitter.setSizes([230, 1150])
+        splitter.setSizes([220, 1160])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         splitter.setCollapsible(0, False)
 
         self._left_sidebar.utility.actions.add_action(
@@ -326,6 +345,10 @@ class MainWindow(QMainWindow):
         else:
             self.showMaximized()
         self._drag.set_maximized(self.isMaximized())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        suppress_native_window_border(self)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         if event.type() == QEvent.Type.WindowStateChange:

@@ -21,16 +21,18 @@ class AssistantWorkspacePage(QWidget):
 
     self._splitter = QSplitter(Qt.Orientation.Horizontal)
     self._splitter.setChildrenCollapsible(False)
-    self._splitter.setHandleWidth(8)
+    self._splitter.setHandleWidth(0)
 
     self.center_column = QWidget()
     self.center_column.setObjectName("WorkspacePanel")
+    self.center_column.setMinimumWidth(340)
     self.center_layout = QVBoxLayout(self.center_column)
     self.center_layout.setContentsMargins(0, 0, 0, 0)
     self.center_layout.setSpacing(10)
 
     self.right_column = QWidget()
     self.right_column.setObjectName("WorkspacePanel")
+    self.right_column.setMinimumWidth(220)
     self.right_layout = QVBoxLayout(self.right_column)
     self.right_layout.setContentsMargins(0, 0, 0, 0)
     self.right_layout.setSpacing(10)

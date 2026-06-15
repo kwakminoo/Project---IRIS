@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QSplitter, QSizePolicy, QVBoxLayout, QWidget
 
 from iris.ui.window_list_panel import WindowListPanel
 
 
-_SIDEBAR_WIDTH = 220
+_SIDEBAR_MIN_WIDTH = 170
+_SIDEBAR_MAX_WIDTH = 280
 
 
 class LeftSidebarPanel(QWidget):
@@ -20,7 +21,9 @@ class LeftSidebarPanel(QWidget):
   def __init__(self, parent: QWidget | None = None) -> None:
     super().__init__(parent)
     self.setObjectName("LeftSidebarPanel")
-    self.setFixedWidth(_SIDEBAR_WIDTH)
+    self.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
+    self.setMaximumWidth(_SIDEBAR_MAX_WIDTH)
+    self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
     root = QVBoxLayout(self)
     root.setContentsMargins(0, 0, 0, 0)
@@ -28,7 +31,7 @@ class LeftSidebarPanel(QWidget):
 
     self._splitter = QSplitter(Qt.Orientation.Vertical)
     self._splitter.setChildrenCollapsible(False)
-    self._splitter.setHandleWidth(6)
+    self._splitter.setHandleWidth(0)
 
     self.window_list = WindowListPanel(self)
     from iris.ui.sidebar_utility_panel import SidebarUtilityPanel

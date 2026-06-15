@@ -18,6 +18,14 @@ def build_cyberspace_qss() -> str:
             font-family: {t.font_family};
             font-size: {t.font_size_base};
         }}
+        QMainWindow {{
+            background-color: {t.void_black};
+            border: none;
+        }}
+        QWidget#FramelessShell {{
+            background: transparent;
+            border: none;
+        }}
         CyberspaceBackground {{
             background-color: {t.void_black};
         }}
@@ -26,7 +34,7 @@ def build_cyberspace_qss() -> str:
             border: 1px solid {t.border_subtle};
             border-radius: 4px;
             color: {t.text_primary};
-            selection-background-color: rgba(109, 40, 217, 0.45);
+            selection-background-color: rgba(37, 99, 235, 0.45);
         }}
         QWidget#LiveActivityPanel,
         QPlainTextEdit#LiveActivityLog {{
@@ -48,7 +56,6 @@ def build_cyberspace_qss() -> str:
         QFrame#StatusHeader {{
             background-color: transparent;
             border: none;
-            border-bottom: 1px solid {t.divider};
             border-radius: 0;
         }}
         QFrame#StatusHeader QLabel {{
@@ -86,36 +93,32 @@ def build_cyberspace_qss() -> str:
             letter-spacing: 0.8px;
         }}
         QSplitter::handle {{
-            background-color: {t.divider};
-            margin: 6px 1px;
-            border-radius: 1px;
-            max-width: 2px;
+            background: transparent;
+            margin: 0;
+            border: none;
+            width: 0px;
+            height: 0px;
+            max-width: 0px;
+            max-height: 0px;
         }}
         QSplitter::handle:hover {{
-            background-color: {t.neon_purple};
-        }}
-        QScrollBar:vertical {{
             background: transparent;
-            width: 10px;
-            margin: 2px;
         }}
+        QScrollBar:vertical,
         QScrollBar:horizontal {{
+            width: 0px;
+            height: 0px;
             background: transparent;
-            height: 10px;
-            margin: 2px;
+            margin: 0;
         }}
         QScrollBar::handle:vertical,
         QScrollBar::handle:horizontal {{
-            background: rgba(100, 116, 139, 0.35);
-            border: 1px solid {t.border_subtle};
-            border-radius: 4px;
-            min-height: 28px;
-            min-width: 28px;
-        }}
-        QScrollBar::handle:vertical:hover,
-        QScrollBar::handle:horizontal:hover {{
-            background: {t.neon_purple};
-            border-color: {t.accent_border};
+            width: 0px;
+            height: 0px;
+            background: transparent;
+            border: none;
+            min-height: 0;
+            min-width: 0;
         }}
         QScrollBar::add-line,
         QScrollBar::sub-line,
@@ -143,7 +146,7 @@ def build_cyberspace_qss() -> str:
             border-color: {t.accent_border};
         }}
         QPushButton#WinCtrl:pressed {{
-            background-color: rgba(76, 29, 149, 0.5);
+            background-color: rgba(30, 58, 138, 0.5);
         }}
         QLabel#DragTitle {{
             font-weight: 300;
@@ -172,12 +175,12 @@ def build_cyberspace_qss() -> str:
         }}
         QPushButton#HudModeButton:hover {{
             background: {t.accent_primary};
-            border-color: {t.neon_magenta};
+            border-color: {t.neon_cyan};
             color: {t.text_primary};
         }}
         QPushButton#HudModeButton[active="true"] {{
-            background: rgba(109, 40, 217, 0.35);
-            border-color: {t.neon_magenta};
+            background: rgba(37, 99, 235, 0.35);
+            border-color: {t.neon_cyan};
             color: {t.neon_cyan};
         }}
         QProgressBar#HudMetricBar {{
@@ -192,21 +195,62 @@ def build_cyberspace_qss() -> str:
         QProgressBar#HudMetricBar::chunk {{
             border-radius: 2px;
         }}
+        QWidget#UiOverlay {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#OrbLayoutSpacer {{
+            background: transparent;
+            border: none;
+        }}
+        QPushButton#AlertActionButton {{
+            background: transparent;
+            border: none;
+            color: {t.text_secondary};
+            padding: 4px 8px;
+            font-size: {t.font_size_micro};
+        }}
+        QPushButton#AlertActionButton:hover {{
+            color: {t.text_accent};
+            background: transparent;
+        }}
         QWidget#UnifiedMonitorPanel,
         QWidget#NotificationPanel {{
-            background: {t.panel_overlay};
-            border: 1px solid {t.border_subtle};
-            border-radius: 4px;
+            background: transparent;
+            border: none;
+        }}
+        QWidget#SectionHeader {{
+            background: transparent;
+            border: none;
+        }}
+        QFrame#SectionUnderline {{
+            background: {t.border_color};
+            border: none;
+            max-height: 1px;
+        }}
+        QTextEdit#ChatLog,
+        QWidget#ChatPanel,
+        QWidget#ChatInputArea,
+        QWidget#ChatInputBar,
+        QWidget#ChatInputShell {{
+            background: transparent;
+            border: none;
+        }}
+        QLineEdit#ChatInput {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#NotificationPanel QListWidget {{
+            background: transparent;
+            border: none;
         }}
         QFrame#HudWindowRow {{
             background: transparent;
             border: none;
-            border-bottom: 1px solid {t.border_subtle};
             border-radius: 0;
         }}
         QFrame#HudWindowRow:hover {{
-            background: rgba(109, 40, 217, 0.12);
-            border-bottom-color: {t.accent_border};
+            background: rgba(37, 99, 235, 0.12);
         }}
     """
 
@@ -217,9 +261,9 @@ def apply_cyberspace_theme(widget: QWidget) -> None:
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(t.void_black))
     pal.setColor(QPalette.ColorRole.WindowText, QColor(t.text_primary))
-    pal.setColor(QPalette.ColorRole.Base, QColor(8, 6, 18))
+    pal.setColor(QPalette.ColorRole.Base, QColor(6, 14, 28))
     pal.setColor(QPalette.ColorRole.Text, QColor(t.text_primary))
-    pal.setColor(QPalette.ColorRole.Button, QColor(12, 8, 24))
+    pal.setColor(QPalette.ColorRole.Button, QColor(8, 16, 32))
     pal.setColor(QPalette.ColorRole.ButtonText, QColor(t.text_primary))
     widget.setPalette(pal)
     widget.setStyleSheet(build_cyberspace_qss())

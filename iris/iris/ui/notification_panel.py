@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,6 +17,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from iris.ui.section_header import (
+    SECTION_CONTENT_GAP,
+    apply_section_panel_layout,
+    make_section_header,
+)
 from iris.ui.theme_tokens import TOKENS
 
 if TYPE_CHECKING:
@@ -55,44 +61,61 @@ class NotificationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("NotificationPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(
             f"""
             QWidget#NotificationPanel {{
-                background: {TOKENS.panel_overlay};
-                border: 1px solid {TOKENS.border_subtle};
-                border-radius: 4px;
+                background: transparent;
+                border: none;
             }}
             QWidget#NotificationPanel QListWidget {{
-                background: rgba(8, 6, 18, 0.5);
-                border: 1px solid {TOKENS.border_subtle};
-                border-radius: 4px;
-                padding: 4px;
+                background: transparent;
+                border: none;
+                padding: 4px 0;
                 color: {TOKENS.text_secondary};
                 font-size: {TOKENS.font_size_micro};
+            }}
+            QWidget#NotificationPanel QPushButton#AlertActionButton {{
+                background: transparent;
+                border: none;
+                color: {TOKENS.text_secondary};
+                padding: 4px 8px;
+                font-size: {TOKENS.font_size_micro};
+            }}
+            QWidget#NotificationPanel QPushButton#AlertActionButton:hover {{
+                color: {TOKENS.text_accent};
+                background: transparent;
             }}
             """
         )
         self._cooldown_sec = cooldown_seconds
         self._policy = policy
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        lay.setSpacing(8)
-        hdr = QLabel("ALERTS")
-        hdr.setObjectName("PanelTitle")
-        lay.addWidget(hdr)
+        apply_section_panel_layout(lay)
+        lay.addWidget(make_section_header("ALERTS"))
         self._list = QListWidget()
+        self._list.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        list_pal = self._list.palette()
+        list_pal.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
+        self._list.setPalette(list_pal)
+        self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._context_menu)
         self._list.itemClicked.connect(self._on_click)
         lay.addWidget(self._list, 1)
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(SECTION_CONTENT_GAP)
         self._btn_snooze = QPushButton("나중에 (15분)")
+        self._btn_snooze.setObjectName("AlertActionButton")
         self._btn_snooze.clicked.connect(lambda: self._on_decision("snooze"))
         btn_row.addWidget(self._btn_snooze)
         self._btn_ignore = QPushButton("이 유형 무시")
+        self._btn_ignore.setObjectName("AlertActionButton")
         self._btn_ignore.clicked.connect(lambda: self._on_decision("ignore"))
         btn_row.addWidget(self._btn_ignore)
         self._btn_disable = QPushButton("대상 끄기")
+        self._btn_disable.setObjectName("AlertActionButton")
         self._btn_disable.clicked.connect(lambda: self._on_decision("disable_target"))
         btn_row.addWidget(self._btn_disable)
         lay.addLayout(btn_row)

@@ -36,6 +36,7 @@ from iris.monitoring.screen_capture import (
     capture_window_by_hwnd,
 )
 
+from iris.ui.section_header import apply_section_panel_layout, make_section_header
 from iris.ui.theme_tokens import TOKENS
 
 if TYPE_CHECKING:
@@ -44,8 +45,8 @@ if TYPE_CHECKING:
 _REFRESH_MS = 4_000   # 4초마다 썸네일 갱신
 _MAX_WINDOWS = 12
 _CAPTURE_PER_WINDOW_SEC = 2.5  # PrintWindow 무한 대기 방지
-_THUMB_W = 320        # 1열이므로 충분히 크게
-_THUMB_H = 180        # 16:9
+_THUMB_W = 320
+_THUMB_H = 180
 
 _STATUS_COLOR = {
     "NORMAL": "#22c55e",
@@ -54,7 +55,7 @@ _STATUS_COLOR = {
     "GENERATION_FAILED": "#ef4444",
     "TASK_STALLED": "#f97316",
     "RESPONSE_READY": "#3b82f6",
-    "BUILD_NOT_STARTED": "#a855f7",
+    "BUILD_NOT_STARTED": "#3b82f6",
     "USER_ACTION_REQUIRED": "#eab308",
     "UNKNOWN": "#64748b",
 }
@@ -81,6 +82,50 @@ class _CaptureSignals(QObject):
     done = pyqtSignal(list)  # list[_WindowSnap]
 
 
+class _CaptureThumbLabel(QLabel):
+    """캡처 화면 — 고정 썸네일 박스(320×180) 안에 비율 유지."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._source: Optional[QPixmap] = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedSize(_THUMB_W, _THUMB_H)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def set_capture(self, cap: Optional[CaptureResult]) -> None:
+        if cap and cap.rgb_bytes and cap.width > 0 and cap.height > 0:
+            qimg = QImage(
+                cap.rgb_bytes,
+                cap.width,
+                cap.height,
+                cap.width * 3,
+                QImage.Format.Format_RGB888,
+            ).copy()
+            self._source = QPixmap.fromImage(qimg)
+            self.setText("")
+            self.setStyleSheet("background: transparent; border: none;")
+            self._apply_pixmap()
+        else:
+            self._source = None
+            self.clear()
+            self.setText("캡처 불가")
+            self.setStyleSheet(
+                "color: #64748b; font-size: 11px; background: transparent; border: none;"
+            )
+
+    def _apply_pixmap(self) -> None:
+        if self._source is None or self._source.isNull():
+            return
+        scaled = self._source.scaled(
+            _THUMB_W,
+            _THUMB_H,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(scaled)
+
+
 class UnifiedMonitorPanel(QWidget):
     """실행 중인 창의 라이브 썸네일 + 모니터링 상태를 한 패널·1열로 표시.
 
@@ -92,31 +137,29 @@ class UnifiedMonitorPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("UnifiedMonitorPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(
-            f"""
-            QWidget#UnifiedMonitorPanel {{
-                background: {TOKENS.panel_overlay};
-                border: 1px solid {TOKENS.border_subtle};
-                border-radius: 4px;
-            }}
-            QScrollArea {{
+            """
+            QWidget#UnifiedMonitorPanel {
                 background: transparent;
                 border: none;
-            }}
+            }
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
             """
         )
         self._db: Optional["Database"] = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        apply_section_panel_layout(root)
 
-        title = QLabel("MONITOR / SCREEN")
-        title.setObjectName("PanelTitle")
-        root.addWidget(title)
+        root.addWidget(make_section_header("MONITOR / SCREEN"))
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._inner = QWidget()
@@ -289,65 +332,30 @@ def _make_card(
 ) -> QFrame:
     """1열 카드: [썸네일] / [제목] / [모니터링 상태(있을 때)]"""
     fr = QFrame()
-    fr.setFrameShape(QFrame.Shape.StyledPanel)
+    fr.setFrameShape(QFrame.Shape.NoFrame)
     fr.setStyleSheet(
-        "QFrame {"
-        "  background-color: #0f172a;"
-        "  border-radius: 8px;"
-        "  border: 1px solid #1e293b;"
-        "}"
-        "QFrame:hover { border-color: #6366f1; }"
+        "QFrame { background: transparent; border: none; }"
     )
     fr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     fr.setCursor(Qt.CursorShape.PointingHandCursor)
 
     v = QVBoxLayout(fr)
-    v.setContentsMargins(8, 8, 8, 8)
+    v.setContentsMargins(0, 0, 0, 0)
     v.setSpacing(6)
 
-    # 1) 썸네일
-    img_lbl = QLabel()
-    img_lbl.setFixedHeight(_THUMB_H)
-    img_lbl.setMinimumWidth(_THUMB_W)
-    img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    img_lbl.setStyleSheet(
-        "background: #020617; border: 1px solid #1e293b; border-radius: 4px;"
-    )
+    img_lbl = _CaptureThumbLabel()
+    img_lbl.set_capture(snap.cap)
 
-    cap = snap.cap
-    if cap and cap.rgb_bytes and cap.width > 0 and cap.height > 0:
-        qimg = QImage(
-            cap.rgb_bytes,
-            cap.width,
-            cap.height,
-            cap.width * 3,
-            QImage.Format.Format_RGB888,
-        ).copy()  # bytes 소유권 분리
-        pix = QPixmap.fromImage(qimg).scaled(
-            _THUMB_W,
-            _THUMB_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        img_lbl.setPixmap(pix)
-    else:
-        img_lbl.setText("캡처 불가")
-        img_lbl.setStyleSheet(
-            "color: #64748b; font-size: 11px;"
-            "background: #020617; border: 1px solid #1e293b; border-radius: 4px;"
-        )
-
-    v.addWidget(img_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-    # 2) 제목
+    v.addWidget(img_lbl, alignment=Qt.AlignmentFlag.AlignLeft)
     title = snap.info.title
     title_lbl = QLabel(title)
     title_lbl.setToolTip(title)
     title_lbl.setWordWrap(True)
+    title_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     title_lbl.setStyleSheet(
         "color: #e2e8f0; font-size: 12px; font-weight: 600; background: transparent; border: none;"
     )
-    v.addWidget(title_lbl)
+    v.addWidget(title_lbl, alignment=Qt.AlignmentFlag.AlignLeft)
 
     # 3) 모니터링 상태 (등록된 경우)
     if meta is not None:
