@@ -1,7 +1,6 @@
 # Windows 다음 단계 진입 판정 결과
 
-> 작성 시점: 2026-06-15  
-> 기준 커밋: push 후 `git log -1 --oneline` 갱신 예정
+> 기준 커밋: `eb32b05` — ci: establish Windows-first quality gate for next-stage readiness
 
 ## 최종 판정
 
@@ -14,7 +13,7 @@ Windows CI 3 Job·로컬 통합 검증·non-GUI/GUI Smoke(로컬) 통과. Linux 
 ## 1. 기준 커밋
 
 - 작업 시작: `1f06c89` — Stabilize CI workflows and strengthen Windows smoke test verification.
-- 작업 완료: 본 커밋(push 후 URL 기록)
+- 작업 완료: `eb32b05` — ci: establish Windows-first quality gate for next-stage readiness
 
 ## 2. Linux 검증 보류 결정
 
