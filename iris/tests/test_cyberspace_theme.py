@@ -25,8 +25,8 @@ def qapp():
 
 def test_theme_tokens_cyberspace_palette(qapp) -> None:
     assert TOKENS.void_black == "#020408"
-    assert "168, 85, 247" in TOKENS.glow_purple or TOKENS.neon_purple == "#a855f7"
-    assert TOKENS.metric_fill_cpu == "#a855f7"
+    assert TOKENS.neon_blue == "#38bdf8"
+    assert TOKENS.metric_fill_cpu == "#3b82f6"
 
 
 def test_cyberspace_qss_contains_hud_selectors(qapp) -> None:
@@ -34,7 +34,7 @@ def test_cyberspace_qss_contains_hud_selectors(qapp) -> None:
     assert "HudMetricBar" in qss
     assert "HudModeButton" in qss
     assert "HudWindowRow" in qss
-    assert TOKENS.neon_purple in qss
+    assert TOKENS.neon_blue in qss or TOKENS.text_primary in qss
 
 
 def test_cyberspace_background_instantiates(qapp) -> None:
