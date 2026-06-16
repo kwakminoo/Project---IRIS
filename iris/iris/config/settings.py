@@ -4,9 +4,23 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+class RouterMode(str, Enum):
+    """라우터 운영 모드 — 단일 설정 객체로 정규화."""
+
+    HYBRID = "hybrid"
+    FRONTIER_FIRST = "frontier_first"
+    UNIFIED_ONLY = "unified_only"
+
+
+class TextTtsSyncMode(str, Enum):
+    FAST = "fast"
+    SYNCHRONIZED = "synchronized"
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -144,17 +158,25 @@ class Settings:
     voice_followup_seconds: float
     # TurnCoordinator 기본 경로 (Computer Use PAV). UI는 IRIS_MULTI_AGENT와 무관하게 Coordinator 사용
     multi_agent_enabled: bool
-    # (deprecated) chat fast path — TurnCoordinator에서 미사용, LLM 라우터만 사용
+    # Deterministic chat/action fast path (LLM 생략)
     chat_fast_path_enabled: bool
-    # Frontier — 1회 LLM으로 user_reply + route envelope (기본 on, 실패 시 Unified Router 폴백)
+    # Frontier — 복합 요청 오케스트레이터 (hybrid 모드에서만 조건부 호출)
     frontier_enabled: bool
+    frontier_complex_only: bool
     frontier_min_confidence: float
+    frontier_complexity_threshold: float
     # Unified LLM Router (자연어 전체 → intent/lane/slots). false면 llm_intent_router 또는 규칙만
     unified_llm_router_enabled: bool
     # LLM Intent Router (Gemma 1회 JSON → lane/goal). unified 비활성 시 사용
     llm_intent_router_enabled: bool
     # LLM 승인 분류 (pending_cu·자동화 후속). false면 규칙 is_rule_approval만
     llm_approval_enabled: bool
+    # 라우터 모드·계측·프롬프트 경량화
+    router_mode: str
+    router_telemetry_enabled: bool
+    router_history_turns: int
+    router_app_candidate_limit: int
+    text_tts_sync_mode: str
     # 웹 URL 열기: chrome | edge | firefox | system
     default_web_browser: str
     # Computer Use Phase B: UIA / VLM 하이브리드 인식
@@ -293,12 +315,21 @@ def load_settings(env_path: Path | None = None) -> Settings:
         ),
         voice_followup_seconds=_env_float("VOICE_FOLLOWUP_SECONDS", 8.0),
         multi_agent_enabled=_env_bool("IRIS_MULTI_AGENT", True),
-        chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", False),
+        chat_fast_path_enabled=_env_bool("IRIS_CHAT_FAST_PATH", True),
         frontier_enabled=_env_bool("IRIS_FRONTIER_ENABLED", True),
+        frontier_complex_only=_env_bool("IRIS_FRONTIER_COMPLEX_ONLY", True),
         frontier_min_confidence=_env_float("IRIS_FRONTIER_MIN_CONFIDENCE", 0.65),
+        frontier_complexity_threshold=_env_float(
+            "IRIS_FRONTIER_COMPLEXITY_THRESHOLD", 0.70
+        ),
         unified_llm_router_enabled=_env_bool("IRIS_UNIFIED_LLM_ROUTER", True),
         llm_intent_router_enabled=_env_bool("IRIS_LLM_INTENT_ROUTER", True),
         llm_approval_enabled=_env_bool("IRIS_LLM_APPROVAL", True),
+        router_mode=os.getenv("IRIS_ROUTER_MODE", "hybrid").strip().lower(),
+        router_telemetry_enabled=_env_bool("IRIS_ROUTER_TELEMETRY", True),
+        router_history_turns=max(0, _env_int("IRIS_ROUTER_HISTORY_TURNS", 2)),
+        router_app_candidate_limit=max(1, _env_int("IRIS_ROUTER_APP_CANDIDATE_LIMIT", 5)),
+        text_tts_sync_mode=os.getenv("IRIS_TEXT_TTS_SYNC_MODE", "fast").strip().lower(),
         default_web_browser=os.getenv("DEFAULT_WEB_BROWSER", "chrome").strip().lower(),
         computer_use_uia_enabled=_env_bool("COMPUTER_USE_UIA_ENABLED", True),
         computer_use_vlm_enabled=_env_bool("COMPUTER_USE_VLM_ENABLED", False),
@@ -334,3 +365,23 @@ def _normalize_thinking_mode_env(raw: str) -> str:
     from iris.ai.thinking_policy import normalize_thinking_mode
 
     return normalize_thinking_mode(raw)
+
+
+def get_router_mode(settings: Settings) -> RouterMode:
+    raw = getattr(settings, "router_mode", "hybrid")
+    if isinstance(raw, RouterMode):
+        return raw
+    try:
+        return RouterMode(str(raw).strip().lower())
+    except ValueError:
+        return RouterMode.HYBRID
+
+
+def get_text_tts_sync_mode(settings: Settings) -> TextTtsSyncMode:
+    raw = getattr(settings, "text_tts_sync_mode", "fast")
+    if isinstance(raw, TextTtsSyncMode):
+        return raw
+    try:
+        return TextTtsSyncMode(str(raw).strip().lower())
+    except ValueError:
+        return TextTtsSyncMode.FAST

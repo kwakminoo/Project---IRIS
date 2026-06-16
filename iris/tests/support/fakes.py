@@ -355,14 +355,17 @@ def make_test_assistant(
 
 
 def make_routing_assistant(tmp_path: Path, gemma: RoutingGemma | FakeGemma) -> IrisAssistant:
-    """Unified Router 켜진 TurnCoordinator용 assistant."""
+    """Hybrid Router 켜진 TurnCoordinator용 assistant."""
     return make_test_assistant(
         tmp_path,
         gemma,
         settings_overrides={
             "unified_llm_router_enabled": True,
             "frontier_enabled": True,
+            "frontier_complex_only": True,
             "chat_fast_path_enabled": True,
+            "router_mode": "hybrid",
+            "router_telemetry_enabled": False,
         },
         db_name="coord.db",
     )

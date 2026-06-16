@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from iris.assistant.dialogue_agent import DialogueAgent
+from iris.assistant.fast_path import FastPathDecision, resolve_fast_path
 from iris.assistant.frontier_agent import run_frontier_turn
+from iris.assistant.frontier_policy import evaluate_frontier_need
 from iris.assistant.computer_use_agent import extract_user_question
 from iris.assistant.llm_approval import FollowupDecision, resolve_followup_for_pending
 from iris.assistant.llm_intent_router import route_with_llm
@@ -21,7 +23,13 @@ from iris.assistant.router_policy import (
     is_multi_turn_active,
     resolve_route_lane,
 )
+from iris.assistant.router_telemetry import (
+    RouterTiming,
+    finish_timing,
+    start_timing,
+)
 from iris.assistant.safety_guard import quick_block_user_text
+from iris.config.settings import RouterMode, get_router_mode
 from iris.core.activity_sink import push_activity_line
 from iris.core.command_router import CommandKind
 from iris.core.context_manager import DialogueStep, PendingComputerUseGoal
@@ -117,6 +125,11 @@ class TurnCoordinator:
     ) -> TurnResult:
         turn_id = uuid.uuid4().hex[:12]
         logs: list[str] = []
+        settings = self._assistant._settings
+        telemetry_on = bool(
+            getattr(settings, "router_telemetry_enabled", True) if settings else True
+        )
+        timing = start_timing(turn_id) if telemetry_on else None
 
         push_activity_line(f"TurnCoordinator: pipeline started turn_id={turn_id}.")
 
@@ -124,7 +137,7 @@ class TurnCoordinator:
         if block:
             push_activity_line("TurnCoordinator: safety guard blocked input.")
             self._assistant._db.insert_log("safety", "blocked", block)
-            return TurnResult(
+            result = TurnResult(
                 turn_id=turn_id,
                 route=RouteLane.CHAT_ONLY.value,
                 user_visible=f"Iris: {block}",
@@ -132,6 +145,10 @@ class TurnCoordinator:
                 executed=False,
                 logs=["safety_block"],
             )
+            if timing is not None:
+                timing.selected_path = "SAFETY_BLOCK"
+                finish_timing(timing, db=self._assistant._db, telemetry_enabled=telemetry_on)
+            return result
 
         ctx = self._assistant.ctx
         pending_cu = ctx.pending_cu
@@ -140,6 +157,9 @@ class TurnCoordinator:
                 turn_id, user_text, pending_cu, logs
             )
             if cu_result is not None:
+                if timing is not None:
+                    timing.selected_path = "PENDING_CU"
+                    finish_timing(timing, db=self._assistant._db, telemetry_enabled=telemetry_on)
                 return cu_result
 
         from iris.assistant.recovery_turn_handler import try_handle_recovery_turn
@@ -152,20 +172,162 @@ class TurnCoordinator:
             on_user_notify=on_user_notify,
         )
         if recovery_result is not None:
+            if timing is not None:
+                timing.selected_path = "RECOVERY"
+                finish_timing(timing, db=self._assistant._db, telemetry_enabled=telemetry_on)
             return recovery_result
 
+        router_mode = get_router_mode(settings) if settings else RouterMode.HYBRID
+
+        if router_mode is RouterMode.FRONTIER_FIRST:
+            result = self._run_frontier_first_path(
+                turn_id,
+                user_text,
+                routed,
+                logs,
+                timing=timing,
+                on_early_ack=on_early_ack,
+                on_frontier_reply=on_frontier_reply,
+                on_user_notify=on_user_notify,
+            )
+            if timing is not None:
+                finish_timing(timing, db=self._assistant._db, telemetry_enabled=telemetry_on)
+            return result
+
+        result = self._run_hybrid_path(
+            turn_id,
+            user_text,
+            routed,
+            logs,
+            timing=timing,
+            router_mode=router_mode,
+            on_early_ack=on_early_ack,
+            on_frontier_reply=on_frontier_reply,
+            on_user_notify=on_user_notify,
+        )
+        if timing is not None:
+            finish_timing(timing, db=self._assistant._db, telemetry_enabled=telemetry_on)
+        return result
+
+    def _run_hybrid_path(
+        self,
+        turn_id: str,
+        user_text: str,
+        routed: CommandKind | None,
+        logs: list[str],
+        *,
+        timing: RouterTiming | None,
+        router_mode: RouterMode,
+        on_early_ack: Callable[[str], None] | None,
+        on_frontier_reply: Callable[[str], None] | None,
+        on_user_notify: Callable[[str], None] | None,
+    ) -> TurnResult:
+        ctx = self._assistant.ctx
+        if timing is not None:
+            timing.mark("pre_router_started_at")
+
+        # --- Fast Path (LLM 없음) ---
+        if _chat_fast_path_enabled(self._assistant):
+            fast = resolve_fast_path(
+                user_text,
+                ctx,
+                app_paths=self._assistant._app_paths,
+                db=self._assistant._db,
+            )
+            if fast.matched and fast.routed_turn is not None:
+                if timing is not None:
+                    timing.mark("pre_router_finished_at")
+                    timing.selected_path = (
+                        "FAST_CHAT" if fast.lane is RouteLane.CHAT_ONLY else "FAST_ACTION"
+                    )
+                    timing.unified_lane = fast.lane.value if fast.lane else ""
+                push_activity_line(f"Router: fast path reason={fast.reason}.")
+                logs.append(f"fast_path={fast.reason}")
+                return self._dispatch_fast_path(
+                    turn_id,
+                    user_text,
+                    fast,
+                    logs,
+                    on_early_ack=on_early_ack,
+                    on_user_notify=on_user_notify,
+                )
+
+        if timing is not None:
+            timing.mark("pre_router_finished_at")
+
+        # --- Unified Router (1회만) ---
+        routed_turn = self._route_once(user_text, ctx, routed, logs, timing=timing)
+
+        # --- Frontier (복합 요청만) ---
         frontier_spoke = False
         frontier_reply = ""
+        use_frontier = False
+        frontier_reason = ""
 
-        # --- Frontier 1회 envelope (멀티턴·pending_cu 제외) ---
-        if _frontier_enabled(self._assistant) and not is_multi_turn_active(ctx):
-            frontier = run_frontier_turn(
-                user_text, ctx, self._gemma, assistant=self._assistant
+        if (
+            router_mode is not RouterMode.UNIFIED_ONLY
+            and _frontier_enabled(self._assistant)
+            and not is_multi_turn_active(ctx)
+            and _frontier_complex_only(self._assistant)
+        ):
+            threshold = 0.70
+            if self._assistant._settings is not None:
+                threshold = float(
+                    getattr(
+                        self._assistant._settings,
+                        "frontier_complexity_threshold",
+                        0.70,
+                    )
+                )
+            complexity = evaluate_frontier_need(
+                user_text=user_text,
+                routed=routed_turn,
+                ctx=ctx,
+                complexity_threshold=threshold,
+                frontier_enabled=True,
+                router_mode=router_mode,
             )
+            use_frontier = complexity.use_frontier
+            frontier_reason = complexity.reason
+            if use_frontier:
+                logs.append(f"frontier_need={frontier_reason}")
+        elif (
+            router_mode is not RouterMode.UNIFIED_ONLY
+            and _frontier_enabled(self._assistant)
+            and not is_multi_turn_active(ctx)
+            and not _frontier_complex_only(self._assistant)
+        ):
+            use_frontier = True
+            frontier_reason = "complex_only_disabled"
+
+        if use_frontier:
+            if timing is not None:
+                timing.mark("frontier_started_at")
+                timing.frontier_invoked = True
+                timing.frontier_reason = frontier_reason
+
+            def _on_frontier_model_call() -> None:
+                if timing is not None:
+                    timing.inc_model_call(router=True)
+
+            frontier = run_frontier_turn(
+                user_text,
+                ctx,
+                self._gemma,
+                assistant=self._assistant,
+                routing_hint=routed_turn,
+                frontier_reason=frontier_reason,
+                on_model_call=_on_frontier_model_call,
+            )
+            if timing is not None:
+                timing.mark("frontier_finished_at")
             if frontier is not None:
                 logs.extend(frontier.logs)
                 frontier_reply = frontier.user_reply
-                # CHAT_ONLY는 delegate_frontier_stream 1회만 — prefetch 콜백 시 UI 이중 재생
+                if timing is not None:
+                    timing.selected_path = "UNIFIED_TO_FRONTIER"
+                    timing.unified_lane = routed_turn.lane.value
+                    timing.execution_used = frontier.needs_execution
                 if (
                     frontier.needs_execution
                     and on_frontier_reply is not None
@@ -178,8 +340,111 @@ class TurnCoordinator:
                     lane = frontier.routed_turn.lane
                     if lane is RouteLane.CHAT_ONLY:
                         push_activity_line(
-                            "Frontier: CHAT_ONLY — single LLM, no unified router."
+                            "Frontier: complex CHAT_ONLY — delegate dialogue stream."
                         )
+                        return TurnResult(
+                            turn_id=turn_id,
+                            route=RouteLane.CHAT_ONLY.value,
+                            user_visible="",
+                            early_ack=None,
+                            executed=False,
+                            logs=logs + ["frontier_complex_chat"],
+                            delegate_dialogue_stream=True,
+                            store_history=True,
+                        )
+                    return self._dispatch_routed_turn(
+                        turn_id,
+                        user_text,
+                        frontier.routed_turn,
+                        logs,
+                        on_early_ack=on_early_ack,
+                        on_user_notify=on_user_notify,
+                        frontier_spoke=False,
+                        frontier_reply=frontier_reply,
+                        timing=timing,
+                    )
+                return self._dispatch_routed_turn(
+                    turn_id,
+                    user_text,
+                    frontier.routed_turn,
+                    logs,
+                    on_early_ack=on_early_ack,
+                    on_user_notify=on_user_notify,
+                    frontier_spoke=frontier_spoke,
+                    frontier_reply=frontier_reply,
+                    timing=timing,
+                )
+            if timing is not None:
+                timing.frontier_fallback_reason = "frontier_failed_use_unified"
+            push_activity_line(
+                "Frontier: failed — reusing cached unified route (no re-call)."
+            )
+            logs.append("frontier_fallback_unified")
+
+        if timing is not None:
+            timing.selected_path = "UNIFIED"
+            timing.unified_lane = routed_turn.lane.value
+        return self._dispatch_routed_turn(
+            turn_id,
+            user_text,
+            routed_turn,
+            logs,
+            on_early_ack=on_early_ack,
+            on_user_notify=on_user_notify,
+            frontier_spoke=False,
+            frontier_reply="",
+            timing=timing,
+        )
+
+    def _run_frontier_first_path(
+        self,
+        turn_id: str,
+        user_text: str,
+        routed: CommandKind | None,
+        logs: list[str],
+        *,
+        timing: RouterTiming | None,
+        on_early_ack: Callable[[str], None] | None,
+        on_frontier_reply: Callable[[str], None] | None,
+        on_user_notify: Callable[[str], None] | None,
+    ) -> TurnResult:
+        """긴급 롤백 — 기존 Frontier 우선 구조."""
+        ctx = self._assistant.ctx
+        frontier_spoke = False
+        frontier_reply = ""
+
+        if _frontier_enabled(self._assistant) and not is_multi_turn_active(ctx):
+            if timing is not None:
+                timing.mark("frontier_started_at")
+                timing.frontier_invoked = True
+                timing.frontier_reason = "frontier_first_mode"
+
+            def _on_frontier_model_call_ff() -> None:
+                if timing is not None:
+                    timing.inc_model_call(router=True)
+
+            frontier = run_frontier_turn(
+                user_text, ctx, self._gemma, assistant=self._assistant,
+                on_model_call=_on_frontier_model_call_ff,
+            )
+            if timing is not None:
+                timing.mark("frontier_finished_at")
+            if frontier is not None:
+                logs.extend(frontier.logs)
+                frontier_reply = frontier.user_reply
+                if timing is not None:
+                    timing.selected_path = "FRONTIER_FIRST"
+                if (
+                    frontier.needs_execution
+                    and on_frontier_reply is not None
+                    and frontier_reply
+                ):
+                    on_frontier_reply(frontier_reply)
+                    logs.append("frontier_reply_callback")
+                    frontier_spoke = True
+                if not frontier.needs_execution:
+                    lane = frontier.routed_turn.lane
+                    if lane is RouteLane.CHAT_ONLY:
                         return TurnResult(
                             turn_id=turn_id,
                             route=RouteLane.CHAT_ONLY.value,
@@ -191,9 +456,6 @@ class TurnCoordinator:
                             frontier_reply=frontier_reply,
                             store_history=True,
                         )
-                    push_activity_line(
-                        f"Frontier: knowledge delegate lane={lane.value}."
-                    )
                     return self._dispatch_routed_turn(
                         turn_id,
                         user_text,
@@ -203,6 +465,7 @@ class TurnCoordinator:
                         on_user_notify=on_user_notify,
                         frontier_spoke=False,
                         frontier_reply=frontier_reply,
+                        timing=timing,
                     )
                 return self._dispatch_routed_turn(
                     turn_id,
@@ -213,28 +476,12 @@ class TurnCoordinator:
                     on_user_notify=on_user_notify,
                     frontier_spoke=frontier_spoke,
                     frontier_reply=frontier_reply,
+                    timing=timing,
                 )
 
-        # --- 폴백 라우팅: Unified LLM Router (regex fast path 제거) ---
-        routed_turn: RoutedTurn
-        if _unified_llm_router_enabled(self._assistant):
-            routed_turn = route_user_turn(
-                user_text, ctx, self._gemma, assistant=self._assistant
-            )
-        elif _llm_intent_router_enabled(self._assistant):
-            fb = routed if routed is not None else CommandKind.GENERAL_CHAT
-            routed_turn = route_with_llm(
-                user_text, ctx, self._gemma, fallback_kind=fb
-            )
-        else:
-            push_activity_line(
-                "Router: LLM routers disabled — chat_only safe fallback."
-            )
-            logs.append("router_llm_disabled")
-            routed_turn = RoutedTurn(
-                kind=CommandKind.GENERAL_CHAT,
-                lane=RouteLane.CHAT_ONLY,
-            )
+        routed_turn = self._route_once(user_text, ctx, routed, logs, timing=timing)
+        if timing is not None:
+            timing.selected_path = "FRONTIER_FIRST_FALLBACK_UNIFIED"
         return self._dispatch_routed_turn(
             turn_id,
             user_text,
@@ -244,6 +491,83 @@ class TurnCoordinator:
             on_user_notify=on_user_notify,
             frontier_spoke=False,
             frontier_reply="",
+            timing=timing,
+        )
+
+    def _route_once(
+        self,
+        user_text: str,
+        ctx: object,
+        routed: CommandKind | None,
+        logs: list[str],
+        *,
+        timing: RouterTiming | None,
+    ) -> RoutedTurn:
+        """Unified Router 1회 — 중복 호출 금지."""
+        from iris.core.context_manager import DialogueContext
+
+        dialogue_ctx = ctx if isinstance(ctx, DialogueContext) else self._assistant.ctx
+        if timing is not None:
+            timing.mark("unified_router_started_at")
+        routed_turn: RoutedTurn
+        if _unified_llm_router_enabled(self._assistant):
+            routed_turn = route_user_turn(
+                user_text, dialogue_ctx, self._gemma, assistant=self._assistant
+            )
+            if timing is not None:
+                timing.inc_model_call(router=True)
+        elif _llm_intent_router_enabled(self._assistant):
+            fb = routed if routed is not None else CommandKind.GENERAL_CHAT
+            routed_turn = route_with_llm(
+                user_text, dialogue_ctx, self._gemma, fallback_kind=fb
+            )
+            if timing is not None:
+                timing.inc_model_call(router=True)
+        else:
+            push_activity_line(
+                "Router: LLM routers disabled — chat_only safe fallback."
+            )
+            logs.append("router_llm_disabled")
+            routed_turn = RoutedTurn(
+                kind=CommandKind.GENERAL_CHAT,
+                lane=RouteLane.CHAT_ONLY,
+            )
+        if timing is not None:
+            timing.mark("unified_router_finished_at")
+            timing.unified_lane = routed_turn.lane.value
+        return routed_turn
+
+    def _dispatch_fast_path(
+        self,
+        turn_id: str,
+        user_text: str,
+        fast: FastPathDecision,
+        logs: list[str],
+        *,
+        on_early_ack: Callable[[str], None] | None = None,
+        on_user_notify: Callable[[str], None] | None = None,
+    ) -> TurnResult:
+        """Deterministic Fast Path — Safety·Execution 경로 재사용."""
+        assert fast.routed_turn is not None
+        if fast.lane is RouteLane.CHAT_ONLY:
+            logs.append("fast_chat_dialogue")
+            return TurnResult(
+                turn_id=turn_id,
+                route=RouteLane.CHAT_ONLY.value,
+                user_visible="",
+                early_ack=None,
+                executed=False,
+                logs=logs,
+                delegate_dialogue_stream=True,
+                store_history=True,
+            )
+        return self._dispatch_routed_turn(
+            turn_id,
+            user_text,
+            fast.routed_turn,
+            logs,
+            on_early_ack=on_early_ack,
+            on_user_notify=on_user_notify,
         )
 
     def _dispatch_routed_turn(
@@ -257,6 +581,7 @@ class TurnCoordinator:
         on_user_notify: Callable[[str], None] | None = None,
         frontier_spoke: bool = False,
         frontier_reply: str = "",
+        timing: RouterTiming | None = None,
     ) -> TurnResult:
         ctx = self._assistant.ctx
         lane = routed_turn.lane
@@ -296,6 +621,8 @@ class TurnCoordinator:
 
         if lane is RouteLane.SEARCH:
             slot_q = _search_slot_query(routed_turn)
+            if timing is not None:
+                timing.search_used = True
             push_activity_line("Lane SEARCH: delegating to web research worker.")
             return TurnResult(
                 turn_id=turn_id,
@@ -312,6 +639,8 @@ class TurnCoordinator:
 
         if lane is RouteLane.HYBRID:
             slot_q = _search_slot_query(routed_turn)
+            if timing is not None:
+                timing.search_used = True
             push_activity_line("Lane HYBRID: search then LLM with hybrid prompt.")
             return TurnResult(
                 turn_id=turn_id,
@@ -327,6 +656,9 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.CHAT_ONLY:
+            if timing is not None:
+                timing.dialogue_model_call_count += 1
+                timing.model_call_count += 1
             push_activity_line(
                 "Lane CHAT_ONLY: delegate streaming dialogue to UI."
             )
@@ -376,8 +708,11 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.COMPUTER_USE:
+            if timing is not None:
+                timing.execution_used = True
+                timing.mark("execution_started_at")
             push_activity_line("Lane COMPUTER_USE: starting PAV loop path.")
-            return self._run_computer_use(
+            result = self._run_computer_use(
                 turn_id,
                 user_text,
                 routed_turn,
@@ -387,8 +722,13 @@ class TurnCoordinator:
                 frontier_spoke=frontier_spoke,
                 frontier_reply=frontier_reply,
             )
+            if timing is not None:
+                timing.mark("execution_finished_at")
+            return result
 
         if lane is RouteLane.FAST_TOOL:
+            if timing is not None:
+                timing.execution_used = True
             push_activity_line("Lane FAST_TOOL: single Tier-1 tool.")
             return self._run_fast_tool(
                 turn_id,
@@ -401,6 +741,8 @@ class TurnCoordinator:
             )
 
         if lane is RouteLane.DIRECT_ACTION:
+            if timing is not None:
+                timing.execution_used = True
             push_activity_line("Lane DIRECT_ACTION: fast execute with early ack.")
             return self._run_direct_action(
                 turn_id,
@@ -775,6 +1117,20 @@ class TurnCoordinator:
             logs=logs,
             store_history=True,
         )
+
+
+def _chat_fast_path_enabled(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "chat_fast_path_enabled", True))
+
+
+def _frontier_complex_only(assistant: IrisAssistant) -> bool:
+    settings = assistant._settings
+    if settings is None:
+        return True
+    return bool(getattr(settings, "frontier_complex_only", True))
 
 
 def _frontier_enabled(assistant: IrisAssistant) -> bool:

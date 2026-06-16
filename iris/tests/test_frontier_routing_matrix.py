@@ -242,8 +242,21 @@ def _run_coordinator(
     *,
     patch_cu: bool = True,
 ) -> object:
+    from tests.support.fakes import make_test_assistant
+
     gemma = FakeGemma()
-    assistant = make_routing_assistant(tmp_path, gemma)  # type: ignore[arg-type]
+    assistant = make_test_assistant(
+        tmp_path,
+        gemma,
+        settings_overrides={
+            "unified_llm_router_enabled": True,
+            "frontier_enabled": True,
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
+            "router_telemetry_enabled": False,
+        },
+        db_name="matrix.db",
+    )
     gemma.chat = lambda messages, purpose=None, **kw: envelope_json  # type: ignore[method-assign]
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
     if patch_cu:

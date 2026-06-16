@@ -9,6 +9,7 @@ from typing import Any, Mapping, TYPE_CHECKING
 from iris.ai.gemma_client import ChatMessage, GemmaClient, FALLBACK_KO
 from iris.ai.thinking_policy import LlmPurpose
 from iris.ai.response_parser import extract_json_object
+from iris.assistant.route_analysis import RouteAnalysis, adapt_legacy_route_metadata, build_route_analysis_from_router_json
 from iris.assistant.router_policy import (
     RouteLane,
     RoutedTurn,
@@ -76,7 +77,7 @@ pending_cu가 있으면 approve_followup|reject_followup|clarify|unrelated.
 JSON 스키마(엄격):
 {
   "intent": "chat|search|launch_app|computer_use|fast_tool|work_mode|game_mode|creative_mode|monitoring|approve_followup|reject_followup|clarify|unrelated",
-  "lane": "chat_only|search|hybrid|direct_action|computer_use|fast_tool|multi_turn",
+  "lane": "chat_only|search|hybrid|direct_action|computer_use|fast_tool|multi_turn|orchestrated",
   "knowledge_lane": "chat_only|search|hybrid",
   "goal": "한국어 실행·답변 목표 한 문장",
   "task_type": "open_app|compose_text|media_play|send_message|file|window|multi_step|knowledge|unknown",
@@ -101,9 +102,37 @@ JSON 스키마(엄격):
   "risk_hint": "low|medium|high|critical",
   "needs_user_confirm": false,
   "clarification": null,
-  "confidence": 0.0
+  "confidence": 0.0,
+  "complexity": "simple|moderate|complex",
+  "requires_frontier": false,
+  "complexity_reasons": [],
+  "operations": [
+    {
+      "id": "op-1",
+      "kind": "respond|search|read|open|create|modify|execute|verify|monitor|send|ask_user",
+      "goal": "한국어 하위 목표",
+      "capability": "capability.id 또는 null",
+      "target": "대상 또는 null",
+      "depends_on": [],
+      "conditional_on": null,
+      "requires_verification": false
+    }
+  ],
+  "requires_user_response": true,
+  "requires_search": false,
+  "requires_execution": false,
+  "requires_monitoring": false,
+  "contains_conditional_flow": false,
+  "contains_cross_capability_flow": false,
+  "requested_capabilities": [],
+  "analysis_incomplete": false
 }
 규칙:
+- 사용자 요청을 실행 가능한 의미 단위(operations)로 분해하세요.
+- 각 operation에 kind·capability·depends_on을 명시하세요.
+- 대화+실행, 검색+작성, 수정+빌드+검증 등 복합 흐름은 operations와 requires_frontier를 정확히 표현하세요.
+- 단순 인사·단일 검색·단일 앱 실행은 operations 1~2개, requires_frontier=false.
+- 라우팅 JSON만 출력. 사용자에게 보여줄 긴 답변을 생성하지 마세요.
 - knowledge_lane=search 이면 lane도 search (PC 실행 제외).
 - knowledge_lane=hybrid 이면 lane=hybrid (PC 실행 제외).
 - knowledge_lane=chat_only 이면 lane=chat_only (PC 실행 제외).
@@ -119,6 +148,7 @@ _LANE_MAP: dict[str, RouteLane] = {
     "computer_use": RouteLane.COMPUTER_USE,
     "fast_tool": RouteLane.FAST_TOOL,
     "multi_turn": RouteLane.MULTI_TURN,
+    "orchestrated": RouteLane.ORCHESTRATED,
 }
 
 _KNOWLEDGE_LANE_MAP: dict[str, RouteLane] = {
@@ -169,6 +199,10 @@ class UnifiedRoutePayload:
     clarification: str | None = None
     confidence: float = 0.0
     knowledge_lane: str | None = None
+    complexity: str | None = None
+    requires_frontier: bool = False
+    complexity_reasons: list[str] = field(default_factory=list)
+    route_analysis: RouteAnalysis | None = None
 
 
 def _is_llm_unavailable(text: str) -> bool:
@@ -235,11 +269,21 @@ def _pick_catalog_entry(
 
 def _safe_chat_fallback_routed_turn(user_text: str) -> RoutedTurn:
     """Unified Router 오프라인·JSON 실패 시 — regex 휴리스틱 대신 안전한 대화 레인."""
+    goal = user_text.strip() or None
+    analysis = adapt_legacy_route_metadata(
+        intent="chat",
+        lane="chat_only",
+        task_type=None,
+        slots={},
+        primary_goal=goal or "",
+        confidence=0.0,
+    )
     return RoutedTurn(
         kind=CommandKind.GENERAL_CHAT,
         lane=RouteLane.CHAT_ONLY,
-        goal=user_text.strip() or None,
+        goal=goal,
         knowledge_lane="chat_only",
+        route_analysis=analysis,
     )
 
 
@@ -264,6 +308,8 @@ def _kind_from_payload(
         return CommandKind.COMPUTER_USE
     if intent == "chat" or payload.lane is RouteLane.CHAT_ONLY:
         return CommandKind.GENERAL_CHAT
+    if intent == "orchestrated" or payload.lane is RouteLane.ORCHESTRATED:
+        return CommandKind.COMPLEX_AUTOMATION
     return fallback
 
 
@@ -305,6 +351,26 @@ def parse_unified_route_json(
 
     slots = _normalize_media_slots(_parse_slots(raw.get("slots")))
 
+    complexity_raw = raw.get("complexity")
+    complexity = (
+        complexity_raw.strip().lower()
+        if isinstance(complexity_raw, str) and complexity_raw.strip()
+        else None
+    )
+
+    requires_frontier = bool(raw.get("requires_frontier", False))
+
+    reasons_raw = raw.get("complexity_reasons")
+    complexity_reasons: list[str] = []
+    if isinstance(reasons_raw, list):
+        complexity_reasons = [str(x).strip() for x in reasons_raw if str(x).strip()]
+
+    route_analysis = build_route_analysis_from_router_json(
+        raw,
+        primary_goal=goal,
+        confidence=confidence,
+    )
+
     return UnifiedRoutePayload(
         intent=intent,
         lane=lane,
@@ -316,6 +382,10 @@ def parse_unified_route_json(
         clarification=clarification,
         confidence=confidence,
         knowledge_lane=knowledge_lane,
+        complexity=complexity,
+        requires_frontier=requires_frontier,
+        complexity_reasons=complexity_reasons,
+        route_analysis=route_analysis,
     )
 
 
@@ -339,6 +409,10 @@ def _routed_turn_common_fields(payload: UnifiedRoutePayload) -> dict[str, Any]:
         "needs_user_confirm": payload.needs_user_confirm,
         "clarification": payload.clarification,
         "knowledge_lane": payload.knowledge_lane,
+        "complexity": payload.complexity,
+        "requires_frontier": payload.requires_frontier,
+        "complexity_reasons": tuple(payload.complexity_reasons),
+        "route_analysis": payload.route_analysis,
     }
 
 
@@ -473,12 +547,16 @@ def route_user_turn(
         return resolve_route_lane(text, kind, ctx)
 
     catalog = app_catalog
+    top_k = 5
+    assistant_settings = getattr(assistant, "_settings", None) if assistant is not None else None
+    if assistant_settings is not None:
+        top_k = max(1, int(getattr(assistant_settings, "router_app_candidate_limit", 5)))
     if catalog is None and assistant is not None:
         catalog = resolve_app_candidates_for_llm(
             text,
             assistant._app_paths,
             db=assistant._db,
-            top_k=8,
+            top_k=top_k,
         )
 
     catalog = catalog or []

@@ -36,7 +36,16 @@ def test_envelope_route_to_routed_turn_chat_only() -> None:
 
 def test_frontier_chat_only_no_unified_router(tmp_path: Path) -> None:
     gemma = FakeGemma()
-    assistant = make_routing_assistant(tmp_path, gemma)  # type: ignore[arg-type]
+    assistant = make_test_assistant(
+        tmp_path,
+        gemma,
+        settings_overrides={
+            "frontier_enabled": True,
+            "unified_llm_router_enabled": True,
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
+        },
+    )
     gemma.chat = lambda messages, purpose=None, **kw: frontier_envelope_json(  # type: ignore[method-assign]
         "반가워요!",
         needs_execution=False,
@@ -55,7 +64,14 @@ def test_frontier_chat_only_no_unified_router(tmp_path: Path) -> None:
 def test_frontier_chat_only_skips_prefetch_callback(tmp_path: Path) -> None:
     """CHAT_ONLY — on_frontier_reply 없이 delegate만 (UI 이중 재생 방지)."""
     gemma = FakeGemma()
-    assistant = make_routing_assistant(tmp_path, gemma)  # type: ignore[arg-type]
+    assistant = make_test_assistant(
+        tmp_path,
+        gemma,
+        settings_overrides={
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
+        },
+    )
     gemma.chat = lambda messages, purpose=None, **kw: frontier_envelope_json(  # type: ignore[method-assign]
         "안녕하세요.",
         needs_execution=False,
@@ -76,7 +92,14 @@ def test_frontier_chat_only_skips_prefetch_callback(tmp_path: Path) -> None:
 def test_worker_frontier_chat_only_emits_stream_once(tmp_path: Path) -> None:
     """AgentWorker — CHAT_ONLY frontier_stream 1회(store_history=True)만."""
     gemma = FakeGemma()
-    assistant = make_routing_assistant(tmp_path, gemma)  # type: ignore[arg-type]
+    assistant = make_test_assistant(
+        tmp_path,
+        gemma,
+        settings_overrides={
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
+        },
+    )
     gemma.chat = lambda messages, purpose=None, **kw: frontier_envelope_json(  # type: ignore[method-assign]
         "안녕하세요.",
         needs_execution=False,
@@ -102,6 +125,8 @@ def test_frontier_parse_fail_falls_back_to_unified_router(tmp_path: Path) -> Non
         settings_overrides={
             "frontier_enabled": True,
             "unified_llm_router_enabled": True,
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
         },
     )
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
@@ -141,7 +166,11 @@ def test_frontier_cu_skips_completion_in_reply(tmp_path: Path) -> None:
     assistant = make_test_assistant(
         tmp_path,
         gemma,
-        settings_overrides={"frontier_enabled": True},
+        settings_overrides={
+            "frontier_enabled": True,
+            "router_mode": "frontier_first",
+            "chat_fast_path_enabled": False,
+        },
     )
     coord = TurnCoordinator(assistant, gemma)  # type: ignore[arg-type]
     frontier_calls: list[str] = []
