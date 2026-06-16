@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from iris.assistant.route_analysis import RouteAnalysis
 from iris.assistant.tool_layer import is_search_intent
 from iris.config.app_index import _alias_key
 from iris.core.command_router import CommandKind
@@ -121,6 +122,10 @@ class RoutedTurn:
     needs_user_confirm: bool = False
     clarification: str | None = None
     knowledge_lane: str | None = None  # chat_only | search | hybrid (지식 답변 3단)
+    complexity: str | None = None  # simple | moderate | complex
+    requires_frontier: bool = False
+    complexity_reasons: tuple[str, ...] = ()
+    route_analysis: RouteAnalysis | None = None
 
 
 def is_chat_only(text: str, kind: CommandKind) -> bool:

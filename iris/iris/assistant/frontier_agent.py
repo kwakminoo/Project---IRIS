@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.ai.response_parser import extract_json_object
 from iris.ai.thinking_policy import LlmPurpose
-from iris.assistant.dialogue_agent import build_dialogue_messages
 from iris.assistant.router_policy import RouteLane, RoutedTurn, is_multi_turn_active
 from iris.assistant.unified_router import (
     _build_dialogue_context_block,
@@ -99,22 +98,38 @@ def _build_frontier_user_block(
     user_text: str,
     ctx: DialogueContext,
     *,
-    app_catalog_json: str,
-    recent_block: str,
-    dialogue_history_block: str,
+    routing_hint: RoutedTurn | None = None,
+    frontier_reason: str | None = None,
+    app_catalog_json: str = "",
+    recent_block: str = "",
 ) -> str:
     hint_line = ""
     hint_raw = ctx.slots.get("last_execution_hint")
     if isinstance(hint_raw, str) and hint_raw.strip():
         hint_line = f"last_execution_hint={hint_raw.strip()[:80]!r}\n"
+    routing_block = ""
+    if routing_hint is not None:
+        routing_block = (
+            f"unified_router_lane={routing_hint.lane.value}; "
+            f"unified_intent={routing_hint.kind.name}; "
+            f"goal={routing_hint.goal!r}; "
+            f"requires_frontier={getattr(routing_hint, 'requires_frontier', False)}\n"
+        )
+    reason_line = ""
+    if frontier_reason:
+        reason_line = f"frontier_reason={frontier_reason!r}\n"
+    catalog_line = ""
+    if app_catalog_json and app_catalog_json != "[]":
+        catalog_line = f"relevant_apps={app_catalog_json}\n"
     return (
         f"user_text={user_text!r}\n"
         f"{_build_dialogue_context_block(ctx)}\n"
         f"{hint_line}"
-        f"{dialogue_history_block}\n"
-        f"app_catalog={app_catalog_json}\n"
+        f"{routing_block}"
+        f"{reason_line}"
+        f"{catalog_line}"
         f"{recent_block}\n"
-        "risk_policy: critical 작업은 needs_user_confirm=true"
+        "task: 복합 요청을 단계별 목표·실행 순서로 정리하고 JSON envelope 출력"
     )
 
 
@@ -171,6 +186,9 @@ def run_frontier_turn(
     gemma: GemmaClient,
     *,
     assistant: IrisAssistant | None = None,
+    routing_hint: RoutedTurn | None = None,
+    frontier_reason: str | None = None,
+    on_model_call: Callable[[], None] | None = None,
 ) -> FrontierResult | None:
     """
     Frontier 1회 LLM — user_reply + route envelope.
@@ -185,49 +203,38 @@ def run_frontier_turn(
         return None
 
     settings = assistant._settings
-    history_turns = 4
+    top_k = 3
     if settings is not None:
-        history_turns = max(0, int(getattr(settings, "dialogue_history_turns", 4)))
-
-    hist = list(assistant.memory.short_term_history())
-    dialogue_msgs = build_dialogue_messages(
-        text,
-        history=hist,
-        max_history_turns=history_turns,
-    )
-    dialogue_lines = []
-    for msg in dialogue_msgs:
-        if msg.role == "system":
-            continue
-        role = "user" if msg.role == "user" else "assistant"
-        dialogue_lines.append(f"{role}: {msg.content.strip()[:200]}")
-    dialogue_history_block = "dialogue_context=\n" + "\n".join(dialogue_lines[-(history_turns * 2) :])
+        top_k = max(1, min(5, int(getattr(settings, "router_app_candidate_limit", 5))))
 
     catalog = resolve_app_candidates_for_llm(
         text,
         assistant._app_paths,
         db=assistant._db,
-        top_k=8,
+        top_k=top_k,
     )
     catalog_json = json.dumps(catalog or [], ensure_ascii=False)
     recent_block = ""
     recent = _recent_turn_lines(assistant)
     if recent:
-        recent_block = "recent_turns=" + json.dumps(recent, ensure_ascii=False)
+        recent_block = "recent_turns=" + json.dumps(recent[-2:], ensure_ascii=False)
 
     user_block = _build_frontier_user_block(
         text,
         ctx,
+        routing_hint=routing_hint,
+        frontier_reason=frontier_reason,
         app_catalog_json=catalog_json,
         recent_block=recent_block,
-        dialogue_history_block=dialogue_history_block,
     )
 
     messages = [
         ChatMessage(role="system", content=FRONTIER_SYSTEM),
         ChatMessage(role="user", content=user_block),
     ]
-    push_activity_line("Frontier: single LLM envelope call.")
+    push_activity_line("Frontier: orchestration LLM envelope call.")
+    if on_model_call is not None:
+        on_model_call()
     raw_reply = gemma.chat(messages, purpose=LlmPurpose.FRONTIER)
     logs = ["frontier_call"]
 
