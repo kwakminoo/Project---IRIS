@@ -8,13 +8,15 @@ import time
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette, QTextCursor
 from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from iris.ui.command_dock import CommandDock
 from iris.ui.chat_display import (
     TYPING_CHARS_PER_TICK,
     TYPING_INTERVAL_MS,
@@ -29,7 +31,128 @@ from iris.ui.chat_display import (
     typing_target_index,
     visible_typing_text,
 )
-from iris.ui.theme_tokens import TOKENS
+from iris.ui.mic_waveform_bar import MicWaveformBar
+
+
+class _ChatInputBar(QWidget):
+    """입력칸 안쪽 우측에 전송 버튼이 붙는 바."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ChatInputBar")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(
+            """
+            QWidget#ChatInputBar {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 4, 6, 4)
+        row.setSpacing(0)
+
+        # 입력 필드 테두리 안에 전송 버튼을 겹치지 않고 배치
+        self._input_shell = QWidget()
+        self._input_shell.setObjectName("ChatInputShell")
+        self._input_shell.setStyleSheet(
+            """
+            QWidget#ChatInputShell {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        shell_row = QHBoxLayout(self._input_shell)
+        shell_row.setContentsMargins(10, 2, 4, 2)
+        shell_row.setSpacing(4)
+
+        self.input = QLineEdit()
+        self.input.setObjectName("ChatInput")
+        self.input.setPlaceholderText("Iris에게 메시지를 입력하세요…")
+        self.input.setStyleSheet(
+            """
+            QLineEdit {
+                background: transparent;
+                color: #ffffff;
+                border: none;
+                padding: 4px 0;
+            }
+            """
+        )
+
+        self.send_button = QPushButton("↑")
+        self.send_button.setObjectName("ChatSendButton")
+        self.send_button.setToolTip("전송")
+        self.send_button.setFixedSize(28, 28)
+        self.send_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_button.setEnabled(False)
+        self.send_button.setStyleSheet(
+            """
+            QPushButton#ChatSendButton {
+                background-color: #4f46e5;
+                color: #ffffff;
+                border: none;
+                border-radius: 14px;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0;
+            }
+            QPushButton#ChatSendButton:hover:enabled {
+                background-color: #6366f1;
+            }
+            QPushButton#ChatSendButton:pressed:enabled {
+                background-color: #4338ca;
+            }
+            QPushButton#ChatSendButton:disabled {
+                background-color: #1e293b;
+                color: #475569;
+            }
+            """
+        )
+
+        shell_row.addWidget(self.input, 1)
+        shell_row.addWidget(self.send_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._input_shell, 1)
+
+
+class _ChatInputArea(QWidget):
+    """입력칸 + 하단 마이크 주파수 바."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ChatInputArea")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(
+            """
+            QWidget#ChatInputArea {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        self.input_bar = _ChatInputBar()
+        self.waveform = MicWaveformBar()
+        self.waveform.setStyleSheet(
+            """
+            MicWaveformBar {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+
+        col.addWidget(self.input_bar)
+        col.addWidget(self.waveform)
+
+        # 리사이즈 시 출력창이 입력 영역 높이를 침범하지 않도록 고정
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(self.input_bar.sizeHint().height() + self.waveform.minimumHeight())
 
 
 class ChatPanel(QWidget):
@@ -83,25 +206,21 @@ class ChatPanel(QWidget):
         self._typing_body_start: int | None = None
         self._typing_render_markdown = False
         self._user_listening_active = False
-        self._command_dock = CommandDock()
-        self._input = self._command_dock.input
-        self._waveform = self._command_dock.waveform
-        self._command_dock.send_clicked.connect(self.send_clicked.emit)
+        self._input_area = _ChatInputArea()
+        self._input = self._input_area.input_bar.input
+        self._waveform = self._input_area.waveform
+        self._input.returnPressed.connect(self._emit_send)
+        self._input.textChanged.connect(self._on_input_changed)
+        self._input_area.input_bar.send_button.clicked.connect(self._emit_send)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(TOKENS.spacing_sm)
+        root.setSpacing(8)
         root.addWidget(self._log, 1)
-        root.addWidget(self._command_dock, 0)
+        root.addWidget(self._input_area, 0)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(
-            self._log.minimumHeight() + self._command_dock.minimumHeight() + TOKENS.spacing_sm
-        )
-
-    @property
-    def command_dock(self) -> CommandDock:
-        return self._command_dock
+        self.setMinimumHeight(self._log.minimumHeight() + self._input_area.minimumHeight() + 8)
 
     def _scroll_log_to_bottom(self, *, deferred: bool = False) -> None:
         """새 메시지·음성 인식 결과가 항상 보이도록 출력창을 맨 아래로 스크롤."""
@@ -121,14 +240,11 @@ class ChatPanel(QWidget):
 
     def set_mic_level(self, level: float) -> None:
         """상시 듣기 마이크 레벨 — 하단 주파수 바에 반영."""
-        self._command_dock.set_mic_level(level)
+        self._waveform.set_level(level)
 
     def set_speech_threshold_rms(self, speech_rms: float) -> None:
         """인식 감도 임계 — 점선 위치 갱신."""
-        self._command_dock.set_speech_threshold_rms(speech_rms)
-
-    def set_voice_state(self, label: str, *, kind: str = "idle") -> None:
-        self._command_dock.set_voice_state(label, kind=kind)
+        self._waveform.set_threshold_rms(speech_rms)
 
     def begin_user_listening(self) -> None:
         """발화 시작 — 플레이스홀더로 즉시 피드백."""
@@ -460,3 +576,13 @@ class ChatPanel(QWidget):
 
         self._replace_typing_body()
         self._scroll_log_to_bottom()
+
+    def _on_input_changed(self, text: str) -> None:
+        self._input_area.input_bar.send_button.setEnabled(bool(text.strip()))
+
+    def _emit_send(self) -> None:
+        t = self._input.text().strip()
+        if not t:
+            return
+        self._input.clear()
+        self.send_clicked.emit(t)

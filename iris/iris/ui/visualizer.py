@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, Qt, QTimer
 from PyQt6.QtWidgets import QWidget
 
 from iris.core.state_machine import AppState
 from iris.ui.particle_visualizer import ParticleVisualizer
+
+_DEBUG_ORB = os.environ.get("IRIS_DEBUG_ORB_GEOMETRY") == "1"
+_MAX_STABILIZE_ATTEMPTS = 12
+_SNAPSHOT_TOLERANCE_PX = 1
+
+
+@dataclass(frozen=True)
+class _GeomSnapshot:
+    """안정화 검사용 geometry 스냅샷."""
+
+    visualizer_rect: QRect
+    anchor_geom: QRect
+    local_center: QPointF
+    window_state: Qt.WindowState
+    device_pixel_ratio: float
+    overlay_geom: QRect | None = None
 
 
 class Visualizer(QWidget):
@@ -25,7 +43,19 @@ class Visualizer(QWidget):
         self._particle = ParticleVisualizer(self)
         self._orb_anchor: QWidget | None = None
         self._anchor_filter: _OrbAnchorEventFilter | None = None
-        self._last_center: tuple[int, int] | None = None
+        self._watch_filters: list[_GeometryWatchFilter] = []
+        self._last_center: tuple[float, float] | None = None
+        self._pending_sync_reason = ""
+        self._stabilize_attempts = 0
+        self._prev_snapshot: _GeomSnapshot | None = None
+
+        self._anchor_sync_timer = QTimer(self)
+        self._anchor_sync_timer.setSingleShot(True)
+        self._anchor_sync_timer.timeout.connect(self._begin_stabilized_sync)
+
+        self._stabilize_timer = QTimer(self)
+        self._stabilize_timer.setSingleShot(True)
+        self._stabilize_timer.timeout.connect(self._continue_stabilized_sync)
 
     def set_orb_anchor(self, widget: QWidget | None) -> None:
         """구체 중심을 레이아웃 여백(orb spacer) 중앙에 맞춘다."""
@@ -37,50 +67,264 @@ class Visualizer(QWidget):
             widget.installEventFilter(self._anchor_filter)
         else:
             self._anchor_filter = None
-        self.request_sync_orb_anchor()
+        self.request_sync_orb_anchor("set_orb_anchor")
 
-    def request_sync_orb_anchor(self) -> None:
-        """레이아웃 완료 후 anchor 좌표 재계산 (deferred)."""
-        QTimer.singleShot(0, self._sync_orb_anchor)
+    def register_geometry_watch(self, *widgets: QWidget) -> None:
+        """anchor 외 레이아웃 변화를 감지할 위젯에 이벤트 필터를 설치한다."""
+        for widget in widgets:
+            filt = _GeometryWatchFilter(self)
+            widget.installEventFilter(filt)
+            self._watch_filters.append(filt)
+
+    def request_sync_orb_anchor(self, reason: str = "") -> None:
+        """레이아웃 완료 후 anchor 좌표 재계산 — 단일 타이머로 요청 병합."""
+        if reason:
+            self._pending_sync_reason = reason
+        self._anchor_sync_timer.start(0)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._particle.setGeometry(self.rect())
-        self.request_sync_orb_anchor()
+        self.request_sync_orb_anchor("visualizer_resize")
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self.request_sync_orb_anchor()
+        self.request_sync_orb_anchor("visualizer_show")
+
+    def live_anchor_center_local(self) -> tuple[float, float] | None:
+        """디버그·테스트용 — anchor 중심의 visualizer 로컬 좌표."""
+        anchor = self._orb_anchor
+        if anchor is None:
+            return None
+        return self._map_anchor_center_local(anchor)
 
     def orb_center_offset(self) -> tuple[float, float] | None:
         """디버그·테스트용 — anchor 중심과 particle custom center 차이."""
-        anchor = self._orb_anchor
-        if anchor is None or not anchor.isVisible():
+        local = self.live_anchor_center_local()
+        if local is None:
             return None
-        global_center = anchor.mapToGlobal(anchor.rect().center())
-        local = self.mapFromGlobal(global_center)
         pc = self._particle.custom_center()
         if pc is None:
             return None
-        return (pc[0] - local.x(), pc[1] - local.y())
+        return (pc[0] - local[0], pc[1] - local[1])
 
-    def _sync_orb_anchor(self) -> None:
+    def _map_anchor_center_local(self, anchor: QWidget) -> tuple[float, float] | None:
+        """동일 창 계층 내 sibling-local 좌표 변환."""
+        if not self._same_top_level_window(anchor):
+            return None
+        local_pt = anchor.mapTo(self, anchor.rect().center())
+        return (float(local_pt.x()), float(local_pt.y()))
+
+    @staticmethod
+    def _same_top_level_window(a: QWidget, b: QWidget | None = None) -> bool:
+        target = b or a
+        return a.window() is target.window()
+
+    def _begin_stabilized_sync(self) -> None:
+        self._stabilize_attempts = 0
+        self._prev_snapshot = None
+        self._continue_stabilized_sync()
+
+    def _continue_stabilized_sync(self) -> None:
         anchor = self._orb_anchor
         if anchor is None:
             if self._last_center is not None:
                 self._particle.set_custom_center(self._last_center[0], self._last_center[1])
             else:
                 self._particle.clear_custom_center()
+            self._pending_sync_reason = ""
             return
         if not anchor.isVisible():
-            # 일시적 hidden — 기존 좌표 유지
-            if self._last_center is not None:
-                self._particle.set_custom_center(self._last_center[0], self._last_center[1])
+            self._hold_last_center("anchor_hidden")
             return
-        global_center = anchor.mapToGlobal(anchor.rect().center())
-        local = self.mapFromGlobal(global_center)
-        self._last_center = (local.x(), local.y())
-        self._particle.set_custom_center(local.x(), local.y())
+
+        snap = self._capture_snapshot()
+        if snap is None:
+            self._hold_last_center("snapshot_unavailable")
+            return
+
+        if self._prev_snapshot is not None and self._snapshots_match(self._prev_snapshot, snap):
+            self._apply_center_candidate(snap, accepted=True)
+            return
+
+        self._prev_snapshot = snap
+        self._stabilize_attempts += 1
+        if self._stabilize_attempts >= _MAX_STABILIZE_ATTEMPTS:
+            self._apply_center_candidate(snap, accepted=self._is_valid_center(snap.local_center))
+            return
+        self._stabilize_timer.start(0)
+
+    def _capture_snapshot(self) -> _GeomSnapshot | None:
+        anchor = self._orb_anchor
+        if anchor is None:
+            return None
+
+        local = self._map_anchor_center_local(anchor)
+        if local is None:
+            return None
+
+        window = self.window()
+        overlay = self._find_ui_overlay()
+        return _GeomSnapshot(
+            visualizer_rect=QRect(self.rect()),
+            anchor_geom=QRect(anchor.geometry()),
+            local_center=QPointF(local[0], local[1]),
+            window_state=window.windowState() if window is not None else Qt.WindowState.WindowNoState,
+            device_pixel_ratio=float(self.devicePixelRatioF()),
+            overlay_geom=QRect(overlay.geometry()) if overlay is not None else None,
+        )
+
+    def _find_ui_overlay(self) -> QWidget | None:
+        parent = self.parentWidget()
+        if parent is None:
+            return None
+        for child in parent.children():
+            if isinstance(child, QWidget) and child.objectName() == "UiOverlay":
+                return child
+        return None
+
+    @staticmethod
+    def _snapshots_match(a: _GeomSnapshot, b: _GeomSnapshot) -> bool:
+        tol = _SNAPSHOT_TOLERANCE_PX
+
+        def close_rect(r1: QRect, r2: QRect) -> bool:
+            return (
+                abs(r1.width() - r2.width()) <= tol
+                and abs(r1.height() - r2.height()) <= tol
+                and abs(r1.x() - r2.x()) <= tol
+                and abs(r1.y() - r2.y()) <= tol
+            )
+
+        if not close_rect(a.visualizer_rect, b.visualizer_rect):
+            return False
+        if not close_rect(a.anchor_geom, b.anchor_geom):
+            return False
+        if abs(a.local_center.x() - b.local_center.x()) > tol:
+            return False
+        if abs(a.local_center.y() - b.local_center.y()) > tol:
+            return False
+        if a.window_state != b.window_state:
+            return False
+        if abs(a.device_pixel_ratio - b.device_pixel_ratio) > 0.01:
+            return False
+        if a.overlay_geom is not None and b.overlay_geom is not None:
+            if not close_rect(a.overlay_geom, b.overlay_geom):
+                return False
+        return True
+
+    def _is_valid_center(self, center: QPointF) -> bool:
+        anchor = self._orb_anchor
+        if anchor is None:
+            return False
+        window = self.window()
+        if window is None or not self._same_top_level_window(anchor):
+            return False
+        if not anchor.isVisibleTo(window):
+            return False
+        if anchor.width() <= 0 or anchor.height() <= 0:
+            return False
+
+        cx, cy = center.x(), center.y()
+        vr = self.rect()
+        margin = max(vr.width(), vr.height()) * 0.6
+        if cx < -margin or cy < -margin:
+            return False
+        if cx > vr.width() + margin or cy > vr.height() + margin:
+            return False
+        return True
+
+    def _apply_center_candidate(self, snap: _GeomSnapshot, *, accepted: bool) -> None:
+        reason = self._pending_sync_reason or "sync"
+        self._pending_sync_reason = ""
+        cx, cy = snap.local_center.x(), snap.local_center.y()
+        prev = self._last_center
+
+        if accepted and self._is_valid_center(snap.local_center):
+            self._last_center = (cx, cy)
+            self._particle.set_custom_center(cx, cy)
+            reject_reason = None
+        else:
+            reject_reason = "invalid_candidate" if not accepted else "validation_failed"
+            self._hold_last_center(reject_reason or "rejected")
+
+        if _DEBUG_ORB:
+            self._log_geometry_debug(
+                reason=reason,
+                snap=snap,
+                prev=prev,
+                candidate=(cx, cy),
+                accepted=accepted and reject_reason is None,
+                reject_reason=reject_reason,
+            )
+
+    def _hold_last_center(self, reason: str) -> None:
+        anchor = self._orb_anchor
+        if anchor is not None and anchor.isVisible():
+            if _DEBUG_ORB:
+                snap = self._capture_snapshot()
+                if snap is not None:
+                    self._log_geometry_debug(
+                        reason=reason,
+                        snap=snap,
+                        prev=self._last_center,
+                        candidate=(snap.local_center.x(), snap.local_center.y()),
+                        accepted=False,
+                        reject_reason=reason,
+                    )
+        if self._last_center is not None:
+            self._particle.set_custom_center(self._last_center[0], self._last_center[1])
+        self._pending_sync_reason = ""
+
+    def _sync_orb_anchor(self) -> None:
+        """레거시 호환 — 안정화 동기화로 위임."""
+        self.request_sync_orb_anchor("legacy_sync")
+
+    def _log_geometry_debug(
+        self,
+        *,
+        reason: str,
+        snap: _GeomSnapshot,
+        prev: tuple[float, float] | None,
+        candidate: tuple[float, float],
+        accepted: bool,
+        reject_reason: str | None,
+    ) -> None:
+        anchor = self._orb_anchor
+        window = self.window()
+        main_geom = window.geometry() if window is not None else QRect()
+        bg = self.parentWidget()
+        bg_geom = bg.geometry() if bg is not None else QRect()
+        overlay_geom = snap.overlay_geom or QRect()
+        assistant = window.findChild(QWidget, "AssistantWorkspacePage") if window else None
+        assistant_geom = assistant.geometry() if assistant is not None else QRect()
+        splitter_sizes: list[int] = []
+        if assistant is not None:
+            splitter = getattr(assistant, "splitter", None)
+            if splitter is not None and hasattr(splitter, "sizes"):
+                splitter_sizes = list(splitter.sizes())
+        orb_geom = anchor.geometry() if anchor is not None else QRect()
+        global_center = ""
+        if anchor is not None:
+            g = anchor.mapToGlobal(anchor.rect().center())
+            global_center = f"({g.x()},{g.y()})"
+
+        print(
+            f"[IRIS_DEBUG_ORB] reason={reason!r} "
+            f"window_state={int(snap.window_state)} "
+            f"main={main_geom.width()}x{main_geom.height()} "
+            f"bg={bg_geom.width()}x{bg_geom.height()} "
+            f"overlay={overlay_geom.width()}x{overlay_geom.height()} "
+            f"viz={snap.visualizer_rect.width()}x{snap.visualizer_rect.height()} "
+            f"assistant={assistant_geom.width()}x{assistant_geom.height()} "
+            f"splitter={splitter_sizes} "
+            f"orb_spacer={orb_geom.width()}x{orb_geom.height()}@({orb_geom.x()},{orb_geom.y()}) "
+            f"local=({candidate[0]:.1f},{candidate[1]:.1f}) "
+            f"global_diag={global_center} "
+            f"prev={prev} "
+            f"accepted={accepted} "
+            f"reject={reject_reason!r} "
+            f"dpr={snap.device_pixel_ratio:.3f}"
+        )
 
     def set_state(self, state: AppState) -> None:
         self._particle.set_state(state.name)
@@ -105,7 +349,33 @@ class _OrbAnchorEventFilter(QObject):
             QEvent.Type.Resize,
             QEvent.Type.Move,
             QEvent.Type.Show,
+            QEvent.Type.Hide,
             QEvent.Type.LayoutRequest,
+            QEvent.Type.ParentChange,
         ):
-            self._visualizer.request_sync_orb_anchor()
+            self._visualizer.request_sync_orb_anchor(f"anchor_{event.type().name}")
+        return super().eventFilter(watched, event)
+
+
+class _GeometryWatchFilter(QObject):
+    """레이아웃 트리 상위·형제 위젯 geometry 변화 감지."""
+
+    _WATCH_TYPES = (
+        QEvent.Type.Resize,
+        QEvent.Type.Move,
+        QEvent.Type.Show,
+        QEvent.Type.Hide,
+        QEvent.Type.LayoutRequest,
+        QEvent.Type.ParentChange,
+        QEvent.Type.WindowStateChange,
+    )
+
+    def __init__(self, visualizer: Visualizer) -> None:
+        super().__init__(visualizer)
+        self._visualizer = visualizer
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() in self._WATCH_TYPES:
+            name = watched.objectName() if isinstance(watched, QWidget) else ""
+            self._visualizer.request_sync_orb_anchor(f"watch_{name}_{event.type().name}")
         return super().eventFilter(watched, event)

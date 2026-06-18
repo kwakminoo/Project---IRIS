@@ -93,8 +93,9 @@ from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, Searc
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, test_mode: bool = False) -> None:
         super().__init__()
+        self._test_mode = test_mode
         self.setWindowTitle("Iris")
         self.setMinimumSize(960, 640)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
@@ -122,7 +123,8 @@ class MainWindow(QMainWindow):
         self._dialogue = DialogueAgent(self._assistant, self._gemma)
         self._install_watcher = AppInstallWatcher(self)
         self._install_watcher.install_complete.connect(self._on_install_complete)
-        self._maybe_run_initial_app_scan()
+        if not self._test_mode:
+            self._maybe_run_initial_app_scan()
         self._stt = SttEngine(self._settings)
         self._tts = TtsEngine(self._settings, parent=self)
         self._tts.status_changed.connect(self._on_tts_status_changed)
@@ -168,11 +170,13 @@ class MainWindow(QMainWindow):
         self._ide_bridge.start()
 
         central = CyberspaceBackground()
+        self._cyberspace_bg = central
         self._viz = Visualizer(central)
         self._continuous_listen.mic_level.connect(self._viz.set_mic_level)
 
         ui_overlay = QWidget()
         ui_overlay.setObjectName("UiOverlay")
+        self._ui_overlay = ui_overlay
         central.set_orb_layer(self._viz)
         central.set_ui_overlay(ui_overlay)
 
@@ -234,6 +238,15 @@ class MainWindow(QMainWindow):
         )
         left_lay.addWidget(self._orb_spacer, 2)
         self._viz.set_orb_anchor(self._orb_spacer)
+        self._viz.register_geometry_watch(
+            self._orb_spacer,
+            self._assistant_page.center_column,
+            self._assistant_page,
+            self._assistant_page.splitter,
+            ui_overlay,
+            central,
+            self,
+        )
 
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
@@ -260,7 +273,6 @@ class MainWindow(QMainWindow):
         self._chat = ChatPanel()
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
-        self._chat.command_dock.ide_clicked.connect(self._on_ide_toggle)
         left_lay.addWidget(self._chat, 3)
 
         self._monitor = UnifiedMonitorPanel()
@@ -279,7 +291,12 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setCollapsible(0, False)
 
-        self._left_sidebar.utility.actions.setVisible(False)
+        self._left_sidebar.utility.actions.add_action(
+            action_id="ide",
+            title="IDE",
+            tooltip="Iris IDE 작업공간으로 전환",
+            callback=self._on_ide_toggle,
+        )
         self._ide_page.theia_retry.connect(lambda: self._start_ide_backend_and_load(force_reload=True))
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
         self._ide_page.theia_view_log.connect(self._show_ide_log)
@@ -291,7 +308,8 @@ class MainWindow(QMainWindow):
 
         self._metrics_worker = MetricsWorker(parent=self)
         self._metrics_worker.snapshot_ready.connect(self._on_metrics_snapshot)
-        self._metrics_worker.start()
+        if not self._test_mode:
+            self._metrics_worker.start()
 
         root.addWidget(splitter, 1)
 
@@ -324,28 +342,28 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
         center_on_screen(self)
         # 무거운 백그라운드 서비스는 창 표시 후 — show()·첫 페인트 블로킹 완화
-        QTimer.singleShot(0, self._deferred_startup_services)
+        if not self._test_mode:
+            QTimer.singleShot(0, self._deferred_startup_services)
 
     def _toggle_maximize(self) -> None:
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
-        self._drag.set_maximized(self.isMaximized())
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         suppress_native_window_border(self)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             self._drag.set_maximized(self.isMaximized())
-            self._viz.request_sync_orb_anchor()
-        super().changeEvent(event)
+            self._viz.request_sync_orb_anchor("window_state_change")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._viz.request_sync_orb_anchor()
+        self._viz.request_sync_orb_anchor("main_window_resize")
 
     def _deferred_startup_services(self) -> None:
         """창이 뜬 뒤 상시 음성·모니터·STT 워밍업 시작."""
@@ -549,27 +567,10 @@ class MainWindow(QMainWindow):
         )
         self._apply_runtime_settings()
 
-    def _sync_voice_dock_state(self, state: AppState) -> None:
-        """Command Dock 음성 상태 라벨."""
-        mapping = {
-            AppState.IDLE: ("Voice idle", "idle"),
-            AppState.LISTENING: ("Listening…", "listening"),
-            AppState.PROCESSING: ("Processing…", "processing"),
-            AppState.EXECUTING: ("Executing…", "processing"),
-            AppState.RESPONDING: ("Speaking…", "listening"),
-            AppState.ERROR: ("Voice error", "error"),
-            AppState.ALERTING: ("Alert active", "processing"),
-            AppState.MONITORING: ("Monitoring", "idle"),
-        }
-        label, kind = mapping.get(state, (state.name, "idle"))
-        self._chat.set_voice_state(label, kind=kind)
-
     @pyqtSlot(object)
     def _on_voice_session_state(self, state: object) -> None:
         if isinstance(state, VoiceSessionState):
             push_activity_line(f"VoiceSession: state {state.value.upper()}.")
-            if state.value == "listening":
-                self._chat.set_voice_state("Mic active", kind="listening")
 
     @pyqtSlot()
     def _barge_slot(self) -> None:
@@ -633,7 +634,6 @@ class MainWindow(QMainWindow):
                 self._status_strip.refresh_backend_status(self._settings)
             else:
                 self._status_label.setText(f"상태: {s.name}")
-            self._sync_voice_dock_state(s)
             push_activity_line(f"UI: app state → {s.name}.")
 
     def _pause_voice_input(self) -> None:
@@ -1330,8 +1330,13 @@ class MainWindow(QMainWindow):
         self._place_status_strip_in_header()
         self._viz.setVisible(True)
         self._viz.set_orb_anchor(self._orb_spacer)
-        self._chat.command_dock.set_ide_active(False)
-        self._viz.request_sync_orb_anchor()
+        self._left_sidebar.utility.actions.update_action(
+            "ide",
+            title="IDE",
+            tooltip="Iris IDE 작업공간으로 전환",
+        )
+        self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._viz.request_sync_orb_anchor("switch_to_assistant")
         self._assistant_page.restore_splitter_state(self._assistant_splitter_state)
         self._metrics_worker.set_active(True)
 
@@ -1344,8 +1349,13 @@ class MainWindow(QMainWindow):
         self._place_status_strip_in_coding_panel()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
-        self._chat.command_dock.set_ide_active(True)
+        self._left_sidebar.utility.actions.update_action(
+            "ide",
+            title="돌아가기",
+            tooltip="기존 Iris 화면으로 복귀",
+        )
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
+        self._left_sidebar.utility.actions.set_action_active("ide", True)
         ctx = self._ide_bridge.get_context()
         self._ide_page.coding_panel.chat.set_workspace_context(ctx.summary_line())
         self._metrics_worker.set_active(True)

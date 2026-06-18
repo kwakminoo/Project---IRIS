@@ -45,6 +45,10 @@ class AssistantWorkspacePage(QWidget):
 
     lay.addWidget(self._splitter)
 
+  @property
+  def splitter(self) -> QSplitter:
+    return self._splitter
+
   def save_splitter_state(self) -> bytes:
     return bytes(self._splitter.saveState())
 

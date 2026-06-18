@@ -7,7 +7,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QRadialGradient
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QLayout, QWidget
 
 from iris.ui.theme_tokens import TOKENS
 
@@ -50,14 +50,28 @@ class CyberspaceBackground(QWidget):
 
     def _sync_layers(self) -> None:
         rect = self.rect()
+        # UI 오버레이·레이아웃을 먼저 확정한 뒤 orb 레이어와 anchor 동기화
+        if self._ui_overlay is not None:
+            self._ui_overlay.setGeometry(rect)
+            self._activate_layout_chain(self._ui_overlay)
         if self._orb_layer is not None:
             self._orb_layer.setGeometry(rect)
             request_sync = getattr(self._orb_layer, "request_sync_orb_anchor", None)
             if callable(request_sync):
-                request_sync()
+                request_sync("cyberspace_sync_layers")
         if self._ui_overlay is not None:
-            self._ui_overlay.setGeometry(rect)
             self._ui_overlay.raise_()
+
+    def _activate_layout_chain(self, root: QWidget) -> None:
+        """오버레이 및 하위 AssistantWorkspace·Splitter 레이아웃을 즉시 반영."""
+        lay = root.layout()
+        if isinstance(lay, QLayout):
+            lay.activate()
+        for child in root.findChildren(QWidget):
+            child.updateGeometry()
+            child_lay = child.layout()
+            if isinstance(child_lay, QLayout):
+                child_lay.activate()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
