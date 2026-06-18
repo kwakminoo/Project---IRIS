@@ -88,6 +88,7 @@ from iris.system.metrics_worker import MetricsWorker
 from iris.ui.cyberspace_background import CyberspaceBackground
 from iris.ui.cyberspace_theme import apply_cyberspace_theme
 from iris.ui.left_sidebar_panel import LeftSidebarPanel
+from iris.ui.status_strip import StatusStrip
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
@@ -192,23 +193,16 @@ class MainWindow(QMainWindow):
         status_header_lay = QVBoxLayout(status_header)
         status_header_lay.setContentsMargins(4, 6, 4, 6)
         status_header_lay.setSpacing(4)
-        status_top = QHBoxLayout()
-        status_top.setContentsMargins(0, 0, 0, 0)
-        status_top.setSpacing(8)
+        self._status_header = status_header
+        self._status_header_lay = status_header_lay
 
-        self._model_label = QLabel()
-        self._model_label.setObjectName("ModelStatus")
+        self._status_strip = StatusStrip(status_header)
+        self._model_label = self._status_strip.model_label
         self._refresh_model_label()
-        status_top.addWidget(self._model_label)
-
-        self._status_label = QLabel("상태: IDLE")
-        self._status_label.setObjectName("StatusPill")
-        status_top.addWidget(self._status_label)
-        self._tts_status_label = QLabel(self._tts.status_label)
-        self._tts_status_label.setObjectName("TtsStatus")
-        status_top.addWidget(self._tts_status_label)
-        status_top.addStretch(1)
-        status_header_lay.addLayout(status_top)
+        self._status_label = self._status_strip.status_label
+        self._tts_status_label = self._status_strip.tts_status_label
+        self._tts_status_label.setText(self._tts.status_label)
+        status_header_lay.addWidget(self._status_strip)
         self._backend_status = QLabel(external_backend_status_line(self._settings))
         self._backend_status.setObjectName("BackendStatus")
         self._backend_status.setWordWrap(True)
@@ -234,15 +228,16 @@ class MainWindow(QMainWindow):
         right_lay = self._assistant_page.right_layout
 
         # 구체는 전체 창 오버레이 — 레이아웃에는 투명 여백만 유지(이전 Visualizer 자리)
-        orb_spacer = QWidget()
-        orb_spacer.setObjectName("OrbLayoutSpacer")
-        orb_spacer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        orb_spacer.setMinimumHeight(160)
-        orb_spacer.setSizePolicy(
+        self._orb_spacer = QWidget()
+        self._orb_spacer.setObjectName("OrbLayoutSpacer")
+        self._orb_spacer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._orb_spacer.setMinimumHeight(160)
+        self._orb_spacer.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        left_lay.addWidget(orb_spacer, 2)
+        left_lay.addWidget(self._orb_spacer, 2)
+        self._viz.set_orb_anchor(self._orb_spacer)
 
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
@@ -1281,12 +1276,29 @@ class MainWindow(QMainWindow):
     def current_workspace(self) -> str:
         return self._workspace_mode
 
+    def _place_status_strip_in_header(self) -> None:
+        """모델·상태·TTS — 기본 화면 상단."""
+        self._status_header_lay.removeWidget(self._status_strip)
+        self._status_strip.setParent(self._status_header)
+        self._status_header_lay.insertWidget(0, self._status_strip)
+        self._status_strip.show()
+
+    def _place_status_strip_in_coding_panel(self) -> None:
+        """모델·상태·TTS — IDE 코딩 패널 상단(구체 위)."""
+        self._status_header_lay.removeWidget(self._status_strip)
+        panel = self._ide_page.coding_panel
+        panel.place_status_strip(self._status_strip)
+        self._status_strip.show()
+
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
             return
         self._ide_splitter_state = self._ide_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._assistant_page)
         self._workspace_mode = "assistant"
+        self._place_status_strip_in_header()
+        self._viz.setVisible(True)
+        self._viz.set_orb_anchor(self._orb_spacer)
         self._left_sidebar.utility.actions.update_action(
             "ide",
             title="IDE",
@@ -1302,6 +1314,9 @@ class MainWindow(QMainWindow):
         self._assistant_splitter_state = self._assistant_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._ide_page)
         self._workspace_mode = "ide"
+        self._place_status_strip_in_coding_panel()
+        self._viz.setVisible(False)
+        self._viz.set_orb_anchor(None)
         self._left_sidebar.utility.actions.update_action(
             "ide",
             title="돌아가기",

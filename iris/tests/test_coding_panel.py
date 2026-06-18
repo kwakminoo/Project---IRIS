@@ -37,12 +37,12 @@ def test_coding_panel_contains_text_input(qapp) -> None:
     assert panel.chat._send_btn is not None
 
 
-def test_coding_panel_contains_voice_button(qapp) -> None:
+def test_coding_panel_has_no_voice_button(qapp) -> None:
     panel = IrisCodingPanel()
-    assert panel.chat._mic_btn is not None
+    assert not hasattr(panel.chat, "_mic_btn")
 
 
 def test_orb_state_changes_with_assistant_state(qapp) -> None:
     panel = IrisCodingPanel()
     panel.set_app_state(AppState.LISTENING)
-    assert "LISTENING" in panel._status.text()
+    assert panel.orb.particle_core()._state_name == "LISTENING"

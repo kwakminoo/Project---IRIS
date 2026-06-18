@@ -22,7 +22,6 @@ class CodingChatView(QWidget):
   """바이브 코딩용 텍스트·음성 입력 + 대화 기록."""
 
   send_clicked = pyqtSignal(str)
-  voice_toggle_clicked = pyqtSignal()
 
   def __init__(self, parent: QWidget | None = None) -> None:
     super().__init__(parent)
@@ -44,12 +43,6 @@ class CodingChatView(QWidget):
     lay.addWidget(self._log, 1)
 
     input_row = QHBoxLayout()
-    self._mic_btn = QPushButton("🎤")
-    self._mic_btn.setToolTip("음성 입력")
-    self._mic_btn.setFixedWidth(36)
-    self._mic_btn.clicked.connect(self.voice_toggle_clicked.emit)
-    input_row.addWidget(self._mic_btn)
-
     self._input = QLineEdit()
     self._input.setPlaceholderText("코딩 요청…")
     self._input.returnPressed.connect(self._emit_send)

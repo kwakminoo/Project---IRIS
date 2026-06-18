@@ -109,6 +109,8 @@ class ParticleVisualizer(QWidget):
         self._cx = 0.0
         self._cy = 0.0
         self._core_r = 60.0
+        self._custom_center: tuple[float, float] | None = None
+        self._size_scale = 1.0
         self._sphere_pts = _fibonacci_sphere(_PARTICLE_COUNT)
         self._core_image = QPixmap(str(_asset_path("visuals/iris_core.png")))
 
@@ -147,6 +149,20 @@ class ParticleVisualizer(QWidget):
     def set_activity_level(self, level: float) -> None:
         self._activity_level = max(0.0, min(2.0, float(level)))
 
+    def set_custom_center(self, cx: float, cy: float) -> None:
+        """레이아웃 앵커 등으로 구체 중심을 고정한다."""
+        self._custom_center = (float(cx), float(cy))
+        self.update()
+
+    def clear_custom_center(self) -> None:
+        self._custom_center = None
+        self._recompute_geometry()
+
+    def set_size_scale(self, scale: float) -> None:
+        """구체 반경 배율 — IDE 패널 등 컴팩트 영역 확대용."""
+        self._size_scale = max(0.25, float(scale))
+        self._recompute_geometry()
+
     def start(self) -> None:
         if not self._timer.isActive():
             self._timer.start()
@@ -156,9 +172,13 @@ class ParticleVisualizer(QWidget):
 
     def _recompute_geometry(self) -> None:
         width, height = max(self.width(), 1), max(self.height(), 1)
-        self._cx = width * 0.5
-        self._cy = height * 0.48
-        self._core_r = min(width, height) * 0.18
+        if self._custom_center is None:
+            self._cx = width * 0.5
+            # 로그창 위쪽 중앙에 오도록 기본 Y를 올림
+            self._cy = height * 0.36
+        else:
+            self._cx, self._cy = self._custom_center
+        self._core_r = min(width, height) * 0.18 * self._size_scale
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])
