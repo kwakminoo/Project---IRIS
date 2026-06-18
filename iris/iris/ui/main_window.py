@@ -11,9 +11,7 @@ from pathlib import Path
 from PyQt6.QtCore import QDateTime, QEvent, Qt, QThread, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QPushButton,
     QSplitter,
@@ -26,7 +24,6 @@ from PyQt6.QtWidgets import (
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.ai.stream_sentence import find_first_sentence_end
 from iris.assistant.agent_adapter import IrisAssistant
-from iris.assistant.external_agent_adapter import external_backend_status_line
 from iris.agent.needs_agent import (
     assess_research_quality,
     format_comparison_degraded_context,
@@ -87,8 +84,9 @@ from iris.ui.ide.iris_webengine_page import tail_webengine_log
 from iris.system.metrics_worker import MetricsWorker
 from iris.ui.cyberspace_background import CyberspaceBackground
 from iris.ui.cyberspace_theme import apply_cyberspace_theme
+from iris.ui.theme_tokens import TOKENS
 from iris.ui.left_sidebar_panel import LeftSidebarPanel
-from iris.ui.status_strip import StatusStrip
+from iris.ui.top_status_header import TopStatusHeader
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
@@ -179,8 +177,13 @@ class MainWindow(QMainWindow):
         central.set_ui_overlay(ui_overlay)
 
         root = QVBoxLayout(ui_overlay)
-        root.setContentsMargins(14, 10, 14, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(
+            TOKENS.spacing_lg,
+            TOKENS.spacing_sm,
+            TOKENS.spacing_lg,
+            TOKENS.spacing_sm,
+        )
+        root.setSpacing(TOKENS.spacing_sm)
 
         self._drag = DragTab(self)
         self._drag.settings_clicked.connect(self._open_settings_dialog)
@@ -188,25 +191,18 @@ class MainWindow(QMainWindow):
         self._drag.maximize_clicked.connect(self._toggle_maximize)
         root.addWidget(self._drag)
 
-        status_header = QFrame()
-        status_header.setObjectName("StatusHeader")
-        status_header_lay = QVBoxLayout(status_header)
-        status_header_lay.setContentsMargins(4, 6, 4, 6)
-        status_header_lay.setSpacing(4)
+        status_header = TopStatusHeader()
         self._status_header = status_header
-        self._status_header_lay = status_header_lay
-
-        self._status_strip = StatusStrip(status_header)
-        self._model_label = self._status_strip.model_label
+        self._status_strip = status_header
+        self._ui_root_lay = root
+        self._status_header_lay = status_header.layout()
+        self._model_label = status_header.model_label
         self._refresh_model_label()
-        self._status_label = self._status_strip.status_label
-        self._tts_status_label = self._status_strip.tts_status_label
+        self._status_label = status_header.status_label
+        self._tts_status_label = status_header.tts_status_label
         self._tts_status_label.setText(self._tts.status_label)
-        status_header_lay.addWidget(self._status_strip)
-        self._backend_status = QLabel(external_backend_status_line(self._settings))
-        self._backend_status.setObjectName("BackendStatus")
-        self._backend_status.setWordWrap(True)
-        status_header_lay.addWidget(self._backend_status)
+        status_header.set_tts_status(self._tts.status_label)
+        status_header.refresh_backend_status(self._settings)
         root.addWidget(status_header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -264,6 +260,7 @@ class MainWindow(QMainWindow):
         self._chat = ChatPanel()
         self._chat.set_speech_threshold_rms(self._settings.always_listen_speech_rms)
         self._continuous_listen.mic_level.connect(self._chat.set_mic_level)
+        self._chat.command_dock.ide_clicked.connect(self._on_ide_toggle)
         left_lay.addWidget(self._chat, 3)
 
         self._monitor = UnifiedMonitorPanel()
@@ -282,12 +279,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setCollapsible(0, False)
 
-        self._left_sidebar.utility.actions.add_action(
-            action_id="ide",
-            title="IDE",
-            tooltip="Iris IDE 작업공간으로 전환",
-            callback=self._on_ide_toggle,
-        )
+        self._left_sidebar.utility.actions.setVisible(False)
         self._ide_page.theia_retry.connect(lambda: self._start_ide_backend_and_load(force_reload=True))
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
         self._ide_page.theia_view_log.connect(self._show_ide_log)
@@ -348,7 +340,12 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         if event.type() == QEvent.Type.WindowStateChange:
             self._drag.set_maximized(self.isMaximized())
+            self._viz.request_sync_orb_anchor()
         super().changeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._viz.request_sync_orb_anchor()
 
     def _deferred_startup_services(self) -> None:
         """창이 뜬 뒤 상시 음성·모니터·STT 워밍업 시작."""
@@ -456,7 +453,11 @@ class MainWindow(QMainWindow):
         return f"모델: {name}" if name else "모델: (미설정)"
 
     def _refresh_model_label(self) -> None:
-        self._model_label.setText(self._model_status_line())
+        name = self._settings.gemma_model_name.strip()
+        if isinstance(self._status_strip, TopStatusHeader):
+            self._status_strip.set_model_name(name)
+        else:
+            self._model_label.setText(self._model_status_line())
 
     def _refresh_app_paths(self) -> None:
         """DB 인덱스 + detect 병합 후 executor·assistant에 반영."""
@@ -548,10 +549,27 @@ class MainWindow(QMainWindow):
         )
         self._apply_runtime_settings()
 
+    def _sync_voice_dock_state(self, state: AppState) -> None:
+        """Command Dock 음성 상태 라벨."""
+        mapping = {
+            AppState.IDLE: ("Voice idle", "idle"),
+            AppState.LISTENING: ("Listening…", "listening"),
+            AppState.PROCESSING: ("Processing…", "processing"),
+            AppState.EXECUTING: ("Executing…", "processing"),
+            AppState.RESPONDING: ("Speaking…", "listening"),
+            AppState.ERROR: ("Voice error", "error"),
+            AppState.ALERTING: ("Alert active", "processing"),
+            AppState.MONITORING: ("Monitoring", "idle"),
+        }
+        label, kind = mapping.get(state, (state.name, "idle"))
+        self._chat.set_voice_state(label, kind=kind)
+
     @pyqtSlot(object)
     def _on_voice_session_state(self, state: object) -> None:
         if isinstance(state, VoiceSessionState):
             push_activity_line(f"VoiceSession: state {state.value.upper()}.")
+            if state.value == "listening":
+                self._chat.set_voice_state("Mic active", kind="listening")
 
     @pyqtSlot()
     def _barge_slot(self) -> None:
@@ -608,10 +626,15 @@ class MainWindow(QMainWindow):
         if isinstance(s, AppState):
             self._viz.set_state(s)
             self._ide_page.coding_panel.set_app_state(s)
+            self._live_activity.set_app_state(s)
             self._system_sounds.play_state(s, QDateTime.currentMSecsSinceEpoch())
-            self._status_label.setText(f"상태: {s.name}")
+            if isinstance(self._status_strip, TopStatusHeader):
+                self._status_strip.set_app_state(s)
+                self._status_strip.refresh_backend_status(self._settings)
+            else:
+                self._status_label.setText(f"상태: {s.name}")
+            self._sync_voice_dock_state(s)
             push_activity_line(f"UI: app state → {s.name}.")
-            self._backend_status.setText(external_backend_status_line(self._settings))
 
     def _pause_voice_input(self) -> None:
         self._voice_session.on_agent_processing_started()
@@ -684,7 +707,11 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_tts_status_changed(self, _status: object) -> None:
-        self._tts_status_label.setText(self._tts.status_label)
+        label = self._tts.status_label
+        if isinstance(self._status_strip, TopStatusHeader):
+            self._status_strip.set_tts_status(label)
+        else:
+            self._tts_status_label.setText(label)
         if isinstance(_status, TtsStatus) and _status is TtsStatus.TTS_ERROR:
             notice = getattr(self._tts, "_last_user_notice", None)
             if notice:
@@ -1278,17 +1305,21 @@ class MainWindow(QMainWindow):
 
     def _place_status_strip_in_header(self) -> None:
         """모델·상태·TTS — 기본 화면 상단."""
-        self._status_header_lay.removeWidget(self._status_strip)
-        self._status_strip.setParent(self._status_header)
-        self._status_header_lay.insertWidget(0, self._status_strip)
-        self._status_strip.show()
+        panel = self._ide_page.coding_panel
+        if self._status_header.parent() is panel._status_slot:  # noqa: SLF001
+            panel._status_slot_lay.removeWidget(self._status_header)  # noqa: SLF001
+            self._status_header.setParent(None)
+        if self._ui_root_lay.indexOf(self._status_header) < 0:
+            self._ui_root_lay.insertWidget(1, self._status_header)
+        self._status_header.show()
 
     def _place_status_strip_in_coding_panel(self) -> None:
         """모델·상태·TTS — IDE 코딩 패널 상단(구체 위)."""
-        self._status_header_lay.removeWidget(self._status_strip)
+        if self._ui_root_lay.indexOf(self._status_header) >= 0:
+            self._ui_root_lay.removeWidget(self._status_header)
         panel = self._ide_page.coding_panel
-        panel.place_status_strip(self._status_strip)
-        self._status_strip.show()
+        panel.place_status_strip(self._status_header)
+        self._status_header.show()
 
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
@@ -1299,12 +1330,8 @@ class MainWindow(QMainWindow):
         self._place_status_strip_in_header()
         self._viz.setVisible(True)
         self._viz.set_orb_anchor(self._orb_spacer)
-        self._left_sidebar.utility.actions.update_action(
-            "ide",
-            title="IDE",
-            tooltip="Iris IDE 작업공간으로 전환",
-        )
-        self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._chat.command_dock.set_ide_active(False)
+        self._viz.request_sync_orb_anchor()
         self._assistant_page.restore_splitter_state(self._assistant_splitter_state)
         self._metrics_worker.set_active(True)
 
@@ -1317,13 +1344,8 @@ class MainWindow(QMainWindow):
         self._place_status_strip_in_coding_panel()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
-        self._left_sidebar.utility.actions.update_action(
-            "ide",
-            title="돌아가기",
-            tooltip="기존 Iris 화면으로 복귀",
-        )
+        self._chat.command_dock.set_ide_active(True)
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
-        self._left_sidebar.utility.actions.set_action_active("ide", True)
         ctx = self._ide_bridge.get_context()
         self._ide_page.coding_panel.chat.set_workspace_context(ctx.summary_line())
         self._metrics_worker.set_active(True)

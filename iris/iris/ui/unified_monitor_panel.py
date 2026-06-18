@@ -36,6 +36,7 @@ from iris.monitoring.screen_capture import (
     capture_window_by_hwnd,
 )
 
+from iris.ui.glass_panel import wrap_glass_panel
 from iris.ui.section_header import apply_section_panel_layout, make_section_header
 from iris.ui.theme_tokens import TOKENS
 
@@ -152,14 +153,17 @@ class UnifiedMonitorPanel(QWidget):
         )
         self._db: Optional["Database"] = None
 
-        root = QVBoxLayout(self)
+        inner = QWidget()
+        inner.setObjectName("UnifiedMonitorPanelInner")
+        root = QVBoxLayout(inner)
         apply_section_panel_layout(root)
 
         root.addWidget(make_section_header("MONITOR / SCREEN"))
 
         self._scroll = QScrollArea()
+        self._scroll.setObjectName("PanelScrollArea")
         self._scroll.setWidgetResizable(True)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._inner = QWidget()
@@ -169,6 +173,10 @@ class UnifiedMonitorPanel(QWidget):
         self._inner_lay.addStretch(1)
         self._scroll.setWidget(self._inner)
         root.addWidget(self._scroll, 1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(wrap_glass_panel(inner))
 
         self._signals = _CaptureSignals(self)
         self._signals.done.connect(self._on_capture_done)
@@ -255,8 +263,16 @@ class UnifiedMonitorPanel(QWidget):
                 w.deleteLater()
 
         if not snaps:
-            hint = QLabel("실행 중인 창 없음")
-            hint.setStyleSheet("color: #64748b; font-size: 11px; padding: 12px;")
+            hint = QLabel(
+                "No active screen preview\nSelect a running window to inspect."
+            )
+            hint.setObjectName("PanelEmptyHint")
+            hint.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            hint.setWordWrap(True)
+            hint.setStyleSheet(
+                f"color: {TOKENS.text_muted}; font-size: {TOKENS.font_size_caption};"
+                f" padding: {TOKENS.spacing_md}px; background: transparent; border: none;"
+            )
             self._inner_lay.addWidget(hint)
         else:
             for snap in snaps:

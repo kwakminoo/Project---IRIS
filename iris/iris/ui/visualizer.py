@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtWidgets import QWidget
 
 from iris.core.state_machine import AppState
@@ -25,6 +25,7 @@ class Visualizer(QWidget):
         self._particle = ParticleVisualizer(self)
         self._orb_anchor: QWidget | None = None
         self._anchor_filter: _OrbAnchorEventFilter | None = None
+        self._last_center: tuple[int, int] | None = None
 
     def set_orb_anchor(self, widget: QWidget | None) -> None:
         """구체 중심을 레이아웃 여백(orb spacer) 중앙에 맞춘다."""
@@ -36,24 +37,50 @@ class Visualizer(QWidget):
             widget.installEventFilter(self._anchor_filter)
         else:
             self._anchor_filter = None
-        self._sync_orb_anchor()
+        self.request_sync_orb_anchor()
+
+    def request_sync_orb_anchor(self) -> None:
+        """레이아웃 완료 후 anchor 좌표 재계산 (deferred)."""
+        QTimer.singleShot(0, self._sync_orb_anchor)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._particle.setGeometry(self.rect())
-        self._sync_orb_anchor()
+        self.request_sync_orb_anchor()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._sync_orb_anchor()
+        self.request_sync_orb_anchor()
+
+    def orb_center_offset(self) -> tuple[float, float] | None:
+        """디버그·테스트용 — anchor 중심과 particle custom center 차이."""
+        anchor = self._orb_anchor
+        if anchor is None or not anchor.isVisible():
+            return None
+        global_center = anchor.mapToGlobal(anchor.rect().center())
+        local = self.mapFromGlobal(global_center)
+        pc = self._particle.custom_center()
+        if pc is None:
+            return None
+        return (pc[0] - local.x(), pc[1] - local.y())
 
     def _sync_orb_anchor(self) -> None:
         anchor = self._orb_anchor
-        if anchor is None or not anchor.isVisible():
-            self._particle.clear_custom_center()
+        if anchor is None:
+            if self._last_center is not None:
+                self._particle.set_custom_center(self._last_center[0], self._last_center[1])
+            else:
+                self._particle.clear_custom_center()
             return
-        center = anchor.mapTo(self, anchor.rect().center())
-        self._particle.set_custom_center(center.x(), center.y())
+        if not anchor.isVisible():
+            # 일시적 hidden — 기존 좌표 유지
+            if self._last_center is not None:
+                self._particle.set_custom_center(self._last_center[0], self._last_center[1])
+            return
+        global_center = anchor.mapToGlobal(anchor.rect().center())
+        local = self.mapFromGlobal(global_center)
+        self._last_center = (local.x(), local.y())
+        self._particle.set_custom_center(local.x(), local.y())
 
     def set_state(self, state: AppState) -> None:
         self._particle.set_state(state.name)
@@ -80,5 +107,5 @@ class _OrbAnchorEventFilter(QObject):
             QEvent.Type.Show,
             QEvent.Type.LayoutRequest,
         ):
-            self._visualizer._sync_orb_anchor()
+            self._visualizer.request_sync_orb_anchor()
         return super().eventFilter(watched, event)

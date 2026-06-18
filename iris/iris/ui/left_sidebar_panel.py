@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import QSplitter, QSizePolicy, QVBoxLayout, QWidget
 from iris.ui.window_list_panel import WindowListPanel
 
 
-_SIDEBAR_MIN_WIDTH = 170
-_SIDEBAR_MAX_WIDTH = 280
+_SIDEBAR_MIN_WIDTH = 200
+_SIDEBAR_MAX_WIDTH = 300
 
 
 class LeftSidebarPanel(QWidget):

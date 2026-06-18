@@ -3,17 +3,71 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
-from iris.ui.section_header import (
-    SECTION_CONTENT_GAP,
-    apply_section_panel_layout,
-    make_section_header,
-)
+from iris.ui.glass_panel import wrap_glass_panel
+from iris.ui.section_header import apply_section_panel_layout, make_section_header
 from iris.system.metrics_snapshot import MetricsSnapshot
 from iris.ui.theme_tokens import TOKENS
 
-_METRIC_LABEL_GAP = SECTION_CONTENT_GAP
+_MIN_BAR_VALUE = 2  # 0%일 때도 트랙이 보이도록
+
+
+class _MetricRow(QWidget):
+    """라벨 + 퍼센트 + progress bar."""
+
+    def __init__(self, name: str, fill_color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("HudMetricRow")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, TOKENS.spacing_sm)
+        lay.setSpacing(TOKENS.spacing_xs)
+
+        header = QHBoxLayout()
+        self._name = QLabel(name)
+        self._name.setObjectName("HudMetricName")
+        self._value = QLabel("0%")
+        self._value.setObjectName("HudMetricValue")
+        self._value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._name)
+        header.addStretch(1)
+        header.addWidget(self._value)
+        lay.addLayout(header)
+
+        self._bar = QProgressBar()
+        self._bar.setObjectName("HudMetricBar")
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(8)
+        self._bar.setStyleSheet(
+            f"""
+            QProgressBar#HudMetricBar {{
+                background: {TOKENS.metric_track};
+                border: none;
+                border-radius: {TOKENS.radius_sm}px;
+            }}
+            QProgressBar#HudMetricBar::chunk {{
+                background: {fill_color};
+                border-radius: {TOKENS.radius_sm}px;
+                min-width: 4px;
+            }}
+            """
+        )
+        lay.addWidget(self._bar)
+        self._fill_color = fill_color
+
+    def apply(self, percent: float | None, *, label: str | None = None) -> None:
+        if label is not None:
+            self._name.setText(label)
+        if percent is None:
+            self._value.setText("N/A")
+            self._bar.setValue(_MIN_BAR_VALUE)
+            return
+        pct = max(0.0, min(100.0, float(percent)))
+        self._value.setText(f"{pct:.0f}%")
+        bar_val = max(_MIN_BAR_VALUE, int(round(pct))) if pct > 0 else _MIN_BAR_VALUE
+        self._bar.setValue(bar_val)
 
 
 class SystemMetricsPanel(QWidget):
@@ -23,77 +77,29 @@ class SystemMetricsPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("SystemMetricsPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        lay = QVBoxLayout(self)
-        apply_section_panel_layout(lay)
 
+        inner = QWidget()
+        inner.setObjectName("SystemMetricsPanelInner")
+        lay = QVBoxLayout(inner)
+        apply_section_panel_layout(lay)
         lay.addWidget(
             make_section_header("SYSTEM METRICS", title_object_name="SidebarTitle")
         )
 
-        self._cpu_label = QLabel("CPU")
-        self._cpu_bar = self._make_bar(TOKENS.metric_fill_cpu)
-        self._gpu_label = QLabel("GPU")
-        self._gpu_bar = self._make_bar(TOKENS.metric_fill_gpu)
-        self._mem_label = QLabel("MEM")
-        self._mem_bar = self._make_bar(TOKENS.metric_fill_mem)
+        self._cpu = _MetricRow("CPU", TOKENS.metric_fill_cpu)
+        self._gpu = _MetricRow("GPU", TOKENS.metric_fill_gpu)
+        self._mem = _MetricRow("MEMORY", TOKENS.metric_fill_mem)
+        for row in (self._cpu, self._gpu, self._mem):
+            lay.addWidget(row)
 
-        for label, bar in (
-            (self._cpu_label, self._cpu_bar),
-            (self._gpu_label, self._gpu_bar),
-            (self._mem_label, self._mem_bar),
-        ):
-            label.setStyleSheet(
-                f"color: {TOKENS.text_hud_label}; font-size: {TOKENS.font_size_micro};"
-                " letter-spacing: 0.8px; background: transparent; border: none;"
-            )
-            lay.addWidget(self._make_metric_row(label, bar))
-
-    def _make_metric_row(self, label: QLabel, bar: QProgressBar) -> QWidget:
-        row = QWidget()
-        row.setStyleSheet("background: transparent; border: none;")
-        row_lay = QVBoxLayout(row)
-        row_lay.setContentsMargins(0, 0, 0, 0)
-        row_lay.setSpacing(_METRIC_LABEL_GAP)
-        row_lay.addWidget(label)
-        row_lay.addWidget(bar)
-        return row
-
-    def _make_bar(self, fill_color: str) -> QProgressBar:
-        bar = QProgressBar()
-        bar.setObjectName("HudMetricBar")
-        bar.setRange(0, 100)
-        bar.setValue(0)
-        bar.setTextVisible(True)
-        bar.setFixedHeight(8)
-        bar.setStyleSheet(
-            f"""
-            QProgressBar#HudMetricBar {{
-                background: {TOKENS.metric_track};
-                border: none;
-                border-radius: 2px;
-                height: 6px;
-                text-align: right;
-                color: {TOKENS.text_secondary};
-                font-size: {TOKENS.font_size_micro};
-            }}
-            QProgressBar#HudMetricBar::chunk {{
-                background: {fill_color};
-                border-radius: 2px;
-            }}
-            """
-        )
-        return bar
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(wrap_glass_panel(inner))
 
     def apply_snapshot(self, snap: MetricsSnapshot) -> None:
-        self._cpu_bar.setValue(int(round(snap.cpu_percent)))
-        self._cpu_bar.setFormat(f"{snap.cpu_percent:.0f}%")
-        self._mem_bar.setValue(int(round(snap.memory_percent)))
-        self._mem_bar.setFormat(f"{snap.memory_percent:.0f}%")
+        self._cpu.apply(snap.cpu_percent)
+        self._mem.apply(snap.memory_percent)
         if snap.gpu_percent is None:
-            self._gpu_bar.setValue(0)
-            self._gpu_bar.setFormat("N/A")
-            self._gpu_label.setText(snap.gpu_label.upper())
+            self._gpu.apply(None, label=snap.gpu_label.upper())
         else:
-            self._gpu_bar.setValue(int(round(snap.gpu_percent)))
-            self._gpu_bar.setFormat(f"{snap.gpu_percent:.0f}%")
-            self._gpu_label.setText("GPU")
+            self._gpu.apply(snap.gpu_percent, label="GPU")

@@ -158,6 +158,10 @@ class ParticleVisualizer(QWidget):
         self._custom_center = None
         self._recompute_geometry()
 
+    def custom_center(self) -> tuple[float, float] | None:
+        """현재 custom center (테스트·디버그)."""
+        return self._custom_center
+
     def set_size_scale(self, scale: float) -> None:
         """구체 반경 배율 — IDE 패널 등 컴팩트 영역 확대용."""
         self._size_scale = max(0.25, float(scale))

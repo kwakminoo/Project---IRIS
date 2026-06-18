@@ -52,6 +52,9 @@ class CyberspaceBackground(QWidget):
         rect = self.rect()
         if self._orb_layer is not None:
             self._orb_layer.setGeometry(rect)
+            request_sync = getattr(self._orb_layer, "request_sync_orb_anchor", None)
+            if callable(request_sync):
+                request_sync()
         if self._ui_overlay is not None:
             self._ui_overlay.setGeometry(rect)
             self._ui_overlay.raise_()

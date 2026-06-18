@@ -7,9 +7,14 @@ from PyQt6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 from iris.ui.theme_tokens import TOKENS
 
 # Running Windows 기준 — 제목↔선, 선↔본문 여백 통일
-SECTION_TITLE_LINE_GAP = 6
-SECTION_CONTENT_GAP = 4
-SECTION_PANEL_MARGINS = (4, 6, 4, 6)
+SECTION_TITLE_LINE_GAP = TOKENS.spacing_sm
+SECTION_CONTENT_GAP = TOKENS.spacing_xs
+SECTION_PANEL_MARGINS = (
+    TOKENS.spacing_xs,
+    TOKENS.spacing_sm,
+    TOKENS.spacing_xs,
+    TOKENS.spacing_sm,
+)
 
 
 def make_section_header(
@@ -32,7 +37,7 @@ def make_section_header(
     line.setObjectName("SectionUnderline")
     line.setFixedHeight(1)
     line.setStyleSheet(
-        f"background: {TOKENS.border_color}; border: none; max-height: 1px;"
+        f"background: {TOKENS.panel_border}; border: none; max-height: 1px;"
     )
 
     lay.addWidget(title)

@@ -111,22 +111,21 @@ def build_cyberspace_qss() -> str:
             background: transparent;
             margin: 0;
         }}
-        QScrollBar::handle:vertical,
-        QScrollBar::handle:horizontal {{
-            width: 0px;
-            height: 0px;
+        QScrollArea#PanelScrollArea QScrollBar:vertical {{
+            width: 6px;
             background: transparent;
-            border: none;
-            min-height: 0;
-            min-width: 0;
+            margin: 2px 0;
         }}
-        QScrollBar::add-line,
-        QScrollBar::sub-line,
-        QScrollBar::add-page,
-        QScrollBar::sub-page {{
-            background: transparent;
-            border: none;
-            width: 0;
+        QScrollArea#PanelScrollArea QScrollBar::handle:vertical {{
+            background: rgba(148, 163, 184, 0.18);
+            border-radius: 3px;
+            min-height: 24px;
+        }}
+        QScrollArea#PanelScrollArea:hover QScrollBar::handle:vertical {{
+            background: rgba(56, 189, 248, 0.45);
+        }}
+        QScrollArea#PanelScrollArea QScrollBar::add-line:vertical,
+        QScrollArea#PanelScrollArea QScrollBar::sub-line:vertical {{
             height: 0;
         }}
         QPushButton#WinCtrl {{
@@ -250,7 +249,155 @@ def build_cyberspace_qss() -> str:
             border-radius: 0;
         }}
         QFrame#HudWindowRow:hover {{
-            background: rgba(37, 99, 235, 0.12);
+            background: {t.panel_hover};
+        }}
+        QFrame#HudWindowRow[active="true"] {{
+            border-left: 2px solid {t.neon_cyan};
+            background: rgba(34, 211, 238, 0.08);
+        }}
+        QFrame#GlassPanel {{
+            background-color: {t.panel_background};
+            border: {t.border_width}px solid {t.panel_border};
+            border-radius: {t.radius_md}px;
+        }}
+        QFrame#TopStatusHeader {{
+            background: transparent;
+            border: none;
+            border-bottom: 1px solid {t.border_subtle};
+        }}
+        QLabel#StatusChipPrefix {{
+            color: {t.text_muted};
+            font-size: {t.font_size_micro};
+            letter-spacing: 0.6px;
+            font-weight: 600;
+        }}
+        QLabel#StatusChipValue {{
+            color: {t.text_secondary};
+            font-size: {t.font_size_caption};
+            font-weight: 500;
+        }}
+        QLabel#StatusChipValueMono {{
+            color: {t.text_accent};
+            font-size: {t.font_size_caption};
+            font-weight: 500;
+        }}
+        QLabel#HudMetricName {{
+            color: {t.text_hud_label};
+            font-size: {t.font_size_caption};
+            letter-spacing: 0.8px;
+            font-weight: 600;
+        }}
+        QLabel#HudMetricValue {{
+            color: {t.text_primary};
+            font-size: {t.font_size_caption};
+            font-weight: 600;
+        }}
+        QLabel#LiveActivityTitle {{
+            color: {t.text_hud_label};
+            font-size: {t.font_size_heading};
+            font-weight: 600;
+            letter-spacing: 1.2px;
+        }}
+        QLabel#LiveActivityState {{
+            color: {t.neon_cyan};
+            font-size: {t.font_size_body};
+            font-weight: 600;
+        }}
+        QLabel#LiveActivityDetail {{
+            color: {t.text_secondary};
+            font-size: {t.font_size_caption};
+        }}
+        QLabel#LiveActivityRecent {{
+            color: {t.text_muted};
+            font-size: {t.font_size_micro};
+            font-family: {t.font_mono};
+        }}
+        QLabel#PanelEmptyHint {{
+            color: {t.text_muted};
+            font-size: {t.font_size_caption};
+        }}
+        QWidget#CommandDock {{
+            background: transparent;
+            border: none;
+            border-top: 1px solid {t.border_subtle};
+            padding-top: {t.spacing_sm}px;
+        }}
+        QLineEdit#CommandDockInput {{
+            background-color: {t.panel_overlay};
+            border: 1px solid {t.panel_border};
+            border-radius: {t.radius_md}px;
+            padding: 8px 12px;
+            font-size: {t.font_size_input};
+            color: {t.text_primary};
+        }}
+        QLineEdit#CommandDockInput:focus {{
+            border-color: {t.accent_border};
+        }}
+        QPushButton#CommandDockSendButton {{
+            background-color: {t.accent_primary};
+            border: 1px solid {t.accent_border};
+            border-radius: {t.radius_md}px;
+            font-size: {t.font_size_caption};
+            font-weight: 600;
+            letter-spacing: 0.4px;
+        }}
+        QPushButton#CommandDockSendButton:hover:enabled {{
+            background-color: {t.accent_hover};
+        }}
+        QPushButton#CommandDockSendButton:disabled {{
+            background-color: rgba(15, 23, 42, 0.8);
+            color: {t.disabled};
+            border-color: {t.border_subtle};
+        }}
+        QPushButton#CommandDockIdeButton {{
+            background: transparent;
+            border: 1px solid {t.border_color};
+            border-radius: {t.radius_md}px;
+            font-size: {t.font_size_caption};
+            font-weight: 600;
+            letter-spacing: 0.8px;
+            color: {t.text_accent};
+        }}
+        QPushButton#CommandDockIdeButton:hover {{
+            background: {t.accent_primary};
+            border-color: {t.neon_cyan};
+        }}
+        QPushButton#CommandDockIdeButton[active="true"] {{
+            background: rgba(37, 99, 235, 0.35);
+            border-color: {t.neon_cyan};
+            color: {t.neon_cyan};
+        }}
+        QLabel#CommandDockVoiceLabel {{
+            color: {t.text_muted};
+            font-size: {t.font_size_micro};
+            letter-spacing: 0.4px;
+        }}
+        QListWidget#AlertsList {{
+            background: transparent;
+            border: none;
+            font-size: {t.font_size_caption};
+        }}
+        QListWidget#AlertsList::item {{
+            padding: 6px 4px;
+            border-bottom: 1px solid {t.border_subtle};
+        }}
+        QListWidget#AlertsList::item:selected {{
+            background: {t.panel_hover};
+            color: {t.text_primary};
+        }}
+        QPushButton#AlertActionButton:disabled {{
+            color: {t.disabled};
+        }}
+        QPushButton#AlertActionButton:pressed {{
+            color: {t.neon_cyan};
+        }}
+        QPushButton#HudWindowClose {{
+            background: transparent;
+            border: none;
+            color: {t.text_muted};
+        }}
+        QPushButton#HudWindowClose:hover {{
+            color: {t.error};
         }}
     """
 
