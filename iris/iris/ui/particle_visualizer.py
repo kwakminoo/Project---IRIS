@@ -152,6 +152,7 @@ class ParticleVisualizer(QWidget):
     def set_custom_center(self, cx: float, cy: float) -> None:
         """레이아웃 앵커 등으로 구체 중심을 고정한다."""
         self._custom_center = (float(cx), float(cy))
+        self._recompute_geometry()
         self.update()
 
     def clear_custom_center(self) -> None:
@@ -161,6 +162,10 @@ class ParticleVisualizer(QWidget):
     def custom_center(self) -> tuple[float, float] | None:
         """현재 custom center (테스트·디버그)."""
         return self._custom_center
+
+    def effective_center(self) -> tuple[float, float]:
+        """paintEvent가 실제 사용하는 현재 렌더링 중심."""
+        return (self._cx, self._cy)
 
     def set_size_scale(self, scale: float) -> None:
         """구체 반경 배율 — IDE 패널 등 컴팩트 영역 확대용."""

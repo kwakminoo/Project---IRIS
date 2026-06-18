@@ -148,10 +148,19 @@ def build_cyberspace_qss() -> str:
             background-color: rgba(30, 58, 138, 0.5);
         }}
         QLabel#DragTitle {{
-            font-weight: 300;
-            font-size: 15px;
-            letter-spacing: 4px;
+            font-weight: 400;
+            font-size: 20px;
+            letter-spacing: 3px;
             color: {t.text_accent};
+            background: transparent;
+            border: none;
+            padding: 0;
+            margin: 0;
+        }}
+        QWidget#DragTab {{
+            background: transparent;
+            border-top: {t.border_width}px solid {t.border_subtle};
+            border-bottom: {t.border_width}px solid {t.border_subtle};
         }}
         QLabel#PanelTitle,
         QLabel#SidebarTitle,
@@ -264,6 +273,12 @@ def build_cyberspace_qss() -> str:
             background: transparent;
             border: none;
             border-bottom: 1px solid {t.border_subtle};
+        }}
+        QWidget#TopStatusPrimaryRow,
+        QWidget#TopStatusBackendRow,
+        QWidget#DragTabStatusColumn {{
+            background: transparent;
+            border: none;
         }}
         QLabel#StatusChipPrefix {{
             color: {t.text_muted};

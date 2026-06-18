@@ -199,7 +199,6 @@ class MainWindow(QMainWindow):
         self._status_header = status_header
         self._status_strip = status_header
         self._ui_root_lay = root
-        self._status_header_lay = status_header.layout()
         self._model_label = status_header.model_label
         self._refresh_model_label()
         self._status_label = status_header.status_label
@@ -207,7 +206,10 @@ class MainWindow(QMainWindow):
         self._tts_status_label.setText(self._tts.status_label)
         status_header.set_tts_status(self._tts.status_label)
         status_header.refresh_backend_status(self._settings)
-        root.addWidget(status_header)
+        self._drag.place_status_rows(
+            status_header.primary_row(),
+            status_header.backend_row(),
+        )
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -1303,23 +1305,12 @@ class MainWindow(QMainWindow):
     def current_workspace(self) -> str:
         return self._workspace_mode
 
-    def _place_status_strip_in_header(self) -> None:
-        """모델·상태·TTS — 기본 화면 상단."""
-        panel = self._ide_page.coding_panel
-        if self._status_header.parent() is panel._status_slot:  # noqa: SLF001
-            panel._status_slot_lay.removeWidget(self._status_header)  # noqa: SLF001
-            self._status_header.setParent(None)
-        if self._ui_root_lay.indexOf(self._status_header) < 0:
-            self._ui_root_lay.insertWidget(1, self._status_header)
-        self._status_header.show()
-
-    def _place_status_strip_in_coding_panel(self) -> None:
-        """모델·상태·TTS — IDE 코딩 패널 상단(구체 위)."""
-        if self._ui_root_lay.indexOf(self._status_header) >= 0:
-            self._ui_root_lay.removeWidget(self._status_header)
-        panel = self._ide_page.coding_panel
-        panel.place_status_strip(self._status_header)
-        self._status_header.show()
+    def _ensure_status_in_title_bar(self) -> None:
+        """STATE/MODEL/TTS + 백엔드 — 모든 workspace에서 타이틀 바 2행 고정."""
+        self._drag.place_status_rows(
+            self._status_header.primary_row(),
+            self._status_header.backend_row(),
+        )
 
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
@@ -1327,7 +1318,7 @@ class MainWindow(QMainWindow):
         self._ide_splitter_state = self._ide_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._assistant_page)
         self._workspace_mode = "assistant"
-        self._place_status_strip_in_header()
+        self._ensure_status_in_title_bar()
         self._viz.setVisible(True)
         self._viz.set_orb_anchor(self._orb_spacer)
         self._left_sidebar.utility.actions.update_action(
@@ -1346,7 +1337,7 @@ class MainWindow(QMainWindow):
         self._assistant_splitter_state = self._assistant_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._ide_page)
         self._workspace_mode = "ide"
-        self._place_status_strip_in_coding_panel()
+        self._ensure_status_in_title_bar()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
         self._left_sidebar.utility.actions.update_action(

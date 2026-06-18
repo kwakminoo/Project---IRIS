@@ -25,6 +25,8 @@ class IrisCodingPanel(QWidget):
     self._status_slot_lay = QVBoxLayout(self._status_slot)
     self._status_slot_lay.setContentsMargins(0, 0, 0, 0)
     self._status_slot_lay.setSpacing(0)
+    self._status_slot.hide()
+    self._status_slot.setMaximumHeight(0)
     lay.addWidget(self._status_slot)
 
     self.orb = IrisOrbWidget(self)

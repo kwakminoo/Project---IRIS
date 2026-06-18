@@ -223,6 +223,29 @@ def test_main_window_splitter_then_maximize_restore(main_window, qapp) -> None:
     assert abs(restored_sizes[0] - 600) <= 30 or restored_sizes[0] > 0
 
 
+def test_main_window_drag_keeps_orb_centered(main_window, qapp) -> None:
+    """창을 드래그해도 구체는 창 콘텐츠 중앙에 유지되어야 한다."""
+    _process_until_stable(qapp, main_window._viz)
+    for dx, dy in ((50, 30), (-80, 40), (100, -20)):
+        main_window.move(main_window.x() + dx, main_window.y() + dy)
+        qapp.processEvents()
+        offset = main_window._viz.orb_center_offset()
+        assert offset is not None
+        assert _offset_within_tolerance(offset), f"offset {offset} after move ({dx},{dy})"
+
+
+def test_main_window_orb_at_window_horizontal_center(main_window, qapp) -> None:
+    """구체가 visualizer 가로 중앙에 위치해야 한다."""
+    _process_until_stable(qapp, main_window._viz)
+    viz = main_window._viz
+    target = viz.live_anchor_center_local()
+    effective = viz.particle_core().effective_center()
+    assert target is not None
+    expected_x = viz.width() * 0.5
+    assert abs(target[0] - expected_x) <= _TOLERANCE_PX
+    assert abs(effective[0] - expected_x) <= _TOLERANCE_PX
+
+
 def test_simple_fixture_maximize_restore_without_manual_sync(qapp) -> None:
     """CyberspaceBackground 단독 — 수동 request_sync 없이 최대화·복원."""
     bg, viz, _anchor = _build_simple_fixture(qapp)

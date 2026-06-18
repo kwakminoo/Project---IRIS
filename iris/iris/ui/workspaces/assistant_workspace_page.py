@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QSizePolicy, QSplitter, QVBoxLayout, QWidget
+
+_RIGHT_PANEL_MAX_WIDTH = 360
 
 
 class AssistantWorkspacePage(QWidget):
@@ -33,15 +35,20 @@ class AssistantWorkspacePage(QWidget):
     self.right_column = QWidget()
     self.right_column.setObjectName("WorkspacePanel")
     self.right_column.setMinimumWidth(220)
+    self.right_column.setMaximumWidth(_RIGHT_PANEL_MAX_WIDTH)
+    self.right_column.setSizePolicy(
+      QSizePolicy.Policy.Fixed,
+      QSizePolicy.Policy.Expanding,
+    )
     self.right_layout = QVBoxLayout(self.right_column)
     self.right_layout.setContentsMargins(0, 0, 0, 0)
     self.right_layout.setSpacing(10)
 
     self._splitter.addWidget(self.center_column)
     self._splitter.addWidget(self.right_column)
-    self._splitter.setSizes([760, 390])
-    self._splitter.setStretchFactor(0, 2)
-    self._splitter.setStretchFactor(1, 1)
+    self._splitter.setSizes([800, 340])
+    self._splitter.setStretchFactor(0, 1)
+    self._splitter.setStretchFactor(1, 0)
 
     lay.addWidget(self._splitter)
 

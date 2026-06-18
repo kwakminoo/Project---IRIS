@@ -15,6 +15,8 @@ from iris.ui.particle_visualizer import ParticleVisualizer
 _DEBUG_ORB = os.environ.get("IRIS_DEBUG_ORB_GEOMETRY") == "1"
 _MAX_STABILIZE_ATTEMPTS = 12
 _SNAPSHOT_TOLERANCE_PX = 1
+# ParticleVisualizer 기본 Y 비율과 동일 — 창 콘텐츠 기준 구체 목표 위치
+_ORB_CENTER_Y_RATIO = 0.36
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ class Visualizer(QWidget):
         self._stabilize_timer.timeout.connect(self._continue_stabilized_sync)
 
     def set_orb_anchor(self, widget: QWidget | None) -> None:
-        """구체 중심을 레이아웃 여백(orb spacer) 중앙에 맞춘다."""
+        """구체 표시 여부·동기화 트리거용 앵커 (위치는 창 콘텐츠 중앙 고정)."""
         if self._orb_anchor is not None and self._anchor_filter is not None:
             self._orb_anchor.removeEventFilter(self._anchor_filter)
         self._orb_anchor = widget
@@ -92,24 +94,29 @@ class Visualizer(QWidget):
         self.request_sync_orb_anchor("visualizer_show")
 
     def live_anchor_center_local(self) -> tuple[float, float] | None:
-        """디버그·테스트용 — anchor 중심의 visualizer 로컬 좌표."""
-        anchor = self._orb_anchor
-        if anchor is None:
+        """디버그·테스트용 — 창(visualizer) 콘텐츠 기준 구체 목표 중심."""
+        if self._orb_anchor is None:
             return None
-        return self._map_anchor_center_local(anchor)
+        return self._window_content_center_local()
 
     def orb_center_offset(self) -> tuple[float, float] | None:
-        """디버그·테스트용 — anchor 중심과 particle custom center 차이."""
-        local = self.live_anchor_center_local()
-        if local is None:
+        """디버그·테스트용 — 목표 중심과 particle 실제 렌더링 중심 차이."""
+        target = self.live_anchor_center_local()
+        if target is None:
             return None
-        pc = self._particle.custom_center()
-        if pc is None:
+        if self._particle.custom_center() is None:
             return None
-        return (pc[0] - local[0], pc[1] - local[1])
+        eff = self._particle.effective_center()
+        return (eff[0] - target[0], eff[1] - target[1])
+
+    def _window_content_center_local(self) -> tuple[float, float]:
+        """Visualizer(창 콘텐츠 영역) 기준 구체 목표 중심 — 화면 이동과 무관."""
+        vr = self.rect()
+        w, h = max(vr.width(), 1), max(vr.height(), 1)
+        return (w * 0.5, h * _ORB_CENTER_Y_RATIO)
 
     def _map_anchor_center_local(self, anchor: QWidget) -> tuple[float, float] | None:
-        """동일 창 계층 내 sibling-local 좌표 변환."""
+        """레거시·디버그용 — orb_spacer 중심 (배치에는 사용하지 않음)."""
         if not self._same_top_level_window(anchor):
             return None
         local_pt = anchor.mapTo(self, anchor.rect().center())
@@ -159,9 +166,7 @@ class Visualizer(QWidget):
         if anchor is None:
             return None
 
-        local = self._map_anchor_center_local(anchor)
-        if local is None:
-            return None
+        local = self._window_content_center_local()
 
         window = self.window()
         overlay = self._find_ui_overlay()
@@ -197,8 +202,6 @@ class Visualizer(QWidget):
 
         if not close_rect(a.visualizer_rect, b.visualizer_rect):
             return False
-        if not close_rect(a.anchor_geom, b.anchor_geom):
-            return False
         if abs(a.local_center.x() - b.local_center.x()) > tol:
             return False
         if abs(a.local_center.y() - b.local_center.y()) > tol:
@@ -213,23 +216,14 @@ class Visualizer(QWidget):
         return True
 
     def _is_valid_center(self, center: QPointF) -> bool:
-        anchor = self._orb_anchor
-        if anchor is None:
-            return False
-        window = self.window()
-        if window is None or not self._same_top_level_window(anchor):
-            return False
-        if not anchor.isVisibleTo(window):
-            return False
-        if anchor.width() <= 0 or anchor.height() <= 0:
+        vr = self.rect()
+        if vr.width() <= 0 or vr.height() <= 0:
             return False
 
         cx, cy = center.x(), center.y()
-        vr = self.rect()
-        margin = max(vr.width(), vr.height()) * 0.6
-        if cx < -margin or cy < -margin:
+        if cx < 0 or cy < 0:
             return False
-        if cx > vr.width() + margin or cy > vr.height() + margin:
+        if cx > vr.width() or cy > vr.height():
             return False
         return True
 
@@ -271,8 +265,9 @@ class Visualizer(QWidget):
                         accepted=False,
                         reject_reason=reason,
                     )
-        if self._last_center is not None:
-            self._particle.set_custom_center(self._last_center[0], self._last_center[1])
+        center = self._window_content_center_local()
+        self._last_center = center
+        self._particle.set_custom_center(center[0], center[1])
         self._pending_sync_reason = ""
 
     def _sync_orb_anchor(self) -> None:
@@ -303,10 +298,23 @@ class Visualizer(QWidget):
             if splitter is not None and hasattr(splitter, "sizes"):
                 splitter_sizes = list(splitter.sizes())
         orb_geom = anchor.geometry() if anchor is not None else QRect()
+        spacer_local = ""
+        if anchor is not None:
+            mapped = self._map_anchor_center_local(anchor)
+            if mapped is not None:
+                spacer_local = f"spacer_local=({mapped[0]:.1f},{mapped[1]:.1f}) "
         global_center = ""
         if anchor is not None:
             g = anchor.mapToGlobal(anchor.rect().center())
             global_center = f"({g.x()},{g.y()})"
+
+        target = self._particle.custom_center()
+        effective = self._particle.effective_center()
+        render_dx = effective[0] - candidate[0]
+        render_dy = effective[1] - candidate[1]
+        target_str = (
+            f"({target[0]:.1f},{target[1]:.1f})" if target is not None else "None"
+        )
 
         print(
             f"[IRIS_DEBUG_ORB] reason={reason!r} "
@@ -318,7 +326,11 @@ class Visualizer(QWidget):
             f"assistant={assistant_geom.width()}x{assistant_geom.height()} "
             f"splitter={splitter_sizes} "
             f"orb_spacer={orb_geom.width()}x{orb_geom.height()}@({orb_geom.x()},{orb_geom.y()}) "
-            f"local=({candidate[0]:.1f},{candidate[1]:.1f}) "
+            f"{spacer_local}"
+            f"window_center=({candidate[0]:.1f},{candidate[1]:.1f}) "
+            f"target={target_str} "
+            f"effective=({effective[0]:.1f},{effective[1]:.1f}) "
+            f"render_offset=({render_dx:.1f},{render_dy:.1f}) "
             f"global_diag={global_center} "
             f"prev={prev} "
             f"accepted={accepted} "
