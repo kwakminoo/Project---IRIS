@@ -73,6 +73,26 @@ def test_bridge_http_get_context() -> None:
         client.stop()
 
 
+def test_bridge_editor_state_get() -> None:
+    client = IdeBridgeClient()
+    client.start()
+    try:
+        client._apply_editor_state({
+            "type": "iris.ide.editorStateChanged",
+            "hasOpenEditor": True,
+            "title": "x.py",
+            "uri": "file:///x.py",
+            "languageId": "python",
+        })
+        url = f"{client.base_url}/editor-state"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            data = json.loads(resp.read().decode())
+        assert data["hasOpenEditor"] is True
+        assert data["title"] == "x.py"
+    finally:
+        client.stop()
+
+
 def test_context_summary_line() -> None:
     ctx = IdeContext(workspace_path="C:/IRIS", active_file_uri="file:///C:/IRIS/main.py")
     assert "IRIS" in ctx.summary_line()

@@ -80,6 +80,7 @@ from iris.infrastructure.ide.ide_env_recovery import recover_webengine
 from iris.infrastructure.ide.ide_preflight import format_preflight_error, run_ide_preflight
 from iris.infrastructure.ide.ide_workspace_resolver import _find_repo_root, resolve_ide_workspace
 from iris.ui.ide.embedded_theia_view import TheiaViewState
+from iris.ui.ide.ide_bridge_relay import IdeBridgeRelay
 from iris.ui.ide.iris_webengine_page import tail_webengine_log
 from iris.system.metrics_worker import MetricsWorker
 from iris.ui.cyberspace_background import CyberspaceBackground
@@ -168,6 +169,9 @@ class MainWindow(QMainWindow):
         self._ide_backend_worker: IdeBackendWorker | None = None
         self._ide_bridge = IdeBridgeClient()
         self._ide_bridge.start()
+        self._ide_bridge_relay = IdeBridgeRelay(self)
+        self._ide_bridge.set_editor_state_callback(self._ide_bridge_relay.push)
+        self._ide_bridge_relay.editor_state_changed.connect(self._on_ide_editor_state_changed)
 
         central = CyberspaceBackground()
         self._cyberspace_bg = central
@@ -207,13 +211,15 @@ class MainWindow(QMainWindow):
         status_header.set_tts_status(self._tts.status_label)
         status_header.refresh_backend_status(self._settings)
         self._drag.place_status_rows(
-            status_header.primary_row(),
+            status_header.status_widget(),
             status_header.backend_row(),
         )
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(0)
+        self._workspace_splitter = splitter
+        self._sidebar_split_size = 220
 
         # 좌측 Persistent Sidebar — workspace 전환과 무관하게 유지
         self._left_sidebar = LeftSidebarPanel()
@@ -253,6 +259,7 @@ class MainWindow(QMainWindow):
         self._activity_relay = UiActivityRelay(self)
         self._live_activity = LiveActivityPanel(self)
         self._activity_relay.line.connect(self._live_activity.enqueue_typed_line)
+        self._activity_relay.line.connect(self._ide_page.append_live_activity)
         register_activity_sink(self._activity_relay.push)
         left_lay.addWidget(self._live_activity, 0)
 
@@ -305,8 +312,8 @@ class MainWindow(QMainWindow):
         self._ide_page.theia.diagnose_requested.connect(self._run_ide_diagnose)
         self._ide_page.theia.recover_env_requested.connect(self._run_ide_env_recovery)
         self._ide_page.theia.ready.connect(self._on_theia_ready)
-        self._ide_page.coding_panel.chat.send_clicked.connect(self._on_coding_user_text)
-        self._continuous_listen.mic_level.connect(self._ide_page.coding_panel.set_mic_level)
+        self._ide_page.coding_send_clicked.connect(self._on_coding_user_text)
+        self._continuous_listen.mic_level.connect(self._ide_page.set_mic_level)
 
         self._metrics_worker = MetricsWorker(parent=self)
         self._metrics_worker.snapshot_ready.connect(self._on_metrics_snapshot)
@@ -628,8 +635,7 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, s: object) -> None:
         if isinstance(s, AppState):
             self._viz.set_state(s)
-            self._ide_page.coding_panel.set_app_state(s)
-            self._live_activity.set_app_state(s)
+            self._ide_page.set_app_state(s)
             self._system_sounds.play_state(s, QDateTime.currentMSecsSinceEpoch())
             if isinstance(self._status_strip, TopStatusHeader):
                 self._status_strip.set_app_state(s)
@@ -769,7 +775,7 @@ class MainWindow(QMainWindow):
 
         self._chat.append_message_typed("Iris", body, speech_sync=True)
         if self._workspace_mode == "ide":
-            self._ide_page.coding_panel.chat.append_message_typed("Iris", body, speech_sync=True)
+            self._ide_page.active_chat().append_message_typed("Iris", body, speech_sync=True)
         self._speak(
             spoken_text,
             on_complete=on_complete,
@@ -1308,9 +1314,22 @@ class MainWindow(QMainWindow):
     def _ensure_status_in_title_bar(self) -> None:
         """STATE/MODEL/TTS + 백엔드 — 모든 workspace에서 타이틀 바 2행 고정."""
         self._drag.place_status_rows(
-            self._status_header.primary_row(),
+            self._status_header.status_widget(),
             self._status_header.backend_row(),
         )
+
+    def _apply_ui_overlay_margins(self, mode: str) -> None:
+        """IDE는 Theia Activity Bar가 창 좌우 끝에 맞닿도록 가로 여백 제거."""
+        vertical = TOKENS.spacing_sm
+        if mode == "ide":
+            self._ui_root_lay.setContentsMargins(0, vertical, 0, vertical)
+        else:
+            self._ui_root_lay.setContentsMargins(
+                TOKENS.spacing_lg,
+                vertical,
+                TOKENS.spacing_lg,
+                vertical,
+            )
 
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
@@ -1327,6 +1346,11 @@ class MainWindow(QMainWindow):
             tooltip="Iris IDE 작업공간으로 전환",
         )
         self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._left_sidebar.utility.actions.set_action_visible("ide", True)
+        self._left_sidebar.set_workspace_mode("assistant")
+        self._apply_ui_overlay_margins("assistant")
+        total = max(sum(self._workspace_splitter.sizes()), self.width())
+        self._workspace_splitter.setSizes([self._sidebar_split_size, max(0, total - self._sidebar_split_size)])
         self._viz.request_sync_orb_anchor("switch_to_assistant")
         self._assistant_page.restore_splitter_state(self._assistant_splitter_state)
         self._metrics_worker.set_active(True)
@@ -1340,15 +1364,18 @@ class MainWindow(QMainWindow):
         self._ensure_status_in_title_bar()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
-        self._left_sidebar.utility.actions.update_action(
-            "ide",
-            title="돌아가기",
-            tooltip="기존 Iris 화면으로 복귀",
-        )
+        sizes = self._workspace_splitter.sizes()
+        if sizes and sizes[0] > 0:
+            self._sidebar_split_size = sizes[0]
+        total = max(sum(sizes), self.width())
+        self._workspace_splitter.setSizes([0, total])
+        self._left_sidebar.set_workspace_mode("ide")
+        self._apply_ui_overlay_margins("ide")
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
-        self._left_sidebar.utility.actions.set_action_active("ide", True)
+        self._ide_page.show_empty_home()
         ctx = self._ide_bridge.get_context()
-        self._ide_page.coding_panel.chat.set_workspace_context(ctx.summary_line())
+        summary = ctx.summary_line()
+        self._ide_page.set_workspace_label(summary)
         self._metrics_worker.set_active(True)
 
     def _on_ide_toggle(self) -> None:
@@ -1515,6 +1542,22 @@ class MainWindow(QMainWindow):
         if isinstance(snap, MetricsSnapshot):
             self._left_sidebar.utility.metrics.apply_snapshot(snap)
 
+    @pyqtSlot(bool, str, str, str)
+    def _on_ide_editor_state_changed(
+        self,
+        has_open_editor: bool,
+        title: str,
+        _uri: str,
+        language_id: str,
+    ) -> None:
+        if self._workspace_mode != "ide":
+            return
+        self._ide_page.set_editor_state(
+            has_open_editor,
+            title=title,
+            language_id=language_id,
+        )
+
     def _on_coding_user_text(self, text: str) -> None:
         ctx_block = self._ide_bridge.build_message_context_block()
         if ctx_block:
@@ -1523,7 +1566,7 @@ class MainWindow(QMainWindow):
 
     def _active_chat_panel(self):
         if self._workspace_mode == "ide":
-            return self._ide_page.coding_panel.chat
+            return self._ide_page.active_chat()
         return self._chat
 
     def closeEvent(self, event: QCloseEvent) -> None:

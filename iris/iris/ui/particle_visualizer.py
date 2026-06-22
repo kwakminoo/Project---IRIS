@@ -73,6 +73,12 @@ _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
 
 _PARTICLE_COUNT = 52
 _CONNECT_DIST = 0.38
+# glow·링이 core_r보다 바깥으로 그려지는 최대 배율
+_VISUAL_HALO_FACTOR = 2.05
+_EDGE_PAD = 10.0
+_DEFAULT_CY_RATIO = 0.36
+_COMPACT_HEIGHT = 320
+_COMPACT_CY_RATIO = 0.52
 
 
 def _asset_path(relative_path: str) -> Path:
@@ -128,6 +134,7 @@ class ParticleVisualizer(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        self._recompute_geometry()
         self.start()
 
     def hideEvent(self, event) -> None:  # noqa: N802
@@ -179,15 +186,34 @@ class ParticleVisualizer(QWidget):
     def stop(self) -> None:
         self._timer.stop()
 
+    def _fit_core_radius(self, width: int, height: int) -> float:
+        """위젯 안에 glow가 잘리지 않도록 core_r 상한."""
+        limit = min(width, height)
+        return max(8.0, (limit - 2 * _EDGE_PAD) / (2 * _VISUAL_HALO_FACTOR))
+
     def _recompute_geometry(self) -> None:
         width, height = max(self.width(), 1), max(self.height(), 1)
+        raw_r = min(width, height) * 0.18 * self._size_scale
         if self._custom_center is None:
             self._cx = width * 0.5
-            # 로그창 위쪽 중앙에 오도록 기본 Y를 올림
-            self._cy = height * 0.36
+            fit_r = self._fit_core_radius(width, height)
+            self._core_r = min(raw_r, fit_r)
+            halo = self._core_r * _VISUAL_HALO_FACTOR
+            cy_ratio = (
+                _COMPACT_CY_RATIO if height <= _COMPACT_HEIGHT else _DEFAULT_CY_RATIO
+            )
+            preferred_cy = height * cy_ratio
+            min_cy = halo + _EDGE_PAD
+            max_cy = height - halo - _EDGE_PAD
+            if min_cy <= max_cy:
+                self._cy = max(min_cy, min(preferred_cy, max_cy))
+            else:
+                # ponytail: 극소 영역은 중앙 + fit_r로만 맞춤
+                self._core_r = fit_r
+                self._cy = height * 0.5
         else:
             self._cx, self._cy = self._custom_center
-        self._core_r = min(width, height) * 0.18 * self._size_scale
+            self._core_r = raw_r
 
     def _profile(self) -> dict[str, float | tuple[int, int, int]]:
         return _STATE_PROFILES.get(self._state_name, _STATE_PROFILES["IDLE"])

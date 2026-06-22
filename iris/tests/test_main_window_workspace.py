@@ -50,3 +50,4 @@ def test_ide_page_has_theia_and_coding_panel(qapp) -> None:
     page = IdeWorkspacePage()
     assert page.theia is not None
     assert page.coding_panel is not None
+    assert page.empty_home is not None

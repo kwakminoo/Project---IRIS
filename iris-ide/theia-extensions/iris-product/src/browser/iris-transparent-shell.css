@@ -1,0 +1,246 @@
+/* IRIS embedded IDE — transparent shell over host cyber background */
+
+html,
+body {
+    background: transparent !important;
+}
+
+#theia-app-shell,
+.theia-ApplicationShell {
+    background: transparent !important;
+}
+
+/* Top menu bar — blend with IRIS title chrome */
+#theia-top-panel,
+.theia-ApplicationShell > .p-Widget.p-Panel-top,
+.p-MenuBar {
+    background: rgba(5, 12, 26, 0.25) !important;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.12) !important;
+    color: #94a3b8 !important;
+    font-size: 11px !important;
+    min-height: 28px !important;
+}
+
+.p-MenuBar-item {
+    padding: 2px 8px !important;
+    line-height: 22px !important;
+}
+
+.p-MenuBar-item:hover {
+    background: rgba(37, 99, 235, 0.18) !important;
+}
+
+/* Theia 1.55 — Activity Bar + Lumino layout 변수 완전 투명 */
+:root,
+body,
+.theia-ApplicationShell,
+#theia-app-shell {
+    --theia-activityBar-background: rgba(0, 0, 0, 0) !important;
+    --theia-activityBar-border: rgba(0, 0, 0, 0) !important;
+    --theia-activityBar-activeBackground: rgba(0, 0, 0, 0) !important;
+    --theia-activityBar-inactiveBackground: rgba(0, 0, 0, 0) !important;
+    --theia-layout-color0: rgba(0, 0, 0, 0) !important;
+    --theia-layout-color1: rgba(0, 0, 0, 0) !important;
+    --theia-layout-color2: rgba(0, 0, 0, 0) !important;
+    --theia-layout-color3: rgba(0, 0, 0, 0) !important;
+    --theia-layout-color4: rgba(0, 0, 0, 0) !important;
+}
+
+/* Left / right vertical icon bars — transparent strip, icons only */
+#theia-left-side-panel,
+#theia-right-side-panel {
+    background: rgba(0, 0, 0, 0) !important;
+    background-color: rgba(0, 0, 0, 0) !important;
+    background-image: none !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+#theia-left-side-panel > .p-Widget,
+#theia-right-side-panel > .p-Widget,
+#theia-left-side-panel .lm-Widget,
+#theia-right-side-panel .lm-Widget,
+#theia-left-side-panel .p-SplitPanel,
+#theia-right-side-panel .p-SplitPanel {
+    background: rgba(0, 0, 0, 0) !important;
+    background-color: rgba(0, 0, 0, 0) !important;
+}
+
+/* Theia 1.55 primary selector for side activity bars */
+.p-TabBar.theia-app-sides,
+.p-TabBar.theia-app-left,
+.p-TabBar.theia-app-right,
+#theia-left-side-panel .p-TabBar[data-orientation="vertical"],
+#theia-right-side-panel .p-TabBar[data-orientation="vertical"],
+.theia-ActivityBar {
+    background: rgba(0, 0, 0, 0) !important;
+    background-color: rgba(0, 0, 0, 0) !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.p-TabBar.theia-app-sides .p-TabBar-content,
+.p-TabBar.theia-app-left .p-TabBar-content,
+.p-TabBar.theia-app-right .p-TabBar-content,
+#theia-left-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-content,
+#theia-right-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-content {
+    background: rgba(0, 0, 0, 0) !important;
+    background-color: rgba(0, 0, 0, 0) !important;
+}
+
+.p-TabBar.theia-app-sides .p-TabBar-tab,
+.p-TabBar.theia-app-left .p-TabBar-tab,
+.p-TabBar.theia-app-right .p-TabBar-tab,
+#theia-left-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab,
+#theia-right-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab {
+    background: rgba(0, 0, 0, 0) !important;
+    background-color: rgba(0, 0, 0, 0) !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #94a3b8 !important;
+}
+
+/* Activity Bar — codicon(폰트) / mask(확장) 아이콘 분리 */
+.p-TabBar.theia-app-sides .p-TabBar-tabIcon:not(.codicon):not(.fa),
+.p-TabBar.theia-app-left .p-TabBar-tabIcon:not(.codicon):not(.fa),
+.p-TabBar.theia-app-right .p-TabBar-tabIcon:not(.codicon):not(.fa) {
+    background-color: #94a3b8 !important;
+    opacity: 0.88 !important;
+}
+
+.p-TabBar.theia-app-sides .p-mod-current .p-TabBar-tabIcon:not(.codicon):not(.fa),
+.p-TabBar.theia-app-left .p-mod-current .p-TabBar-tabIcon:not(.codicon):not(.fa),
+.p-TabBar.theia-app-right .p-mod-current .p-TabBar-tabIcon:not(.codicon):not(.fa) {
+    background-color: #e8f0fe !important;
+    opacity: 1 !important;
+}
+
+.p-TabBar.theia-app-sides .codicon.p-TabBar-tabIcon,
+.p-TabBar.theia-app-left .codicon.p-TabBar-tabIcon,
+.p-TabBar.theia-app-right .codicon.p-TabBar-tabIcon {
+    background: none !important;
+    background-color: transparent !important;
+    color: #94a3b8 !important;
+    opacity: 0.88 !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+}
+
+.p-TabBar.theia-app-sides .p-mod-current .codicon.p-TabBar-tabIcon,
+.p-TabBar.theia-app-left .p-mod-current .codicon.p-TabBar-tabIcon,
+.p-TabBar.theia-app-right .p-mod-current .codicon.p-TabBar-tabIcon {
+    color: #e8f0fe !important;
+    opacity: 1 !important;
+}
+
+.p-TabBar.theia-app-sides .fa.p-TabBar-tabIcon,
+.p-TabBar.theia-app-left .fa.p-TabBar-tabIcon,
+.p-TabBar.theia-app-right .fa.p-TabBar-tabIcon {
+    background: none !important;
+    background-color: transparent !important;
+    color: #94a3b8 !important;
+    opacity: 0.88 !important;
+}
+
+.p-TabBar.theia-app-sides .p-TabBar-tab:hover,
+.p-TabBar.theia-app-left .p-TabBar-tab:hover,
+.p-TabBar.theia-app-right .p-TabBar-tab:hover,
+#theia-left-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab:hover,
+#theia-right-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab:hover {
+    background: rgba(37, 99, 235, 0.18) !important;
+}
+
+.p-TabBar.theia-app-sides.theia-app-left .p-TabBar-tab.p-mod-current,
+.p-TabBar.theia-app-left .p-TabBar-tab.p-mod-current,
+#theia-left-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab.p-mod-current {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #e8f0fe !important;
+    border-left: 2px solid rgba(56, 189, 248, 0.55) !important;
+    border-top: none !important;
+}
+
+.p-TabBar.theia-app-sides.theia-app-right .p-TabBar-tab.p-mod-current,
+.p-TabBar.theia-app-right .p-TabBar-tab.p-mod-current,
+#theia-right-side-panel .p-TabBar[data-orientation="vertical"] .p-TabBar-tab.p-mod-current {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #e8f0fe !important;
+    border-right: 2px solid rgba(56, 189, 248, 0.55) !important;
+    border-top: none !important;
+}
+
+/* Side panels (Explorer, Search, …) */
+#theia-left-content-panel,
+#theia-right-content-panel,
+.theia-side-panel {
+    background: rgba(5, 12, 26, 0.45) !important;
+    border-color: rgba(56, 189, 248, 0.1) !important;
+}
+
+/* Main dock + tabs */
+#theia-main-content-panel,
+.p-DockPanel-widget,
+.theia-main-content-panel {
+    background: transparent !important;
+}
+
+.p-TabBar[data-orientation="horizontal"] {
+    background: rgba(5, 12, 26, 0.45) !important;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.1) !important;
+}
+
+.p-TabBar-tab {
+    background: transparent !important;
+    color: #94a3b8 !important;
+    font-size: 11px !important;
+    min-height: 28px !important;
+}
+
+.p-TabBar-tab.p-mod-current {
+    background: rgba(8, 16, 32, 0.55) !important;
+    color: #e8f0fe !important;
+    border-top: 2px solid rgba(56, 189, 248, 0.45) !important;
+}
+
+/* Editor — readable navy, not fully transparent */
+.theia-editor,
+.theia-editor-main-area,
+.monaco-editor,
+.monaco-editor .margin,
+.monaco-editor-background {
+    background-color: rgba(3, 9, 20, 0.88) !important;
+}
+
+/* Bottom panel (terminal, problems) */
+#theia-bottom-content-panel,
+.theia-bottom-panel,
+.p-Panel-bottom {
+    background: rgba(3, 9, 20, 0.85) !important;
+    border-top: 1px solid rgba(56, 189, 248, 0.1) !important;
+}
+
+/* Status bar */
+#theia-statusBar,
+.theia-statusBar {
+    background: rgba(5, 12, 26, 0.55) !important;
+    border-top: 1px solid rgba(56, 189, 248, 0.12) !important;
+    color: #94a3b8 !important;
+    font-size: 11px !important;
+}
+
+/* Popups — keep readable */
+.p-Menu,
+.p-ContextMenu,
+.quick-input-widget,
+.monaco-editor .suggest-widget,
+.monaco-hover {
+    background: rgba(8, 16, 32, 0.96) !important;
+    border: 1px solid rgba(56, 189, 248, 0.2) !important;
+    color: #e8f0fe !important;
+}
+
+/* Preload splash — dark, not white flash */
+.theia-preload {
+    background: #030508 !important;
+}

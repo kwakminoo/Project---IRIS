@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+EditorStateCallback = Callable[[bool, str, str, str], None]
 
 # 기본 차단 패턴
 _SECRET_PATTERNS = (
@@ -48,6 +51,23 @@ class IdeContext:
     return " · ".join(parts) if parts else "Workspace: —"
 
 
+@dataclass(frozen=True)
+class IdeEditorState:
+  has_open_editor: bool = False
+  title: str = ""
+  uri: str = ""
+  language_id: str = ""
+
+  @classmethod
+  def from_payload(cls, data: dict[str, Any]) -> IdeEditorState:
+    return cls(
+      has_open_editor=bool(data.get("hasOpenEditor", False)),
+      title=str(data.get("title", "")),
+      uri=str(data.get("uri", "")),
+      language_id=str(data.get("languageId", "")),
+    )
+
+
 def is_context_attachment_allowed(uri: str, selected_text: str = "") -> bool:
   """Secret·binary 파일 context 첨부 차단."""
   path = uri.replace("file:///", "").replace("file://", "")
@@ -68,10 +88,12 @@ class IdeBridgeClient:
     self._host = host
     self._port = port
     self._context = IdeContext()
+    self._editor_state = IdeEditorState()
     self._lock = threading.Lock()
     self._server: HTTPServer | None = None
     self._thread: threading.Thread | None = None
     self._pending_commands: list[dict[str, Any]] = []
+    self._editor_state_callbacks: list[EditorStateCallback] = []
 
   @property
   def port(self) -> int:
@@ -93,7 +115,8 @@ class IdeBridgeClient:
         return
 
       def do_POST(self) -> None:
-        if urlparse(self.path).path != "/context":
+        path = urlparse(self.path).path
+        if path not in {"/context", "/editor-state"}:
           self.send_error(404)
           return
         length = int(self.headers.get("Content-Length", 0))
@@ -103,7 +126,10 @@ class IdeBridgeClient:
         except json.JSONDecodeError:
           self.send_error(400)
           return
-        client._apply_context(data)
+        if path == "/context":
+          client._apply_context(data)
+        else:
+          client._apply_editor_state(data)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -127,6 +153,16 @@ class IdeBridgeClient:
           cmds = client.pop_commands()
           self._json_response({"commands": cmds})
           return
+        if path == "/editor-state":
+          snap = client.get_editor_state()
+          self._json_response({
+            "type": "iris.ide.editorStateChanged",
+            "hasOpenEditor": snap.has_open_editor,
+            "title": snap.title,
+            "uri": snap.uri,
+            "languageId": snap.language_id,
+          })
+          return
         self.send_error(404)
 
       def _json_response(self, obj: object) -> None:
@@ -149,6 +185,43 @@ class IdeBridgeClient:
     self._server.server_close()
     self._server = None
     self._thread = None
+
+  def set_editor_state_callback(self, callback: EditorStateCallback | None) -> None:
+    self._editor_state_callbacks.clear()
+    if callback is not None:
+      self._editor_state_callbacks.append(callback)
+
+  def _notify_editor_state(self, state: IdeEditorState) -> None:
+    for cb in self._editor_state_callbacks:
+      try:
+        cb(
+          state.has_open_editor,
+          state.title,
+          state.uri,
+          state.language_id,
+        )
+      except Exception:
+        pass
+
+  def _apply_editor_state(self, data: dict[str, Any]) -> None:
+    event_type = str(data.get("type", ""))
+    if event_type and event_type != "iris.ide.editorStateChanged":
+      return
+    state = IdeEditorState.from_payload(data)
+    with self._lock:
+      changed = state != self._editor_state
+      self._editor_state = state
+    if changed:
+      self._notify_editor_state(state)
+
+  def get_editor_state(self) -> IdeEditorState:
+    with self._lock:
+      return IdeEditorState(
+        has_open_editor=self._editor_state.has_open_editor,
+        title=self._editor_state.title,
+        uri=self._editor_state.uri,
+        language_id=self._editor_state.language_id,
+      )
 
   def _apply_context(self, data: dict[str, Any]) -> None:
     uri = str(data.get("active_file_uri", ""))

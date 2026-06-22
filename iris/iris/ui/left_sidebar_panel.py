@@ -45,3 +45,21 @@ class LeftSidebarPanel(QWidget):
     self._splitter.setSizes([280, 280])
 
     root.addWidget(self._splitter)
+
+  def set_workspace_mode(self, mode: str) -> None:
+    """assistant: Running Windows·메트릭 표시 / ide: Theia Activity Bar에 복귀 버튼 위임."""
+    is_ide = mode == "ide"
+    if is_ide:
+      # IDE 모드 — 외부 사이드바 숨김(복귀는 Theia Activity Bar 내부 버튼)
+      self.hide()
+      self.setMinimumWidth(0)
+      self.setMaximumWidth(0)
+      return
+
+    self.show()
+    self.window_list.setVisible(True)
+    self.utility.metrics.setVisible(True)
+    self.utility.actions.setVisible(True)
+    self.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
+    self.setMaximumWidth(_SIDEBAR_MAX_WIDTH)
+    self._splitter.setSizes([280, 280])

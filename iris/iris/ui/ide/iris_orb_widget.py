@@ -17,9 +17,6 @@ class IrisOrbWidget(QWidget):
     lay = QVBoxLayout(self)
     lay.setContentsMargins(0, 0, 0, 0)
     self._particle = ParticleVisualizer(self)
-    self._particle.set_size_scale(3.0)
-    self._particle.setMinimumHeight(280)
-    self._particle.setMaximumHeight(420)
     lay.addWidget(self._particle)
 
   def set_state(self, state: AppState) -> None:

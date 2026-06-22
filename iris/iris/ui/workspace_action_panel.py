@@ -81,3 +81,8 @@ class WorkspaceActionPanel(QWidget):
 
     def set_action_active(self, action_id: str, active: bool) -> None:
         self.update_action(action_id, active=active)
+
+    def set_action_visible(self, action_id: str, visible: bool) -> None:
+        btn = self._buttons.get(action_id)
+        if btn is not None:
+            btn.setVisible(visible)

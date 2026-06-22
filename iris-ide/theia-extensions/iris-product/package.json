@@ -15,7 +15,7 @@
     "typescript": "~5.4.5"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node ./scripts/copy-browser-assets.js",
     "watch": "tsc -b -w"
   }
 }

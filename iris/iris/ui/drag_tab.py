@@ -93,18 +93,19 @@ class DragTab(QWidget):
         self._drag_pos = None
 
     def place_status_rows(self, primary: QWidget, backend: QWidget) -> None:
-        """STATE/MODEL/TTS + 백엔드 행을 타이틀 우측 2줄 블록으로 고정."""
+        """STATE/MODEL/TTS + 백엔드 — 단일 3열 그리드 또는 2행 블록."""
         while self._status_column_lay.count():
             item = self._status_column_lay.takeAt(0)
             child = item.widget()
             if child is not None:
                 child.setParent(None)
         primary.setParent(self._status_column)
-        backend.setParent(self._status_column)
         self._status_column_lay.addWidget(primary)
-        self._status_column_lay.addWidget(backend)
         primary.show()
-        backend.show()
+        if backend.maximumHeight() > 0 and backend.isVisible():
+            backend.setParent(self._status_column)
+            self._status_column_lay.addWidget(backend)
+            backend.show()
         self._status_column.show()
 
     def place_primary_status(self, widget: QWidget) -> None:

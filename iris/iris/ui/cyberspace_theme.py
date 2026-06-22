@@ -149,7 +149,7 @@ def build_cyberspace_qss() -> str:
         }}
         QLabel#DragTitle {{
             font-weight: 400;
-            font-size: 20px;
+            font-size: 25px;
             letter-spacing: 3px;
             color: {t.text_accent};
             background: transparent;
@@ -189,6 +189,23 @@ def build_cyberspace_qss() -> str:
         QPushButton#HudModeButton[active="true"] {{
             background: rgba(37, 99, 235, 0.35);
             border-color: {t.neon_cyan};
+            color: {t.neon_cyan};
+        }}
+        QPushButton#IdeActivityBackButton {{
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            color: {t.text_secondary};
+            font-size: 18px;
+            font-weight: 600;
+        }}
+        QPushButton#IdeActivityBackButton:hover {{
+            background: rgba(37, 99, 235, 0.18);
+            color: {t.neon_cyan};
+        }}
+        QPushButton#IdeActivityBackButton:pressed {{
+            background: rgba(37, 99, 235, 0.28);
             color: {t.neon_cyan};
         }}
         QProgressBar#HudMetricBar {{
@@ -274,6 +291,7 @@ def build_cyberspace_qss() -> str:
             border: none;
             border-bottom: 1px solid {t.border_subtle};
         }}
+        QWidget#TopStatusBlock,
         QWidget#TopStatusPrimaryRow,
         QWidget#TopStatusBackendRow,
         QWidget#DragTabStatusColumn {{
@@ -306,26 +324,6 @@ def build_cyberspace_qss() -> str:
             color: {t.text_primary};
             font-size: {t.font_size_caption};
             font-weight: 600;
-        }}
-        QLabel#LiveActivityTitle {{
-            color: {t.text_hud_label};
-            font-size: {t.font_size_heading};
-            font-weight: 600;
-            letter-spacing: 1.2px;
-        }}
-        QLabel#LiveActivityState {{
-            color: {t.neon_cyan};
-            font-size: {t.font_size_body};
-            font-weight: 600;
-        }}
-        QLabel#LiveActivityDetail {{
-            color: {t.text_secondary};
-            font-size: {t.font_size_caption};
-        }}
-        QLabel#LiveActivityRecent {{
-            color: {t.text_muted};
-            font-size: {t.font_size_micro};
-            font-family: {t.font_mono};
         }}
         QLabel#PanelEmptyHint {{
             color: {t.text_muted};

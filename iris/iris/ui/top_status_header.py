@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QWidget
 
 from iris.assistant.external_agent_adapter import external_backend_status_line
 from iris.config.settings import Settings
@@ -12,6 +12,8 @@ from iris.ui.theme_tokens import TOKENS
 
 # DragTab 상태 2행 블록 높이 — 타이틀 텍스트·칩 행 정렬 기준
 STATUS_BLOCK_HEIGHT = 36
+_DOT_BOX = 8
+_DOT_FONT_PX = 8
 
 
 def _status_dot_color(kind: str) -> str:
@@ -44,7 +46,9 @@ class _StatusChip(QWidget):
 
         self._dot = QLabel("●")
         self._dot.setObjectName("StatusDot")
-        self._dot.setFixedWidth(10)
+        self._dot.setFixedSize(_DOT_BOX, _DOT_BOX)
+        self._dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._apply_dot_color(_status_dot_color("idle"))
         row.addWidget(self._dot)
 
         self._prefix = QLabel(prefix.upper())
@@ -55,45 +59,48 @@ class _StatusChip(QWidget):
         self._value.setObjectName("StatusChipValueMono" if mono_value else "StatusChipValue")
         row.addWidget(self._value)
 
+    def _apply_dot_color(self, color: str) -> None:
+        self._dot.setStyleSheet(
+            f"color: {color}; font-size: {_DOT_FONT_PX}px;"
+            " background: transparent; border: none; padding: 0; margin: 0;"
+        )
+
     def set_value(self, text: str, *, dot_kind: str = "idle") -> None:
         self._value.setText(text)
-        color = _status_dot_color(dot_kind)
-        self._dot.setStyleSheet(
-            f"color: {color}; font-size: 8px; background: transparent; border: none;"
-        )
+        self._apply_dot_color(_status_dot_color(dot_kind))
 
 
 class TopStatusHeader:
-    """DragTab에 삽입할 상태 칩 묶음 — 별도 레이아웃 위젯 없이 행만 제공."""
+    """DragTab에 삽입할 상태 칩 묶음 — 3열 그리드로 dot 세로 정렬."""
 
     def __init__(self) -> None:
-        # STATE / MODEL / TTS
-        self._primary_row = QWidget()
-        self._primary_row.setObjectName("TopStatusPrimaryRow")
-        self._primary_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._primary_row.setFixedHeight(STATUS_BLOCK_HEIGHT // 2)
-        row1 = QHBoxLayout(self._primary_row)
-        row1.setContentsMargins(0, 0, 0, 0)
-        row1.setSpacing(TOKENS.spacing_md)
+        self._status_block = QWidget()
+        self._status_block.setObjectName("TopStatusBlock")
+        self._status_block.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._status_block.setFixedHeight(STATUS_BLOCK_HEIGHT)
+
+        grid = QGridLayout(self._status_block)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(TOKENS.spacing_md)
+        grid.setVerticalSpacing(0)
+
         self._state_chip = _StatusChip("STATE")
         self._model_chip = _StatusChip("MODEL", mono_value=True)
         self._tts_chip = _StatusChip("TTS")
-        for chip in (self._state_chip, self._model_chip, self._tts_chip):
-            row1.addWidget(chip)
-
-        # IRIS LOCAL / OPENCLAW / HERMES
-        self._backend_row = QWidget()
-        self._backend_row.setObjectName("TopStatusBackendRow")
-        self._backend_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._backend_row.setFixedHeight(STATUS_BLOCK_HEIGHT // 2)
-        row2 = QHBoxLayout(self._backend_row)
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(TOKENS.spacing_md)
         self._local_chip = _StatusChip("IRIS LOCAL")
         self._openclaw_chip = _StatusChip("OPENCLAW")
         self._hermes_chip = _StatusChip("HERMES")
-        for chip in (self._local_chip, self._openclaw_chip, self._hermes_chip):
-            row2.addWidget(chip)
+
+        cell_align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        grid.addWidget(self._state_chip, 0, 0, alignment=cell_align)
+        grid.addWidget(self._model_chip, 0, 1, alignment=cell_align)
+        grid.addWidget(self._tts_chip, 0, 2, alignment=cell_align)
+        grid.addWidget(self._local_chip, 1, 0, alignment=cell_align)
+        grid.addWidget(self._openclaw_chip, 1, 1, alignment=cell_align)
+        grid.addWidget(self._hermes_chip, 1, 2, alignment=cell_align)
+
+        self._state_chip.set_value("IDLE", dot_kind="idle")
+        self._model_chip.set_value("-", dot_kind="idle")
 
         # StatusStrip 호환 — MainWindow가 참조하는 라벨
         self.model_label = self._model_chip._value  # noqa: SLF001
@@ -102,13 +109,22 @@ class TopStatusHeader:
 
         self._local_chip.set_value("CONNECTED", dot_kind="connected")
 
+        # place_status_rows 레거시 — 그리드에 backend가 포함되어 빈 슬롯만 제공
+        self._empty_legacy = QWidget()
+        self._empty_legacy.setFixedHeight(0)
+        self._empty_legacy.hide()
+
+    def status_widget(self) -> QWidget:
+        """DragTab — STATE/MODEL/TTS + 백엔드 3열 그리드."""
+        return self._status_block
+
     def primary_row(self) -> QWidget:
-        """DragTab — STATE/MODEL/TTS 행."""
-        return self._primary_row
+        """레거시 호환 — status_widget()과 동일."""
+        return self._status_block
 
     def backend_row(self) -> QWidget:
-        """DragTab — IRIS LOCAL/OPENCLAW/HERMES 행 (primary 바로 아래)."""
-        return self._backend_row
+        """레거시 호환 — 그리드에 포함되어 빈 위젯 반환."""
+        return self._empty_legacy
 
     def set_app_state(self, state: AppState) -> None:
         name = state.name

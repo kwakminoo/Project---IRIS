@@ -14,6 +14,14 @@ interface IrisContextPayload {
     dirty_state: boolean;
 }
 
+interface IrisEditorStatePayload {
+    type: 'iris.ide.editorStateChanged';
+    hasOpenEditor: boolean;
+    title: string;
+    uri: string;
+    languageId: string;
+}
+
 @injectable()
 export class IrisBridgeContribution implements FrontendApplicationContribution {
     @inject(EditorManager) protected readonly editorManager!: EditorManager;
@@ -21,6 +29,7 @@ export class IrisBridgeContribution implements FrontendApplicationContribution {
 
     private bridgeBase = 'http://127.0.0.1:3200';
     private pollTimer: ReturnType<typeof setInterval> | undefined;
+    private lastEditorSignature = '';
 
     onStart(): void {
         const params = new URLSearchParams(window.location.search);
@@ -30,14 +39,73 @@ export class IrisBridgeContribution implements FrontendApplicationContribution {
         } else if ((window as unknown as { __IRIS_BRIDGE_URL__?: string }).__IRIS_BRIDGE_URL__) {
             this.bridgeBase = (window as unknown as { __IRIS_BRIDGE_URL__: string }).__IRIS_BRIDGE_URL__;
         }
-        this.editorManager.onCurrentEditorChanged(() => this.pushContext());
+        this.editorManager.onCurrentEditorChanged(() => {
+            this.pushContext();
+            this.pushEditorState();
+        });
+        this.editorManager.onCreated(widget => {
+            widget.disposed.connect(() => this.pushEditorState());
+            this.pushEditorState();
+        });
         this.pollTimer = setInterval(() => this.pullCommands(), 1500);
         this.pushContext();
+        this.pushEditorState();
     }
 
     onStop(): void {
         if (this.pollTimer) {
             clearInterval(this.pollTimer);
+        }
+    }
+
+    protected async pushEditorState(): Promise<void> {
+        const openEditors = [...this.editorManager.all];
+        const hasOpenEditor = openEditors.length > 0;
+        const widget = this.editorManager.currentEditor;
+        const textEditor = widget?.editor as unknown as {
+            uri: URI;
+            document: { languageId?: string };
+        } | undefined;
+
+        const uri = hasOpenEditor && textEditor?.uri ? textEditor.uri.toString() : '';
+        let title = '';
+        if (uri) {
+            try {
+                title = new URI(uri).path.base;
+            } catch {
+                title = uri.split('/').pop() ?? '';
+            }
+        }
+        const languageId = textEditor?.document.languageId ?? '';
+
+        const signature = `${hasOpenEditor}|${uri}|${title}|${languageId}`;
+        if (signature === this.lastEditorSignature) {
+            return;
+        }
+        this.lastEditorSignature = signature;
+
+        const payload: IrisEditorStatePayload = {
+            type: 'iris.ide.editorStateChanged',
+            hasOpenEditor,
+            title,
+            uri,
+            languageId,
+        };
+
+        try {
+            await fetch(`${this.bridgeBase}/editor-state`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+        } catch {
+            // Iris bridge 미가동 시 무시
+        }
+
+        try {
+            window.parent.postMessage(payload, '*');
+        } catch {
+            // embedded host가 없으면 무시
         }
     }
 

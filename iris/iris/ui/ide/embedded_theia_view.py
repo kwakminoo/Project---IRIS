@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
   QFrame,
   QHBoxLayout,
@@ -20,11 +21,17 @@ from PyQt6.QtWidgets import (
   QWidget,
 )
 
+from iris.ui.ide.ide_transparent_bars_inject import (
+  build_transparency_inject_script,
+  load_iris_shell_css,
+)
 from iris.ui.theme_tokens import TOKENS
 
 logger = logging.getLogger(__name__)
 
 _LOG_PATH = Path.home() / ".iris" / "logs" / "ide-webengine.log"
+
+_TRANSPARENCY_RETRY_MS = (0, 200, 600, 1500, 3500)
 
 _WEBENGINE_IMPORT_ERROR: str | None = None
 _WEBENGINE = False
@@ -153,6 +160,9 @@ class _WebContainer(QWidget):
 
   def __init__(self, parent: QWidget | None = None) -> None:
     super().__init__(parent)
+    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    self.setAutoFillBackground(False)
+    self.setStyleSheet("background: transparent;")
     self._overlay: QFrame | None = None
 
   def set_overlay(self, overlay: QFrame) -> None:
@@ -179,6 +189,9 @@ class EmbeddedTheiaView(QWidget):
   def __init__(self, parent: QWidget | None = None) -> None:
     super().__init__(parent)
     self.setObjectName("EmbeddedTheiaView")
+    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    self.setAutoFillBackground(False)
+    self.setStyleSheet("background: transparent;")
     self._state = TheiaViewState.NOT_STARTED
     self._last_error = ""
     self._log_path = ""
@@ -189,6 +202,7 @@ class EmbeddedTheiaView(QWidget):
     self._last_probe_result: dict[str, object] = {}
     self._state_history: list[str] = []
     self._load_started_at = ""
+    self._transparency_retry_generation = 0
 
     lay = QVBoxLayout(self)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -221,16 +235,22 @@ class EmbeddedTheiaView(QWidget):
     from iris.ui.ide.iris_webengine_page import IrisWebEnginePage
 
     self._web_container = _WebContainer(self)
+    self._web_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    self._web_container.setAutoFillBackground(False)
     container_lay = QVBoxLayout(self._web_container)
     container_lay.setContentsMargins(0, 0, 0, 0)
 
     self._web = QWebEngineView(self._web_container)
+    self._web.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    self._web.setAutoFillBackground(False)
+    self._web.setStyleSheet("background: transparent;")
     container_lay.addWidget(self._web)
 
     self._loading_overlay = QFrame(self._web_container)
     self._loading_overlay.setObjectName("TheiaLoadingOverlay")
+    self._loading_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     self._loading_overlay.setStyleSheet(
-      f"background: {TOKENS.background_primary};"
+      "background: rgba(3, 5, 8, 0.88);"
     )
     overlay_lay = QVBoxLayout(self._loading_overlay)
     self._loading_label = QLabel("Iris IDE를 불러오는 중…")
@@ -242,6 +262,7 @@ class EmbeddedTheiaView(QWidget):
     self._loading_overlay.hide()
 
     self._page = IrisWebEnginePage(self._web, ide_port_callback=self._current_ide_port)
+    self._page.setBackgroundColor(QColor(0, 0, 0, 0))
     self._web.setPage(self._page)
     self._web.loadStarted.connect(self._on_load_started)
     self._web.loadProgress.connect(self._on_load_progress)
@@ -498,6 +519,7 @@ class EmbeddedTheiaView(QWidget):
     self._web.raise_()
     self._web.setFocus()
     _append_theia_log(f"resume READY stack={self._stack_current_name()} url={self._current_url_str()}")
+    self._inject_shell_transparency_css()
 
   def resume_or_continue(self) -> bool:
     """이미 READY이거나 Shell Probe 중이면 Frontend 재로드 없이 UI만 복원."""
@@ -655,7 +677,31 @@ class EmbeddedTheiaView(QWidget):
     _append_theia_log(
       f"READY stack={self._stack_current_name()} url={self._current_url_str()}"
     )
+    self._inject_shell_transparency_css()
     self.ready.emit()
+
+  def _inject_shell_transparency_css(self) -> None:
+    """좌·우 Activity Bar 투명화 — CSS 변수·DOM 스타일 강제 + 지연 재시도."""
+    if self._web is None:
+      return
+    self._transparency_retry_generation += 1
+    generation = self._transparency_retry_generation
+    css = load_iris_shell_css()
+    script = build_transparency_inject_script(css)
+    for delay_ms in _TRANSPARENCY_RETRY_MS:
+      QTimer.singleShot(
+        delay_ms,
+        lambda gen=generation, js=script: self._run_transparency_script(gen, js),
+      )
+
+  def _run_transparency_script(self, generation: int, script: str) -> None:
+    if (
+      generation != self._transparency_retry_generation
+      or self._web is None
+      or self._state != TheiaViewState.READY
+    ):
+      return
+    self._web.page().runJavaScript(script)
 
   def _validate_loaded_url(self) -> str | None:
     url = self._web.url().toString() if self._web else ""
