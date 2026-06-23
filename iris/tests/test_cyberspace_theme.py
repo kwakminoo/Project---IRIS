@@ -32,7 +32,7 @@ def test_theme_tokens_cyberspace_palette(qapp) -> None:
 def test_cyberspace_qss_contains_hud_selectors(qapp) -> None:
     qss = build_cyberspace_qss()
     assert "HudMetricBar" in qss
-    assert "HudModeButton" in qss
+    assert "HudIconButton" in qss
     assert "HudWindowRow" in qss
     assert TOKENS.neon_blue in qss or TOKENS.text_primary in qss
 
@@ -69,18 +69,19 @@ def test_particle_visualizer_paints_without_crash(qapp) -> None:
     qapp.processEvents()
 
 
-def test_workspace_action_panel_hud_button(qapp) -> None:
+def test_workspace_action_panel_hud_icon_button(qapp) -> None:
     panel = WorkspaceActionPanel()
     fired: list[str] = []
 
-    panel.add_action(
+    panel.add_icon_action(
         action_id="test",
-        title="Test",
+        icon_kind="ide",
         tooltip="t",
         callback=lambda: fired.append("ok"),
     )
     panel.set_action_active("test", True)
     btn = panel._buttons["test"]  # noqa: SLF001
     assert btn.property("active") is True
+    assert btn.width() == btn.height()
     btn.click()
     assert fired == ["ok"]

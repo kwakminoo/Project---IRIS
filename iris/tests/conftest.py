@@ -45,6 +45,7 @@ _INTEGRATION_TESTS = frozenset({
 
 def pytest_configure(config: pytest.Config) -> None:
     ini_markers = config.getini("markers") or []
+    config.addinivalue_line("markers", "timeout(seconds): optional timeout marker")
     if not ini_markers:
         config.addinivalue_line(
             "markers",
@@ -68,6 +69,17 @@ def pytest_configure(config: pytest.Config) -> None:
             "requires_model: 실제 AI 모델 실행이 필요한 테스트",
         )
         config.addinivalue_line("markers", "slow: 상대적으로 오래 걸리는 테스트")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """pytest-timeout이 없는 로컬 venv에서도 --timeout 옵션을 인식한다."""
+    group = parser.getgroup("timeout")
+    group.addoption(
+        "--timeout",
+        action="store",
+        default=None,
+        help="timeout in seconds (pytest-timeout compatible stub)",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

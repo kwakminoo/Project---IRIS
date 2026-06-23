@@ -1,80 +1,110 @@
-"""Workspace 전환 액션 — HUD 모드 트리거 버튼."""
+"""Workspace 전환·퀵런치 아이콘 — HUD 정사각형 버튼 그리드."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QGridLayout, QPushButton, QVBoxLayout, QWidget
 
-from iris.ui.theme_tokens import TOKENS
+from iris.ui.hud_quick_launch_icons import (
+    HUD_ICON_BTN_PX,
+    hud_icon_size,
+    hud_quick_launch_icon,
+)
 
 
 @dataclass
 class WorkspaceAction:
     action_id: str
-    title: str
+    icon_kind: str
     tooltip: str
-    callback: Callable[[], None]
+    callback: Callable[[], None] | None
 
 
 class WorkspaceActionPanel(QWidget):
-    """향후 확장 가능한 Workspace 액션 — 네온 라인 HUD 버튼."""
+    """사이드바 하단 — 3열 정사각형 HUD 아이콘 그리드."""
+
+    _GRID_COLS = 3
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("WorkspaceActionPanel")
-        self._lay = QVBoxLayout(self)
-        self._lay.setContentsMargins(6, 4, 6, 8)
-        self._lay.setSpacing(6)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 4, 6, 8)
+        root.setSpacing(0)
+
+        self._grid = QGridLayout()
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(6)
+        self._grid.setVerticalSpacing(6)
+        root.addLayout(self._grid)
+
         self._buttons: dict[str, QPushButton] = {}
         self._actions: dict[str, WorkspaceAction] = {}
+        self._slot = 0
 
-    def add_action(
+    def add_icon_action(
         self,
         *,
         action_id: str,
-        title: str,
+        icon_kind: str,
         tooltip: str,
-        callback: Callable[[], None],
+        callback: Callable[[], None] | None = None,
     ) -> None:
         if action_id in self._buttons:
-            self.update_action(action_id, title=title, tooltip=tooltip)
-            self._actions[action_id] = WorkspaceAction(action_id, title, tooltip, callback)
+            self.update_action(action_id, icon_kind=icon_kind, tooltip=tooltip)
+            self._actions[action_id] = WorkspaceAction(action_id, icon_kind, tooltip, callback)
             return
-        btn = QPushButton(title.upper())
-        btn.setObjectName("HudModeButton")
+
+        btn = QPushButton()
+        btn.setObjectName("HudIconButton")
         btn.setToolTip(tooltip)
         btn.setProperty("active", False)
-        btn.clicked.connect(callback)
+        btn.setProperty("iconKind", icon_kind)
+        btn.setFixedSize(HUD_ICON_BTN_PX, HUD_ICON_BTN_PX)
+        btn.setIconSize(hud_icon_size())
+        btn.setIcon(hud_quick_launch_icon(icon_kind))
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if callback is not None:
+            btn.clicked.connect(callback)
+
+        row, col = divmod(self._slot, self._GRID_COLS)
+        self._slot += 1
+        self._grid.addWidget(btn, row, col)
+
         self._buttons[action_id] = btn
-        self._actions[action_id] = WorkspaceAction(action_id, title, tooltip, callback)
-        self._lay.addWidget(btn)
+        self._actions[action_id] = WorkspaceAction(action_id, icon_kind, tooltip, callback)
 
     def update_action(
         self,
         action_id: str,
         *,
-        title: str | None = None,
+        icon_kind: str | None = None,
         tooltip: str | None = None,
         active: bool | None = None,
     ) -> None:
         btn = self._buttons.get(action_id)
         if btn is None:
             return
-        if title is not None:
-            btn.setText(title.upper())
+        kind = icon_kind or btn.property("iconKind") or "ide"
+        if icon_kind is not None:
+            btn.setProperty("iconKind", icon_kind)
         if tooltip is not None:
             btn.setToolTip(tooltip)
+        is_active = active if active is not None else btn.property("active") is True
         if active is not None:
             btn.setProperty("active", active)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+        btn.setIcon(hud_quick_launch_icon(kind, active=is_active))
         action = self._actions.get(action_id)
         if action is not None:
             self._actions[action_id] = WorkspaceAction(
                 action_id,
-                title or action.title,
+                kind,
                 tooltip or action.tooltip,
                 action.callback,
             )

@@ -62,7 +62,9 @@ def markdown_to_chat_html(text: str) -> str:
 
 
 def _plain_to_chat_html(text: str) -> str:
-    return html.escape(text).replace("\n", "<br>")
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    return escaped.replace("\n", "<br>")
 
 
 def _sanitize_chat_html(html_body: str) -> str:

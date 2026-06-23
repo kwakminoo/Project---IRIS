@@ -11,9 +11,13 @@ from iris.ui.ide.ide_layout_constants import (
   ASSISTANT_DOCK_MAX_WIDTH,
   ASSISTANT_DOCK_MIN_WIDTH,
   ASSISTANT_DOCK_ORB_HEIGHT,
-  ASSISTANT_DOCK_ORB_TOP_PAD,
   THEIA_MENU_BAR_HEIGHT,
   THEIA_STATUS_BAR_HEIGHT,
+)
+from iris.ui.ide.ide_orb_placement import (
+  apply_dock_orb_geometry,
+  mount_orb,
+  unmount_orb,
 )
 from iris.ui.ide.iris_orb_widget import IrisOrbWidget
 from iris.ui.mic_waveform_bar import MicWaveformBar
@@ -22,8 +26,7 @@ from iris.ui.theme_tokens import TOKENS
 
 class IrisAssistantDock(QWidget):
   """
-  우측 Assistant 영역 — 단일 QVBoxLayout.
-  Theia chrome과 겹치지 않도록 상·하단 여백을 레이아웃 마진으로 처리.
+  우측 Assistant 영역 — 구체는 IdeShellLayout이 필요 시 mount.
   """
 
   def __init__(self, parent: QWidget | None = None) -> None:
@@ -46,22 +49,16 @@ class IrisAssistantDock(QWidget):
     self._status_slot.setMaximumHeight(0)
     root.addWidget(self._status_slot, 0)
 
-    self.orb = IrisOrbWidget(self)
-    core = self.orb.particle_core()
-    orb_inner_h = ASSISTANT_DOCK_ORB_HEIGHT - ASSISTANT_DOCK_ORB_TOP_PAD
-    orb_lay = self.orb.layout()
-    if orb_lay is not None:
-      orb_lay.setContentsMargins(0, ASSISTANT_DOCK_ORB_TOP_PAD, 0, 0)
-    self.orb.setFixedHeight(ASSISTANT_DOCK_ORB_HEIGHT)
-    core.setMinimumHeight(orb_inner_h)
-    core.setMaximumHeight(orb_inner_h)
-    # dock 폭 기준 glow fit — 크기 확정 후 scale 적용
-    core.set_size_scale(1.65)
-    self.orb.setSizePolicy(
+    self._orb_slot = QWidget(self)
+    self._orb_slot.setObjectName("IrisAssistantDockOrbSlot")
+    self._orb_slot_lay = QVBoxLayout(self._orb_slot)
+    self._orb_slot_lay.setContentsMargins(0, 0, 0, 0)
+    self._orb_slot_lay.setSpacing(0)
+    self._orb_slot.setSizePolicy(
       QSizePolicy.Policy.Preferred,
       QSizePolicy.Policy.Fixed,
     )
-    root.addWidget(self.orb, 0)
+    root.addWidget(self._orb_slot, 0)
 
     self._workspace_label = QLabel("Workspace: —")
     self._workspace_label.setObjectName("CodingPanelWorkspaceLabel")
@@ -92,9 +89,28 @@ class IrisAssistantDock(QWidget):
     root.addWidget(self.wave, 0)
 
     root.setStretch(root.indexOf(self.chat), 1)
+    self._mounted_orb: IrisOrbWidget | None = None
+    self.mount_orb(IrisOrbWidget(self))
+
+  def mount_orb(self, orb: IrisOrbWidget) -> None:
+    apply_dock_orb_geometry(orb)
+    # unmount 시 setFixedHeight(0) — 재마운트 시 슬롯 높이 복원 필수
+    self._orb_slot.setFixedHeight(ASSISTANT_DOCK_ORB_HEIGHT)
+    mount_orb(self._orb_slot, self._orb_slot_lay, orb)
+    self._orb_slot.show()
+    self._mounted_orb = orb
+
+  def unmount_orb(self, orb: IrisOrbWidget) -> None:
+    unmount_orb(self._orb_slot_lay, orb)
+    self._orb_slot.setFixedHeight(0)
+    self._orb_slot.hide()
+    self._mounted_orb = None
+
+  @property
+  def orb(self) -> IrisOrbWidget | None:
+    return self._mounted_orb
 
   def place_status_strip(self, strip: QWidget) -> None:
-    """모델·상태·TTS 스트립을 구체 위에 배치."""
     while self._status_slot_lay.count():
       item = self._status_slot_lay.takeAt(0)
       if item.widget() is not None:
@@ -106,8 +122,10 @@ class IrisAssistantDock(QWidget):
     self._workspace_label.setText(text or "Workspace: —")
 
   def set_app_state(self, state: AppState) -> None:
-    self.orb.set_state(state)
+    if self._mounted_orb is not None:
+      self._mounted_orb.set_state(state)
 
   def set_mic_level(self, level: float) -> None:
-    self.orb.set_mic_level(level)
+    if self._mounted_orb is not None:
+      self._mounted_orb.set_mic_level(level)
     self.wave.set_level(level)

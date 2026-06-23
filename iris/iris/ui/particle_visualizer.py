@@ -79,6 +79,13 @@ _EDGE_PAD = 10.0
 _DEFAULT_CY_RATIO = 0.36
 _COMPACT_HEIGHT = 320
 _COMPACT_CY_RATIO = 0.52
+_ORB_RAW_R_RATIO = 0.18
+
+
+def orb_size_scale_for_square_fill(side: int) -> float:
+  """정사각 슬롯 변에 글로우 외곽이 맞닿도록 하는 size_scale."""
+  side = max(1, int(side))
+  return (side / 2 / _VISUAL_HALO_FACTOR) / (side * _ORB_RAW_R_RATIO)
 
 
 def _asset_path(relative_path: str) -> Path:
@@ -193,7 +200,7 @@ class ParticleVisualizer(QWidget):
 
     def _recompute_geometry(self) -> None:
         width, height = max(self.width(), 1), max(self.height(), 1)
-        raw_r = min(width, height) * 0.18 * self._size_scale
+        raw_r = min(width, height) * _ORB_RAW_R_RATIO * self._size_scale
         if self._custom_center is None:
             self._cx = width * 0.5
             fit_r = self._fit_core_radius(width, height)

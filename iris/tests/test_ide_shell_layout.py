@@ -47,7 +47,7 @@ def test_assistant_dock_uses_chrome_margins(qapp) -> None:
 def test_assistant_dock_sections_in_single_layout(qapp) -> None:
     dock = IrisAssistantDock()
     layout = dock.layout()
-    orb_idx = layout.indexOf(dock.orb)
+    orb_idx = layout.indexOf(dock._orb_slot)
     label_idx = layout.indexOf(dock._workspace_label)
     chat_idx = layout.indexOf(dock.chat)
     wave_idx = layout.indexOf(dock.wave)
@@ -55,11 +55,15 @@ def test_assistant_dock_sections_in_single_layout(qapp) -> None:
 
 
 def test_orb_fixed_height_in_assistant_dock(qapp) -> None:
+    from iris.ui.ide.iris_orb_widget import IrisOrbWidget
+
     dock = IrisAssistantDock()
-    assert dock.orb.height() == ASSISTANT_DOCK_ORB_HEIGHT
+    orb = IrisOrbWidget()
+    dock.mount_orb(orb)
+    assert orb.height() == ASSISTANT_DOCK_ORB_HEIGHT
     dock.resize(320, 400)
     qapp.processEvents()
-    assert dock.orb.height() == ASSISTANT_DOCK_ORB_HEIGHT
+    assert orb.height() == ASSISTANT_DOCK_ORB_HEIGHT
 
 
 def test_center_orb_hidden_in_editor_mode(qapp) -> None:

@@ -38,7 +38,10 @@ def _which(name: str) -> str | None:
 
 
 def _path_if_file(p: Path) -> str | None:
-    return str(p) if p.is_file() else None
+    try:
+        return str(p) if p.is_file() else None
+    except OSError:
+        return None
 
 
 def detect_app_paths() -> Dict[str, str]:

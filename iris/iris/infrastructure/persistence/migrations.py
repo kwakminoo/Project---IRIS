@@ -177,12 +177,63 @@ def _migration_005_plan_integrity(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_google_workspace_email(conn: sqlite3.Connection) -> None:
+    """Google Workspace 메일 연동: 원문은 저장하지 않고 계정/설정/감사 메타데이터만 저장."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS google_workspace_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_email TEXT NOT NULL,
+            google_email TEXT NOT NULL,
+            integration_name TEXT NOT NULL DEFAULT 'google_workspace',
+            credentials_ref TEXT NOT NULL DEFAULT '',
+            credentials_dir TEXT NOT NULL DEFAULT '',
+            enabled_services_json TEXT NOT NULL DEFAULT '["gmail"]',
+            tool_tier TEXT NOT NULL DEFAULT 'core',
+            is_verified INTEGER NOT NULL DEFAULT 0,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_google_workspace_email
+            ON google_workspace_accounts(google_email);
+        CREATE TABLE IF NOT EXISTS email_ui_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            google_account_id INTEGER NOT NULL,
+            default_label TEXT NOT NULL DEFAULT 'INBOX',
+            page_size INTEGER NOT NULL DEFAULT 30,
+            density TEXT NOT NULL DEFAULT 'comfortable',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (google_account_id) REFERENCES google_workspace_accounts(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_email_ui_preferences_account
+            ON email_ui_preferences(google_account_id);
+        CREATE TABLE IF NOT EXISTS email_action_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            google_account_id INTEGER,
+            action_type TEXT NOT NULL,
+            provider_message_id TEXT,
+            provider_draft_id TEXT,
+            target_hash TEXT,
+            status TEXT NOT NULL,
+            error_code TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (google_account_id) REFERENCES google_workspace_accounts(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_email_action_audit_account
+            ON email_action_audit_logs(google_account_id, created_at);
+        """
+    )
+
+
 MIGRATIONS: list[tuple[str, MigrationFn]] = [
     ("001_create_task_runtime", _migration_001_create_task_runtime),
     ("002_create_execution_records", _migration_002_create_execution_records),
     ("003_create_approval_records", _migration_003_create_approval_records),
     ("004_events_task_link", _migration_004_events_task_link),
     ("005_plan_integrity", _migration_005_plan_integrity),
+    ("006_google_workspace_email", _migration_006_google_workspace_email),
 ]
 
 

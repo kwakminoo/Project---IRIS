@@ -267,6 +267,25 @@ Important rules:
 - Use Korean comments for important logic.
   - 한국어: 중요한 로직은 한국어 주석으로 설명합니다.
 
+## Ponytail Development Mode / Ponytail 개발 모드
+
+Use Ponytail for Iris development.
+
+- English: Apply Ponytail's "lazy senior developer" rule to every Iris change: build the smallest correct implementation that satisfies the request.
+- 한국어: Iris 개발에는 Ponytail의 "효율적인 시니어 개발자" 규칙을 적용합니다. 요청을 만족하는 가장 작은 올바른 구현을 우선합니다.
+- English: Prefer no code, then Python standard library, then native Windows/platform features, then already-installed dependencies, before adding new code or dependencies.
+- 한국어: 새 코드를 쓰기 전에 무구현, Python 표준 라이브러리, Windows/플랫폼 기본 기능, 기존 의존성 순서로 먼저 검토합니다.
+- English: Do not add abstractions, frameworks, adapters, or broad refactors unless they are explicitly requested or clearly reduce real complexity in the current Iris architecture.
+- 한국어: 명시 요청이 없거나 현재 Iris 구조의 실제 복잡도를 줄이지 않는다면 추상화, 프레임워크, 어댑터, 대규모 리팩터링을 추가하지 않습니다.
+- English: Prefer deleting or simplifying code over adding code, while keeping Iris modules small and responsibilities separated.
+- 한국어: 코드를 추가하기보다 삭제와 단순화를 우선하되, Iris 모듈 분리와 책임 분리는 유지합니다.
+- English: Ponytail never overrides Iris safety rules, risk-based permission control, local-first design, privacy constraints, logging requirements, or fallback behavior.
+- 한국어: Ponytail은 Iris의 안전 규칙, 위험도 기반 권한 제어, 로컬 우선 설계, 개인정보 보호 제약, 로그 요구사항, 폴백 동작보다 우선하지 않습니다.
+- English: Mark intentional simplifications with a `ponytail:` comment when there is a known ceiling or future upgrade path.
+- 한국어: 의도적인 단순화에 한계나 향후 확장 경로가 있으면 `ponytail:` 주석으로 표시합니다.
+- English: Non-trivial logic should keep one small runnable check; use the existing Iris test commands before considering the work done.
+- 한국어: 사소하지 않은 로직에는 작은 실행 가능 검증을 남기고, 완료 전 기존 Iris 테스트 명령을 사용합니다.
+
 ## Testing Rule / 테스트 규칙
 
 Before considering an implementation complete, check:

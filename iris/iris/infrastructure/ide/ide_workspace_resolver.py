@@ -20,14 +20,15 @@ def _find_repo_root() -> Path:
 
 def resolve_ide_workspace(settings: Settings) -> Path:
   """
-  Settings.ide_workspace_path 우선, 없으면 저장소 루트.
-  존재·디렉터리·읽기 가능 검증.
+  Settings.ide_workspace_path 우선.
+  미설정 시 빈 startup workspace (~/.iris/ide-empty-workspace) — 프로젝트 폴더 자동 미오픈.
   """
   raw = (settings.ide_workspace_path or "").strip()
   if raw:
     path = Path(raw).expanduser().resolve()
   else:
-    path = _find_repo_root().resolve()
+    path = (Path.home() / ".iris" / "ide-empty-workspace").resolve()
+    path.mkdir(parents=True, exist_ok=True)
   if not path.exists():
     raise FileNotFoundError(f"IDE workspace 경로가 없습니다: {path}")
   if not path.is_dir():

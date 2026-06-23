@@ -191,6 +191,24 @@ def build_cyberspace_qss() -> str:
             border-color: {t.neon_cyan};
             color: {t.neon_cyan};
         }}
+        QPushButton#HudIconButton {{
+            background: transparent;
+            border: 1px solid {t.border_color};
+            border-radius: 3px;
+            padding: 0;
+            min-width: 40px;
+            max-width: 40px;
+            min-height: 40px;
+            max-height: 40px;
+        }}
+        QPushButton#HudIconButton:hover {{
+            background: {t.accent_primary};
+            border-color: {t.neon_cyan};
+        }}
+        QPushButton#HudIconButton[active="true"] {{
+            background: rgba(37, 99, 235, 0.35);
+            border-color: {t.neon_cyan};
+        }}
         QPushButton#IdeActivityBackButton {{
             background: transparent;
             border: none;
@@ -205,7 +223,12 @@ def build_cyberspace_qss() -> str:
             color: {t.neon_cyan};
         }}
         QPushButton#IdeActivityBackButton:pressed {{
-            background: rgba(37, 99, 235, 0.28);
+            background: rgba(37, 99, 235, 0.32);
+            color: {t.neon_cyan};
+        }}
+        QPushButton#IdeActivityBackButton:focus {{
+            border: 1px solid {t.neon_cyan};
+            background: rgba(37, 99, 235, 0.12);
             color: {t.neon_cyan};
         }}
         QProgressBar#HudMetricBar {{

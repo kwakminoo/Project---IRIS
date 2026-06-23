@@ -435,12 +435,23 @@ class EmbeddedTheiaView(QWidget):
     if self._loading_label is not None:
       self._loading_label.setText(message)
     if self._loading_overlay is not None:
+      # 로딩 중에만 입력 차단 — READY 이후 hide로 Theia 클릭 복원
+      self._loading_overlay.setAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+        False,
+      )
       self._loading_overlay.show()
       self._loading_overlay.raise_()
 
   def _hide_loading_overlay(self) -> None:
     if self._loading_overlay is not None:
       self._loading_overlay.hide()
+
+  def is_loading_overlay_visible(self) -> bool:
+    """단위 테스트·디버그용 — READY 이후 False 여야 함."""
+    if self._loading_overlay is None:
+      return False
+    return self._loading_overlay.isVisible()
 
   def set_starting(self, message: str = "Iris IDE를 준비하고 있습니다…") -> None:
     """Backend 시작·Preflight 단계 — Placeholder 또는 오버레이."""

@@ -66,6 +66,7 @@ from iris.ui.frameless_chrome import FramelessShell, center_on_screen, suppress_
 from iris.ui.live_activity_panel import LiveActivityPanel, UiActivityRelay
 from iris.ui.notification_panel import NotificationPanel
 from iris.ui.settings_dialog import SettingsDialog
+from iris.ui.user_profile_dialog import UserProfileDialog
 from iris.ui.bridge_signals import UiBridge
 from iris.ui.visualizer import Visualizer
 from iris.ui.unified_monitor_panel import UnifiedMonitorPanel
@@ -87,6 +88,7 @@ from iris.ui.cyberspace_background import CyberspaceBackground
 from iris.ui.cyberspace_theme import apply_cyberspace_theme
 from iris.ui.theme_tokens import TOKENS
 from iris.ui.left_sidebar_panel import LeftSidebarPanel
+from iris.ui.email_window import EmailWindow
 from iris.ui.top_status_header import TopStatusHeader
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
@@ -103,11 +105,16 @@ class MainWindow(QMainWindow):
 
         self._env_path = Path(__file__).resolve().parent.parent.parent / ".env"
         self._settings = load_settings(self._env_path)
-        self._db = Database()
+        if self._test_mode:
+            test_db_dir = Path.cwd() / ".iris_test_tmp"
+            test_db_dir.mkdir(parents=True, exist_ok=True)
+            self._db = Database(test_db_dir / "main_window_test.db")
+        else:
+            self._db = Database()
         self._targets = TargetRegistry(self._db)
         self._term_log = TerminalLogRegistry()
         self._browser = BrowserTabMonitor()
-        self._app_paths = build_merged_app_paths(self._db)
+        self._app_paths = {} if self._test_mode else build_merged_app_paths(self._db)
         self._executor = ActionExecutor(
             self._db,
             self._app_paths,
@@ -194,6 +201,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(TOKENS.spacing_sm)
 
         self._drag = DragTab(self)
+        self._drag.profile_clicked.connect(self._open_user_profile_dialog)
         self._drag.settings_clicked.connect(self._open_settings_dialog)
         self._drag.minimize_clicked.connect(self.showMinimized)
         self._drag.maximize_clicked.connect(self._toggle_maximize)
@@ -227,9 +235,11 @@ class MainWindow(QMainWindow):
 
         self._assistant_page = AssistantWorkspacePage()
         self._ide_page = IdeWorkspacePage()
+        self._email_page = EmailWindow(self._db)
         self._workspace_stack = QStackedWidget()
         self._workspace_stack.addWidget(self._assistant_page)
         self._workspace_stack.addWidget(self._ide_page)
+        self._workspace_stack.addWidget(self._email_page)
         splitter.addWidget(self._workspace_stack)
 
         left_lay = self._assistant_page.center_layout
@@ -300,14 +310,25 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setCollapsible(0, False)
 
-        self._left_sidebar.utility.actions.add_action(
+        actions = self._left_sidebar.utility.actions
+        actions.add_icon_action(
             action_id="ide",
-            title="IDE",
+            icon_kind="ide",
             tooltip="Iris IDE 작업공간으로 전환",
             callback=self._on_ide_toggle,
         )
+        for action_id, icon_kind, tooltip in (
+            ("email", "email", "이메일"),
+            ("instagram", "instagram", "Instagram"),
+            ("discord", "discord", "Discord"),
+            ("kakao", "kakao", "카카오톡"),
+            ("telegram", "telegram", "텔레그램"),
+        ):
+            callback = self.switch_to_email_workspace if action_id == "email" else None
+            actions.add_icon_action(action_id=action_id, icon_kind=icon_kind, tooltip=tooltip, callback=callback)
         self._ide_page.theia_retry.connect(lambda: self._start_ide_backend_and_load(force_reload=True))
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
+        self._email_page.back_requested.connect(self.switch_to_assistant_workspace)
         self._ide_page.theia_view_log.connect(self._show_ide_log)
         self._ide_page.theia.diagnose_requested.connect(self._run_ide_diagnose)
         self._ide_page.theia.recover_env_requested.connect(self._run_ide_env_recovery)
@@ -542,6 +563,10 @@ class MainWindow(QMainWindow):
             f"마이크={self._settings.always_listen_input_device}, "
             f"LLM 추론={think_label}"
         )
+
+    def _open_user_profile_dialog(self) -> None:
+        dlg = UserProfileDialog(self._db, self)
+        dlg.exec()
 
     def _open_settings_dialog(self) -> None:
         # 설정창 마이크 미리보기와 상시 듣기가 동시에 같은 장치를 잡지 않도록
@@ -1334,7 +1359,8 @@ class MainWindow(QMainWindow):
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
             return
-        self._ide_splitter_state = self._ide_page.save_splitter_state()
+        if self._workspace_mode == "ide":
+            self._ide_splitter_state = self._ide_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._assistant_page)
         self._workspace_mode = "assistant"
         self._ensure_status_in_title_bar()
@@ -1342,10 +1368,10 @@ class MainWindow(QMainWindow):
         self._viz.set_orb_anchor(self._orb_spacer)
         self._left_sidebar.utility.actions.update_action(
             "ide",
-            title="IDE",
             tooltip="Iris IDE 작업공간으로 전환",
         )
         self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._left_sidebar.utility.actions.set_action_active("email", False)
         self._left_sidebar.utility.actions.set_action_visible("ide", True)
         self._left_sidebar.set_workspace_mode("assistant")
         self._apply_ui_overlay_margins("assistant")
@@ -1358,7 +1384,8 @@ class MainWindow(QMainWindow):
     def switch_to_ide_workspace(self) -> None:
         if self._workspace_mode == "ide":
             return
-        self._assistant_splitter_state = self._assistant_page.save_splitter_state()
+        if self._workspace_mode == "assistant":
+            self._assistant_splitter_state = self._assistant_page.save_splitter_state()
         self._workspace_stack.setCurrentWidget(self._ide_page)
         self._workspace_mode = "ide"
         self._ensure_status_in_title_bar()
@@ -1370,12 +1397,34 @@ class MainWindow(QMainWindow):
         total = max(sum(sizes), self.width())
         self._workspace_splitter.setSizes([0, total])
         self._left_sidebar.set_workspace_mode("ide")
+        self._left_sidebar.utility.actions.set_action_active("email", False)
         self._apply_ui_overlay_margins("ide")
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
         self._ide_page.show_empty_home()
         ctx = self._ide_bridge.get_context()
         summary = ctx.summary_line()
         self._ide_page.set_workspace_label(summary)
+        self._metrics_worker.set_active(True)
+
+    def switch_to_email_workspace(self) -> None:
+        if self._workspace_mode == "email":
+            return
+        if self._workspace_mode == "assistant":
+            self._assistant_splitter_state = self._assistant_page.save_splitter_state()
+        elif self._workspace_mode == "ide":
+            self._ide_splitter_state = self._ide_page.save_splitter_state()
+        self._workspace_stack.setCurrentWidget(self._email_page)
+        self._workspace_mode = "email"
+        self._ensure_status_in_title_bar()
+        self._viz.setVisible(False)
+        self._viz.set_orb_anchor(None)
+        self._left_sidebar.set_workspace_mode("assistant")
+        self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._left_sidebar.utility.actions.set_action_active("email", True)
+        self._apply_ui_overlay_margins("assistant")
+        total = max(sum(self._workspace_splitter.sizes()), self.width())
+        self._workspace_splitter.setSizes([self._sidebar_split_size, max(0, total - self._sidebar_split_size)])
+        self._email_page.refresh()
         self._metrics_worker.set_active(True)
 
     def _on_ide_toggle(self) -> None:

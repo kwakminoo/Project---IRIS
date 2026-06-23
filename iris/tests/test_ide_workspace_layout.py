@@ -71,7 +71,7 @@ def test_ide_page_empty_home_visible_by_default(qapp) -> None:
     qapp.processEvents()
     assert page.empty_home.isVisible()
     assert page.coding_panel.isVisible()
-    assert page.coding_panel.orb.isVisible()
+    assert page.iris_orb.parent() is page.empty_home._orb_slot
 
 
 def test_ide_page_editor_state_switches_layout(qapp) -> None:
@@ -84,14 +84,18 @@ def test_ide_page_editor_state_switches_layout(qapp) -> None:
     assert page.has_open_editor is True
     assert not page.empty_home.isVisible()
     assert page.coding_panel.isVisible()
-    assert page.coding_panel.orb.isVisible()
+    assert page.coding_panel.orb is page.iris_orb
 
     page.set_editor_state(False)
     qapp.processEvents()
     assert not page.has_open_editor
+    assert not page.empty_home.isVisible()
+    assert page.coding_panel.orb is page.iris_orb
+
+    page.show_empty_home()
+    qapp.processEvents()
     assert page.empty_home.isVisible()
-    assert page.coding_panel.isVisible()
-    assert page.coding_panel.orb.isVisible()
+    assert page.iris_orb.parent() is page.empty_home._orb_slot
 
 
 def test_ide_page_active_chat_uses_assistant_dock(qapp) -> None:

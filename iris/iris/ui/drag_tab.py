@@ -29,6 +29,7 @@ def _win_ctrl_button(text: str, tooltip: str) -> QPushButton:
 class DragTab(QWidget):
     """Frameless title bar with drag handling and window controls."""
 
+    profile_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
     minimize_clicked = pyqtSignal()
     maximize_clicked = pyqtSignal()
@@ -76,12 +77,13 @@ class DragTab(QWidget):
         ctrl_row.setSpacing(4)
         ctrl_row.setSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
 
+        self._btn_profile = _win_ctrl_button("👤", "사용자 프로필")
         self._btn_settings = _win_ctrl_button("⚙", "설정")
         self._btn_min = _win_ctrl_button("−", "창 내리기")
         self._btn_max = _win_ctrl_button("□", "전체 화면")
         self._btn_close = _win_ctrl_button("×", "닫기")
 
-        for btn in (self._btn_settings, self._btn_min, self._btn_max, self._btn_close):
+        for btn in (self._btn_profile, self._btn_settings, self._btn_min, self._btn_max, self._btn_close):
             ctrl_row.addWidget(btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         lay.addLayout(ctrl_row)
@@ -89,6 +91,7 @@ class DragTab(QWidget):
         self._btn_min.clicked.connect(self.minimize_clicked.emit)
         self._btn_max.clicked.connect(self.maximize_clicked.emit)
         self._btn_close.clicked.connect(parent_window.close)
+        self._btn_profile.clicked.connect(self.profile_clicked.emit)
         self._btn_settings.clicked.connect(self.settings_clicked.emit)
         self._drag_pos = None
 
