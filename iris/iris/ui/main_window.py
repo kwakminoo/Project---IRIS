@@ -13,6 +13,7 @@ from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -80,6 +81,10 @@ from iris.infrastructure.ide.ide_bridge_client import IdeBridgeClient
 from iris.infrastructure.ide.ide_env_recovery import recover_webengine
 from iris.infrastructure.ide.ide_preflight import format_preflight_error, run_ide_preflight
 from iris.infrastructure.ide.ide_workspace_resolver import _find_repo_root, resolve_ide_workspace
+from iris.infrastructure.mobile.android_emulator_manager import EmulatorResult
+from iris.infrastructure.mobile.android_sdk_installer import AndroidSdkInstallerProtocol
+from iris.infrastructure.mobile.android_sdk_locator import AndroidSdkLocator
+from iris.infrastructure.mobile.mobile_runtime_worker import MobileRuntimeWorker
 from iris.ui.ide.embedded_theia_view import TheiaViewState
 from iris.ui.ide.ide_bridge_relay import IdeBridgeRelay
 from iris.ui.ide.iris_webengine_page import tail_webengine_log
@@ -174,6 +179,7 @@ class MainWindow(QMainWindow):
         self._ide_backend = IdeBackendManager()
         self._ide_backend_thread: QThread | None = None
         self._ide_backend_worker: IdeBackendWorker | None = None
+        self._mobile_runtime_worker: MobileRuntimeWorker | None = None
         self._ide_bridge = IdeBridgeClient()
         self._ide_bridge.start()
         self._ide_bridge_relay = IdeBridgeRelay(self)
@@ -311,6 +317,7 @@ class MainWindow(QMainWindow):
         splitter.setCollapsible(0, False)
 
         actions = self._left_sidebar.utility.actions
+        actions.set_default_callback(self.switch_to_assistant_workspace)
         actions.add_icon_action(
             action_id="ide",
             icon_kind="ide",
@@ -319,12 +326,19 @@ class MainWindow(QMainWindow):
         )
         for action_id, icon_kind, tooltip in (
             ("email", "email", "이메일"),
+            ("mobile", "mobile", "Android Emulator 모바일 런타임 실행"),
             ("instagram", "instagram", "Instagram"),
             ("discord", "discord", "Discord"),
             ("kakao", "kakao", "카카오톡"),
             ("telegram", "telegram", "텔레그램"),
         ):
-            callback = self.switch_to_email_workspace if action_id == "email" else None
+            callback = (
+                self.switch_to_email_workspace
+                if action_id == "email"
+                else self._on_mobile_runtime_clicked
+                if action_id == "mobile"
+                else None
+            )
             actions.add_icon_action(action_id=action_id, icon_kind=icon_kind, tooltip=tooltip, callback=callback)
         self._ide_page.theia_retry.connect(lambda: self._start_ide_backend_and_load(force_reload=True))
         self._ide_page.theia_back.connect(self.switch_to_assistant_workspace)
@@ -1397,6 +1411,7 @@ class MainWindow(QMainWindow):
         total = max(sum(sizes), self.width())
         self._workspace_splitter.setSizes([0, total])
         self._left_sidebar.set_workspace_mode("ide")
+        self._left_sidebar.utility.actions.set_action_active("ide", True)
         self._left_sidebar.utility.actions.set_action_active("email", False)
         self._apply_ui_overlay_margins("ide")
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
@@ -1407,8 +1422,6 @@ class MainWindow(QMainWindow):
         self._metrics_worker.set_active(True)
 
     def switch_to_email_workspace(self) -> None:
-        if self._workspace_mode == "email":
-            return
         if self._workspace_mode == "assistant":
             self._assistant_splitter_state = self._assistant_page.save_splitter_state()
         elif self._workspace_mode == "ide":
@@ -1427,13 +1440,87 @@ class MainWindow(QMainWindow):
         self._email_page.refresh()
         self._metrics_worker.set_active(True)
 
-    def _on_ide_toggle(self) -> None:
-        if self._workspace_mode == "ide":
+    def _toggle_workspace_icon(self, mode: str, open_fn: Callable[[], None]) -> None:
+        """활성 워크스페이스 아이콘 재클릭 시 assistant(기본) 화면으로 복귀."""
+        if self._workspace_mode == mode:
             self.switch_to_assistant_workspace()
             return
+        open_fn()
+
+    def _on_ide_toggle(self) -> None:
         # 백엔드 준비/오류 UI를 보여주려면 성공 여부와 관계없이 IDE 페이지로 먼저 전환
+        self._toggle_workspace_icon("ide", self._open_ide_workspace)
+
+    def _open_ide_workspace(self) -> None:
         self.switch_to_ide_workspace()
         self._ensure_ide_visible()
+
+    def _on_mobile_runtime_clicked(self) -> None:
+        if self._mobile_runtime_worker is not None and self._mobile_runtime_worker.isRunning():
+            self._notes.add_note("Android 모바일 런타임 확인이 이미 진행 중입니다.")
+            return
+
+        status = AndroidSdkLocator().locate()
+        if status.is_ready:
+            self._start_mobile_runtime_worker(install_if_missing=False)
+            return
+
+        protocol = AndroidSdkInstallerProtocol()
+        preview = protocol.build_preview(status)
+        missing = "\n".join(f"- {item}" for item in status.missing_components)
+        message = (
+            "Android 모바일 런타임 필수 패키지가 설치되어 있지 않습니다.\n\n"
+            "필요 항목:\n"
+            f"{missing}\n\n"
+            "설치 프로토콜을 실행하면 IRIS_Mobile_Play AVD를 생성하고 부팅 테스트까지 진행합니다.\n\n"
+            "설치 명령 미리보기:\n"
+            f"{AndroidSdkInstallerProtocol.powershell_preview(preview)}\n\n"
+            "설치 프로토콜을 실행하시겠습니까?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Android 모바일 런타임",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._notes.add_note("Android 모바일 런타임 설치 프로토콜을 취소했습니다.")
+            return
+        self._start_mobile_runtime_worker(install_if_missing=True)
+
+    def _start_mobile_runtime_worker(self, *, install_if_missing: bool) -> None:
+        self._notes.add_note("Android 모바일 런타임을 확인하는 중입니다.")
+        self._mobile_runtime_worker = MobileRuntimeWorker(install_if_missing=install_if_missing, parent=self)
+        self._mobile_runtime_worker.finished_result.connect(self._on_mobile_runtime_result)
+        self._mobile_runtime_worker.finished.connect(self._mobile_runtime_worker.deleteLater)
+        self._mobile_runtime_worker.start()
+
+    @pyqtSlot(object)
+    def _on_mobile_runtime_result(self, result: object) -> None:
+        if isinstance(result, EmulatorResult):
+            if result.ready:
+                suffix = f" ({result.serial})" if result.serial else ""
+                self._notes.add_note(f"IRIS mobile runtime ready{suffix}")
+                push_activity_line("IRIS mobile runtime ready")
+                return
+            detail = result.error_message or ", ".join(result.missing_components) or "상태 확인 실패"
+            self._notes.add_note(f"Android 모바일 런타임 상태: {result.status} - {detail}")
+            return
+
+        if isinstance(result, dict):
+            status = str(result.get("status") or "failed")
+            missing_items = result.get("missing") or []
+            missing = "\n".join(f"- {item}" for item in missing_items)
+            preview = str(result.get("preview") or "")
+            error = str(result.get("error") or "")
+            message = f"Android 모바일 런타임 상태: {status}"
+            if missing:
+                message += f"\n필수 패키지가 설치되어 있지 않습니다:\n{missing}"
+            if error:
+                message += f"\n오류: {error}"
+            if preview:
+                message += f"\n\n설치/검증 명령:\n{preview}"
+            self._notes.add_note(message)
 
     def _ensure_ide_visible(self) -> None:
         """IDE 진입 — READY면 즉시 WebView 복원, 아니면 Backend+Frontend 로드."""

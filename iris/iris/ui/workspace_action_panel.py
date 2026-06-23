@@ -44,6 +44,18 @@ class WorkspaceActionPanel(QWidget):
         self._buttons: dict[str, QPushButton] = {}
         self._actions: dict[str, WorkspaceAction] = {}
         self._slot = 0
+        self._default_callback: Callable[[], None] | None = None
+
+    def set_default_callback(self, callback: Callable[[], None] | None) -> None:
+        """선택된 아이콘 재클릭 시 호출 — 보통 assistant 기본 화면 복귀."""
+        self._default_callback = callback
+
+    def _invoke_icon_action(self, action_id: str, callback: Callable[[], None]) -> None:
+        btn = self._buttons.get(action_id)
+        if btn is not None and btn.property("active") is True and self._default_callback is not None:
+            self._default_callback()
+            return
+        callback()
 
     def add_icon_action(
         self,
@@ -69,7 +81,9 @@ class WorkspaceActionPanel(QWidget):
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         if callback is not None:
-            btn.clicked.connect(callback)
+            btn.clicked.connect(
+                lambda _checked=False, aid=action_id, cb=callback: self._invoke_icon_action(aid, cb)
+            )
 
         row, col = divmod(self._slot, self._GRID_COLS)
         self._slot += 1

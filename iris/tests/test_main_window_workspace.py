@@ -9,6 +9,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtWidgets import QApplication, QStackedWidget
 
 from iris.ui.left_sidebar_panel import LeftSidebarPanel
+from iris.ui.workspace_action_panel import WorkspaceActionPanel
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
 
@@ -37,6 +38,25 @@ def test_left_sidebar_contains_window_list_and_metrics(qapp) -> None:
     assert sidebar.window_list is not None
     assert sidebar.utility.metrics is not None
     assert sidebar.utility.actions is not None
+
+
+def test_workspace_icon_reclick_returns_to_default(qapp) -> None:
+    assistant_hits: list[str] = []
+    email_hits: list[str] = []
+    panel = WorkspaceActionPanel()
+    panel.set_default_callback(lambda: assistant_hits.append("assistant"))
+    panel.add_icon_action(
+        action_id="email",
+        icon_kind="email",
+        tooltip="email",
+        callback=lambda: email_hits.append("email"),
+    )
+    panel._buttons["email"].click()  # noqa: SLF001
+    assert email_hits == ["email"]
+    panel.set_action_active("email", True)
+    panel._buttons["email"].click()  # noqa: SLF001
+    assert assistant_hits == ["assistant"]
+    assert email_hits == ["email"]
 
 
 def test_assistant_page_preserves_splitter_state(qapp) -> None:

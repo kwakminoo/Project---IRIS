@@ -1,27 +1,29 @@
-"""시스템 CPU·GPU·메모리 — HUD 스타일 표시."""
+"""HUD system metrics panel."""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
+from iris.system.metrics_snapshot import MetricsSnapshot
 from iris.ui.glass_panel import wrap_glass_panel
 from iris.ui.section_header import apply_section_panel_layout, make_section_header
-from iris.system.metrics_snapshot import MetricsSnapshot
 from iris.ui.theme_tokens import TOKENS
 
-_MIN_BAR_VALUE = 2  # 0%일 때도 트랙이 보이도록
+_MIN_BAR_VALUE = 2
+_METRIC_ROW_GAP_PX = 3
+_METRIC_LABEL_BAR_GAP_PX = 3
 
 
 class _MetricRow(QWidget):
-    """라벨 + 퍼센트 + progress bar."""
+    """Metric label, value, and progress bar."""
 
     def __init__(self, name: str, fill_color: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("HudMetricRow")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, TOKENS.spacing_sm)
-        lay.setSpacing(TOKENS.spacing_xs)
+        lay.setContentsMargins(0, 0, 0, _METRIC_ROW_GAP_PX)
+        lay.setSpacing(_METRIC_LABEL_BAR_GAP_PX)
 
         header = QHBoxLayout()
         self._name = QLabel(name)
@@ -55,7 +57,6 @@ class _MetricRow(QWidget):
             """
         )
         lay.addWidget(self._bar)
-        self._fill_color = fill_color
 
     def apply(self, percent: float | None, *, label: str | None = None) -> None:
         if label is not None:
@@ -66,12 +67,11 @@ class _MetricRow(QWidget):
             return
         pct = max(0.0, min(100.0, float(percent)))
         self._value.setText(f"{pct:.0f}%")
-        bar_val = max(_MIN_BAR_VALUE, int(round(pct))) if pct > 0 else _MIN_BAR_VALUE
-        self._bar.setValue(bar_val)
+        self._bar.setValue(max(_MIN_BAR_VALUE, int(round(pct))) if pct > 0 else _MIN_BAR_VALUE)
 
 
 class SystemMetricsPanel(QWidget):
-    """실시간 시스템 리소스 — 얇은 HUD 메트릭 바."""
+    """Realtime CPU/GPU/memory HUD metrics."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,9 +82,8 @@ class SystemMetricsPanel(QWidget):
         inner.setObjectName("SystemMetricsPanelInner")
         lay = QVBoxLayout(inner)
         apply_section_panel_layout(lay)
-        lay.addWidget(
-            make_section_header("SYSTEM METRICS", title_object_name="SidebarTitle")
-        )
+        lay.setSpacing(_METRIC_ROW_GAP_PX)
+        lay.addWidget(make_section_header("SYSTEM METRICS", title_object_name="SidebarTitle"))
 
         self._cpu = _MetricRow("CPU", TOKENS.metric_fill_cpu)
         self._gpu = _MetricRow("GPU", TOKENS.metric_fill_gpu)

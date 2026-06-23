@@ -103,6 +103,15 @@ def _paint_telegram(p: QPainter, active: bool) -> None:
     p.drawPath(path)
 
 
+def _paint_mobile(p: QPainter, active: bool) -> None:
+    pen = _stroke(active)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(7, 3, 8, 16, 2, 2)
+    p.drawLine(9, 6, 13, 6)
+    p.drawPoint(11, 17)
+
+
 _PAINTERS = {
     "ide": _paint_ide,
     "email": _paint_email,
@@ -110,6 +119,7 @@ _PAINTERS = {
     "discord": _paint_discord,
     "kakao": _paint_kakao,
     "telegram": _paint_telegram,
+    "mobile": _paint_mobile,
 }
 
 
