@@ -71,7 +71,7 @@ PowerShell에서 앱 루트(`iris` 폴더)로 이동한 뒤:
 .\install.ps1
 ```
 
-`.env.example`을 복사해 `.env`를 만들고 Ollama/LM Studio 주소와 모델명을 맞춥니다.
+`.env` 파일에서 Ollama/LM Studio 주소와 모델명을 맞춥니다. (없으면 `iris` 폴더에 `.env`를 새로 만드세요.)
 
 Chromium(Playwright):
 

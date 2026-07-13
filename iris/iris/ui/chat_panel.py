@@ -302,8 +302,8 @@ class ChatPanel(QWidget):
         self._log.setTextCursor(cursor)
         self._scroll_log_to_bottom()
 
-    def begin_stream_message(self, who: str) -> None:
-        """LLM 스트리밍 — 헤더만 표시, 본문은 버퍼에 쌓고 TTS 시작 시 타이핑."""
+    def begin_stream_message(self, who: str, *, speech_sync: bool = True) -> None:
+        """LLM 스트리밍 — speech_sync면 TTS와 동기 타이핑, 아니면 청크 즉시 표시."""
         self.finish_typing()
         self._stream_active = True
         self._stream_who = who
@@ -318,19 +318,23 @@ class ChatPanel(QWidget):
         self._log.setTextCursor(cursor)
         self._typing_text = ""
         self._typing_index = 0
-        self._typing_speech_sync = True
+        self._typing_speech_sync = speech_sync
         self._typing_speech_duration_ms = None
         self._typing_speech_start = None
         self._typing_timer.stop()
         self._scroll_log_to_bottom()
 
     def append_stream_chunk(self, text: str) -> None:
-        """스트리밍 청크 — 화면이 아닌 타이핑 버퍼에만 누적."""
+        """스트리밍 청크 — speech_sync면 버퍼만, 아니면 누적 본문을 즉시 표시."""
         if not text:
             return
         if not self._stream_active:
-            self.begin_stream_message("Iris")
+            self.begin_stream_message("Iris", speech_sync=self._typing_speech_sync)
         self._append_typing_buffer(text)
+        if not self._typing_speech_sync:
+            self._typing_index = len(self._typing_text)
+            self._replace_typing_body()
+            self._scroll_log_to_bottom()
 
     def end_stream_message(self, final_text: str | None = None) -> None:
         """스트림 종료 — 정규화 본문으로 버퍼 확정 (화면 재삽입 없음)."""
@@ -344,6 +348,8 @@ class ChatPanel(QWidget):
         self._stream_active = False
         self._stream_block_start = None
         self._ensure_buffered_typing_fallback()
+        if not self._typing_speech_sync:
+            self.finish_typing()
         self._scroll_log_to_bottom(deferred=True)
 
     def append_message_typed(
