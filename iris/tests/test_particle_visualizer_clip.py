@@ -1,4 +1,4 @@
-"""ParticleVisualizer — 컴팩트 영역 상·하단 glow 클립 방지."""
+"""ParticleVisualizer — 컴팩트 영역에서 구체 외곽이 잘리지 않는지."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def qapp():
 
 
 def test_compact_orb_stays_inside_widget_bounds(qapp) -> None:
-    """Assistant Dock 크기에서 glow가 위·아래로 잘리지 않아야 한다."""
+    """Assistant Dock 크기에서 구체 외곽이 위·아래로 잘리지 않아야 한다."""
     viz = ParticleVisualizer()
     viz.set_size_scale(1.65)
     viz.resize(320, 264)

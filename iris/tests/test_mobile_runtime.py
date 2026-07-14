@@ -133,6 +133,36 @@ def test_emulator_manager_creates_missing_avd_before_launch(tmp_path: Path) -> N
     assert launched == [[str(root / "emulator" / "emulator.exe"), "-avd", "IRIS_Mobile_Play"]]
 
 
+def test_emulator_manager_falls_back_to_existing_avd(tmp_path: Path) -> None:
+    root = _mock_sdk(tmp_path / "Sdk")
+    locator = AndroidSdkLocator([root])
+    launched: list[list[str]] = []
+
+    def runner(command: list[str], timeout_sec: int) -> subprocess.CompletedProcess[str]:
+        text = " ".join(command)
+        if "-list-avds" in text:
+            return subprocess.CompletedProcess(command, 0, stdout="Medium_Phone_API_36.1\nPixel_9a\n", stderr="")
+        if "devices -l" in text:
+            stdout = "List of devices attached\n"
+            if launched:
+                stdout += "emulator-5554 device product:sdk model:Pixel_7\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if "wait-for-device" in text:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if "sys.boot_completed" in text:
+            return subprocess.CompletedProcess(command, 0, stdout="1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    manager = AndroidEmulatorManager(
+        locator,
+        runner=runner,
+        popen_factory=lambda command: launched.append(command),
+    )
+    result = manager.start_or_focus_default_avd(boot_timeout_sec=1)
+    assert result.status == "ready"
+    assert launched == [[str(root / "emulator" / "emulator.exe"), "-avd", "Medium_Phone_API_36.1"]]
+
+
 pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
@@ -171,10 +201,48 @@ def test_workspace_action_panel_accepts_mobile_action(qapp) -> None:
     panel.add_icon_action(
         action_id="mobile",
         icon_kind="mobile",
-        tooltip="Android Emulator 모바일 런타임 실행",
+        tooltip="Android 에뮬레이터 실행",
         callback=lambda: hits.append("mobile"),
     )
     assert "mobile" in panel._buttons  # noqa: SLF001
-    assert panel._buttons["mobile"].toolTip() == "Android Emulator 모바일 런타임 실행"  # noqa: SLF001
+    assert panel._buttons["mobile"].toolTip() == "Android 에뮬레이터 실행"  # noqa: SLF001
     panel._buttons["mobile"].click()  # noqa: SLF001
     assert hits == ["mobile"]
+
+
+def test_mobile_runtime_worker_finished_clears_alive_check(qapp) -> None:
+    """deleteLater 후에도 isRunning 조회가 RuntimeError로 앱을 죽이지 않아야 한다."""
+    from PyQt6 import sip
+    from PyQt6.QtCore import QTimer
+
+    from iris.infrastructure.mobile.mobile_runtime_worker import MobileRuntimeWorker
+
+    holder: dict[str, MobileRuntimeWorker | None] = {}
+
+    def is_running() -> bool:
+        worker = holder.get("w")
+        if worker is None:
+            return False
+        try:
+            if sip.isdeleted(worker):
+                holder["w"] = None
+                return False
+            return bool(worker.isRunning())
+        except RuntimeError:
+            holder["w"] = None
+            return False
+
+    w = MobileRuntimeWorker(install_if_missing=False)
+    holder["w"] = w
+
+    def after_delete() -> None:
+        assert is_running() is False
+        assert holder["w"] is None
+        assert is_running() is False
+        qapp.quit()
+
+    w.deleteLater()
+    QTimer.singleShot(0, after_delete)
+    QTimer.singleShot(2000, qapp.quit)
+    qapp.exec()
+    assert holder["w"] is None

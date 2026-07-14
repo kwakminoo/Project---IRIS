@@ -56,7 +56,7 @@ CRITICAL_RISK examples:
 
 ## 요구 사항
 
-- Python 3.11+
+- **Python 3.11 권장** (3.12도 CI에서 검증). 시스템 기본이 3.13이면 venv는 `py -3.11`로 만드세요.
 - **Primary supported development platform: Windows 11**
 - Required CI platform: Windows (`test / windows-py311`, `test / windows-py312`, `test / windows-integration`)
 - Linux CI: experimental / deferred — `linux-experimental.yml` 수동 실행
@@ -68,25 +68,51 @@ CRITICAL_RISK examples:
 PowerShell에서 앱 루트(`iris` 폴더)로 이동한 뒤:
 
 ```powershell
+cd iris
 .\install.ps1
 ```
+
+`install.ps1`은 가능하면 **Python 3.11**로 `.venv`를 만들고 `requirements.txt`를 설치합니다.
 
 `.env` 파일에서 Ollama/LM Studio 주소와 모델명을 맞춥니다. (없으면 `iris` 폴더에 `.env`를 새로 만드세요.)
 
 Chromium(Playwright):
 
 ```powershell
-python -m playwright install chromium
+.\.venv\Scripts\python.exe -m playwright install chromium
 ```
 
 ## 실행
 
+앱 폴더(`IRIS\iris`)에서:
+
 ```powershell
-cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\IRIS\iris"
+cd iris   # 저장소 루트(IRIS)에서 iris 앱 폴더로 이동
 .\.venv\Scripts\python.exe -m iris
 ```
 
 또는 `run.bat` 더블클릭.
+
+### 실행이 안 될 때
+
+`ImportError: DLL load failed while importing QtGui` / `QtCore` 가 나오면:
+
+1. **원인:** `.venv`의 PyQt6 Qt 바이너리(`PyQt6\Qt6`)가 빠졌거나, **Python 3.13 venv**·깨진 pip·OneDrive 불완전 동기화로 패키지가 손상된 경우가 많습니다.
+2. **복구 (권장):**
+
+```powershell
+cd iris
+# 깨진 venv 백업 후 3.11로 재생성
+Rename-Item .venv .venv.broken -ErrorAction SilentlyContinue
+py -3.11 -m venv .venv
+.\install.ps1
+.\.venv\Scripts\python.exe -m iris
+```
+
+3. 버전 확인: `.\.venv\Scripts\python.exe -c "import sys; print(sys.version)"` → `3.11.x` 인지 확인.
+
+OneDrive 동기화를 쓰지 않을 때는 저장소 루트에서 `.\scripts\ensure-local-project.ps1`로  
+`%USERPROFILE%\Projects\IRIS`에 로컬 미러를 만든 뒤, Cursor는 그 경로를 엽니다.
 
 ## Iris IDE (내장 Theia)
 

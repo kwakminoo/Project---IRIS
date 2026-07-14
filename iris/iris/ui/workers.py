@@ -183,3 +183,36 @@ class AgentWorker(QThread):
             push_activity_line(
                 "Worker: AgentWorker ended with empty user_visible (no emit)."
             )
+
+
+class KnowledgeSyncWorker(QThread):
+    """Knowledge Vault 동기화 — UI 블로킹 방지."""
+
+    finished_report = pyqtSignal(int, int)  # indexed, total_sources
+
+    def __init__(
+        self,
+        service: object,
+        *,
+        bootstrap: bool = False,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._service = service
+        self._bootstrap = bootstrap
+
+    def run(self) -> None:
+        push_activity_line("Worker: KnowledgeSyncWorker started.")
+        try:
+            if self._bootstrap:
+                report = self._service.ensure_iris_bootstrap()
+            else:
+                report = self._service.sync()
+            total = self._service.list_sources(limit=5000)
+            push_activity_line(
+                f"Worker: KnowledgeSyncWorker done indexed={report.indexed} total={len(total)}."
+            )
+            self.finished_report.emit(report.indexed, len(total))
+        except Exception as exc:
+            push_activity_line(f"Worker: KnowledgeSyncWorker failed: {exc!s}"[:120])
+            self.finished_report.emit(0, 0)

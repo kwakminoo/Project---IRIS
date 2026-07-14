@@ -62,7 +62,9 @@ class AndroidEmulatorManager:
         if running:
             return EmulatorResult("running", ready=True, serial=running)
         avds = self._list_avds(status)
-        if self._avd_name not in avds:
+        # 선호 AVD가 없으면 이미 있는 Play/일반 AVD를 먼저 쓴다 (신규 생성은 최후 수단).
+        avd_name = self._pick_avd_name(avds)
+        if avd_name is None:
             create_command = self.create_avd_command(status)
             create = self._runner(create_command, 300)
             if create.returncode != 0:
@@ -71,7 +73,8 @@ class AndroidEmulatorManager:
                     command_preview=tuple(create_command),
                     error_message=(create.stderr or create.stdout or f"AVD {self._avd_name} create failed")[:1000],
                 )
-        self._popen([str(status.emulator_path), "-avd", self._avd_name])
+            avd_name = self._avd_name
+        self._popen([str(status.emulator_path), "-avd", avd_name])
         wait = self._runner([str(status.adb_path), "wait-for-device"], boot_timeout_sec)
         if wait.returncode != 0:
             return EmulatorResult("failed", error_message=(wait.stderr or wait.stdout or "adb wait-for-device failed")[:1000])
@@ -81,6 +84,18 @@ class AndroidEmulatorManager:
         if not self._wait_for_boot(status, serial, boot_timeout_sec):
             return EmulatorResult("booting", serial=serial, error_message="sys.boot_completed timed out")
         return EmulatorResult("ready", ready=True, serial=serial)
+
+    def _pick_avd_name(self, avds: list[str]) -> str | None:
+        if self._avd_name in avds:
+            return self._avd_name
+        if not avds:
+            return None
+        # ponytail: Play 포함 AVD 우선 → 아니면 목록 첫 항목. 이미지 태그 조회는 생략.
+        for name in avds:
+            lowered = name.lower()
+            if "play" in lowered or "google" in lowered:
+                return name
+        return avds[0]
 
     def _list_avds(self, status: AndroidSdkStatus) -> list[str]:
         assert status.emulator_path

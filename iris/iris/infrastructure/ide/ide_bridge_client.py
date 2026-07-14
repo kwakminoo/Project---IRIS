@@ -114,6 +114,17 @@ class IdeBridgeClient:
       def log_message(self, format: str, *args: object) -> None:
         return
 
+      def _cors_headers(self) -> None:
+        # Theia(http://127.0.0.1:3100) → bridge 교차 출처 fetch 허용
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+      def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
+
       def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path not in {"/context", "/editor-state"}:
@@ -131,6 +142,7 @@ class IdeBridgeClient:
         else:
           client._apply_editor_state(data)
         self.send_response(200)
+        self._cors_headers()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
@@ -168,6 +180,7 @@ class IdeBridgeClient:
       def _json_response(self, obj: object) -> None:
         raw = json.dumps(obj).encode("utf-8")
         self.send_response(200)
+        self._cors_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()

@@ -1,4 +1,8 @@
 @echo off
 cd /d "%~dp0"
-python -m iris
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -m iris
+) else (
+  python -m iris
+)
 if errorlevel 1 pause

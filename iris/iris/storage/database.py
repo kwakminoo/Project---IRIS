@@ -220,7 +220,11 @@ class Database:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            # 이중 close / 종료 레이스에서 ProgrammingError 방지
+            try:
+                self._conn.close()
+            except sqlite3.ProgrammingError:
+                pass
 
     def insert_log(self, type_: str, message: str, result: str | None = None) -> None:
         ts = datetime.utcnow().isoformat()

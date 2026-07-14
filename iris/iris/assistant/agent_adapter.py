@@ -162,16 +162,28 @@ class IrisAssistant:
         *,
         history: Sequence[ChatMessage] | None = None,
         extra_context: str | None = None,
+        knowledge_context: str | None = None,
     ) -> list[ChatMessage]:
         """시스템 프롬프트가 포함된 LLM 메시지 조립 (Ollama 호출 전 단계)."""
         mem = self.memory.build_extra_context()
         hist = list(history) if history is not None else self.memory.short_term_history()
+        kctx = knowledge_context or self.consume_pending_knowledge_context()
         return build_messages(
             user_text,
             extra_context=extra_context,
             history=hist,
             memory_context=mem or None,
+            knowledge_context=kctx or None,
         )
+
+    def set_pending_knowledge_context(self, text: str) -> None:
+        """TurnCoordinator → UI 대화 스트리밍 전달용."""
+        self._pending_knowledge_context = (text or "").strip()
+
+    def consume_pending_knowledge_context(self) -> str:
+        raw = getattr(self, "_pending_knowledge_context", "")
+        self._pending_knowledge_context = ""
+        return str(raw).strip()
 
     def run_agent_loop(self, text: str, *, routed: CommandKind | None = None) -> str:
         """JSON 계획 → 도구 실행 → observation 요약 Agent loop."""

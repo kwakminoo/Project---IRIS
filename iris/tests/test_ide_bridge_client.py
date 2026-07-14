@@ -73,6 +73,41 @@ def test_bridge_http_get_context() -> None:
         client.stop()
 
 
+def test_bridge_cors_headers_on_commands() -> None:
+    """Theia origin에서 /commands fetch 시 CORS 헤더가 있어야 한다."""
+    import urllib.error
+
+    client = IdeBridgeClient()
+    client.start()
+    try:
+        req = urllib.request.Request(
+            f"{client.base_url}/commands",
+            headers={"Origin": "http://127.0.0.1:3100"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+            data = json.loads(resp.read().decode())
+        assert "commands" in data
+
+        opt = urllib.request.Request(
+            f"{client.base_url}/commands",
+            method="OPTIONS",
+            headers={
+                "Origin": "http://127.0.0.1:3100",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        try:
+            with urllib.request.urlopen(opt, timeout=2) as resp:
+                assert resp.status in (200, 204)
+                assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+        except urllib.error.HTTPError as exc:
+            # http.server may surface 204 oddly on some Python builds — headers still matter
+            assert exc.headers.get("Access-Control-Allow-Origin") == "*"
+    finally:
+        client.stop()
+
+
 def test_bridge_editor_state_get() -> None:
     client = IdeBridgeClient()
     client.start()

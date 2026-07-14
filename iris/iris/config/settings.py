@@ -201,6 +201,13 @@ class Settings:
     media_ranker_vision_model: str  # 비어 있으면 gemma_model_name
     # 내장 IDE — Theia workspace 루트 (비어 있으면 저장소 루트)
     ide_workspace_path: str
+    # Iris Wiki (로컬 Vault / Obsidian 호환)
+    wiki_enabled: bool
+    wiki_vault_path: str
+    wiki_max_chunks: int
+    wiki_max_context_chars: int
+    wiki_embed_enabled: bool
+    wiki_embed_model: str
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -357,6 +364,39 @@ def load_settings(env_path: Path | None = None) -> Settings:
             "IRIS_MEDIA_RANKER_VISION_MODEL", ""
         ).strip(),
         ide_workspace_path=os.getenv("IRIS_IDE_WORKSPACE_PATH", "").strip(),
+        # IRIS_WIKI_* 우선, 구 IRIS_KNOWLEDGE_* 호환
+        wiki_enabled=_env_bool(
+            "IRIS_WIKI_ENABLED",
+            _env_bool("IRIS_KNOWLEDGE_ENABLED", True),
+        ),
+        wiki_vault_path=(
+            os.getenv("IRIS_WIKI_VAULT_PATH")
+            or os.getenv("IRIS_KNOWLEDGE_VAULT_PATH")
+            or ""
+        ).strip(),
+        wiki_max_chunks=max(
+            1,
+            _env_int(
+                "IRIS_WIKI_MAX_CHUNKS",
+                _env_int("IRIS_KNOWLEDGE_MAX_CHUNKS", 6),
+            ),
+        ),
+        wiki_max_context_chars=max(
+            500,
+            _env_int(
+                "IRIS_WIKI_MAX_CONTEXT_CHARS",
+                _env_int("IRIS_KNOWLEDGE_MAX_CONTEXT_CHARS", 12000),
+            ),
+        ),
+        wiki_embed_enabled=_env_bool(
+            "IRIS_WIKI_EMBED_ENABLED",
+            _env_bool("IRIS_KNOWLEDGE_EMBED_ENABLED", False),
+        ),
+        wiki_embed_model=(
+            os.getenv("IRIS_WIKI_EMBED_MODEL")
+            or os.getenv("IRIS_KNOWLEDGE_EMBED_MODEL")
+            or "nomic-embed-text"
+        ).strip(),
     )
 
 

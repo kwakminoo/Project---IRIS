@@ -29,7 +29,6 @@ from iris.monitoring.target_hints import (
     build_perceive_monitor_hint_json,
     list_monitor_target_hints,
 )
-from iris.monitoring.vlm_adapter import StubVlmAdapter
 
 
 def read_screen_summary_text(settings: Settings) -> tuple[bool, str, str]:
@@ -525,6 +524,8 @@ class SendHotkeyTool(AutomationTool):
 
 
 def all_automation_tools() -> List[AutomationTool]:
+    from iris.automation.knowledge_tools import knowledge_automation_tools
+
     return [
         GetSystemInfoTool(),
         CallIntegrationTool(),
@@ -541,4 +542,4 @@ def all_automation_tools() -> List[AutomationTool]:
         UiaClickTool(),
         SendHotkeyTool(),
         RunShellTool(),
-    ]
+    ] + knowledge_automation_tools()

@@ -227,6 +227,133 @@ def _migration_006_google_workspace_email(conn: sqlite3.Connection) -> None:
     )
 
 
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in cols
+
+
+def _drop_knowledge_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS knowledge_chunks_fts;
+        DROP TABLE IF EXISTS knowledge_chunks;
+        DROP TABLE IF EXISTS knowledge_sources;
+        DROP TABLE IF EXISTS knowledge_source_roots;
+        """
+    )
+
+
+def _migration_007_create_knowledge_index(conn: sqlite3.Connection) -> None:
+    """Obsidian Vault + Iris Wiki FTS 인덱스."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_source_roots'"
+    ).fetchone()
+    if row is not None and not _table_has_column(conn, "knowledge_source_roots", "id"):
+        _drop_knowledge_tables(conn)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_source_roots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_path TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS knowledge_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_id INTEGER NOT NULL,
+            canonical_path TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'indexed',
+            content_hash TEXT NOT NULL DEFAULT '',
+            file_size INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (root_id) REFERENCES knowledge_source_roots(id)
+        );
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL DEFAULT 0,
+            heading TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (source_id) REFERENCES knowledge_sources(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_sources_root ON knowledge_sources(root_id);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source ON knowledge_chunks(source_id);
+        """
+    )
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
+                chunk_id UNINDEXED,
+                source_id UNINDEXED,
+                title,
+                path,
+                tags,
+                heading,
+                content,
+                tokenize='unicode61'
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _migration_008_knowledge_schema_repair(conn: sqlite3.Connection) -> None:
+    """이전 실험 스키마 잔존 시 knowledge 테이블 재생성."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_source_roots'"
+    ).fetchone()
+    if row is None:
+        _migration_007_create_knowledge_index(conn)
+        return
+    if not _table_has_column(conn, "knowledge_source_roots", "id"):
+        _drop_knowledge_tables(conn)
+        _migration_007_create_knowledge_index(conn)
+
+
+def _migration_009_knowledge_legacy_reset(conn: sqlite3.Connection) -> None:
+    """root_id PK 레거시 스키마 → id INTEGER PK 스키마로 교체."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_source_roots'"
+    ).fetchone()
+    if row is None:
+        return
+    if _table_has_column(conn, "knowledge_source_roots", "id"):
+        return
+    for name in (
+        "knowledge_chunks_fts",
+        "knowledge_chunks",
+        "knowledge_sources",
+        "knowledge_source_roots",
+        "knowledge_reference_profiles",
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {name}")
+    _migration_007_create_knowledge_index(conn)
+
+
+def _migration_010_knowledge_embedding_reference(conn: sqlite3.Connection) -> None:
+    """청크 임베딩 BLOB·레퍼런스 Style Packet 테이블."""
+    chunk_cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge_chunks)").fetchall()}
+    if chunk_cols and "embedding" not in chunk_cols:
+        conn.execute("ALTER TABLE knowledge_chunks ADD COLUMN embedding BLOB")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_reference_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL DEFAULT '',
+            style_packet TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+
 MIGRATIONS: list[tuple[str, MigrationFn]] = [
     ("001_create_task_runtime", _migration_001_create_task_runtime),
     ("002_create_execution_records", _migration_002_create_execution_records),
@@ -234,6 +361,10 @@ MIGRATIONS: list[tuple[str, MigrationFn]] = [
     ("004_events_task_link", _migration_004_events_task_link),
     ("005_plan_integrity", _migration_005_plan_integrity),
     ("006_google_workspace_email", _migration_006_google_workspace_email),
+    ("007_create_knowledge_index", _migration_007_create_knowledge_index),
+    ("008_knowledge_schema_repair", _migration_008_knowledge_schema_repair),
+    ("009_knowledge_legacy_reset", _migration_009_knowledge_legacy_reset),
+    ("010_knowledge_embedding_reference", _migration_010_knowledge_embedding_reference),
 ]
 
 

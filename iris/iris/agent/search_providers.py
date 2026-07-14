@@ -521,8 +521,37 @@ def _domains_from_hits(hits: Sequence[SearchHit]) -> set[str]:
     return domains
 
 
+# Open-Meteo / TMDB 등 전용 API — 웹 SERP 품질 게이트와 다른 완료 기준
+_TRUSTED_API_LABELS = frozenset({"open_meteo", "tmdb"})
+
+
+def is_trusted_api_research(hits: List[SearchHit]) -> bool:
+    """전용 API hit만으로 구성되고 오류가 없으면 True."""
+    if not hits:
+        return False
+    if any((h.source_label or "") in ("provider_error", "error") for h in hits):
+        return False
+    labels = {(h.source_label or "").strip() for h in hits}
+    labels.discard("")
+    return bool(labels) and labels <= _TRUSTED_API_LABELS
+
+
 def assess_research_quality(hits: List[SearchHit]) -> ResearchQuality:
     """P4 — 출처 수·도메인 다양성·스니펫 정보량으로 0~1 점수."""
+    # 전용 API는 웹 품질 게이트 생략 — 성공 hit면 good
+    if is_trusted_api_research(hits):
+        substantive = _substantive_hits(hits)
+        chars = sum(len((h.snippet or "").strip()) for h in substantive)
+        return ResearchQuality(
+            score=1.0,
+            tier="good",
+            source_count=len(substantive),
+            domain_count=len(_domains_from_hits(substantive)),
+            total_snippet_chars=chars,
+            has_provider_error=False,
+            reason_ko="",
+        )
+
     hard = _hard_failure_reason(hits)
     substantive = _substantive_hits(hits)
     has_err = any(h.source_label in ("provider_error", "error") for h in hits)

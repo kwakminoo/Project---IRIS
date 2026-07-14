@@ -12,68 +12,61 @@ from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGr
 from PyQt6.QtWidgets import QWidget
 
 # 상태별 시각 프로필 — 청색·시안 네온 계열
+# spin: 외곽 링 회전 배율 (동작 상태는 기존 fast의 30%)
 _STATE_PROFILES: dict[str, dict[str, float | tuple[int, int, int]]] = {
     "IDLE": {
         "pulse": 0.022,
-        "glow": 0.38,
-        "ring": 0.20,
         "speed": 0.65,
+        "spin": 2.8,
         "accent": (59, 130, 246),
     },
     "LISTENING": {
         "pulse": 0.065,
-        "glow": 0.62,
-        "ring": 0.44,
         "speed": 1.25,
+        "spin": 21.6,
         "accent": (34, 211, 238),
     },
     "PROCESSING": {
         "pulse": 0.048,
-        "glow": 0.74,
-        "ring": 0.58,
         "speed": 2.0,
+        "spin": 33.0,
         "accent": (96, 165, 250),
     },
     "EXECUTING": {
         "pulse": 0.080,
-        "glow": 0.82,
-        "ring": 0.70,
         "speed": 2.5,
+        "spin": 42.0,
         "accent": (56, 189, 248),
     },
     "RESPONDING": {
         "pulse": 0.070,
-        "glow": 0.68,
-        "ring": 0.48,
         "speed": 1.55,
+        "spin": 25.5,
         "accent": (34, 211, 238),
     },
     "MONITORING": {
         "pulse": 0.035,
-        "glow": 0.50,
-        "ring": 0.40,
         "speed": 0.95,
+        "spin": 2.4,
         "accent": (129, 140, 248),
     },
     "ALERTING": {
         "pulse": 0.100,
-        "glow": 0.90,
-        "ring": 0.85,
         "speed": 2.8,
+        "spin": 45.0,
         "accent": (251, 191, 36),
     },
     "ERROR": {
         "pulse": 0.075,
-        "glow": 0.76,
-        "ring": 0.65,
         "speed": 2.1,
+        "spin": 36.0,
         "accent": (248, 113, 113),
     },
 }
 
 _PARTICLE_COUNT = 52
 _CONNECT_DIST = 0.38
-# glow·링이 core_r보다 바깥으로 그려지는 최대 배율
+# 레이아웃 여유 — 이전 glow 기준과 동일한 크기 산정 (시각 glow는 미사용)
 _VISUAL_HALO_FACTOR = 2.05
 _EDGE_PAD = 10.0
 _DEFAULT_CY_RATIO = 0.36
@@ -83,7 +76,7 @@ _ORB_RAW_R_RATIO = 0.18
 
 
 def orb_size_scale_for_square_fill(side: int) -> float:
-  """정사각 슬롯 변에 글로우 외곽이 맞닿도록 하는 size_scale."""
+  """정사각 슬롯에 맞추는 size_scale (이전과 동일 산식)."""
   side = max(1, int(side))
   return (side / 2 / _VISUAL_HALO_FACTOR) / (side * _ORB_RAW_R_RATIO)
 
@@ -194,7 +187,7 @@ class ParticleVisualizer(QWidget):
         self._timer.stop()
 
     def _fit_core_radius(self, width: int, height: int) -> float:
-        """위젯 안에 glow가 잘리지 않도록 core_r 상한."""
+        """레이아웃 여유 박스(이전 glow 기준)가 잘리지 않도록 core_r 상한."""
         limit = min(width, height)
         return max(8.0, (limit - 2 * _EDGE_PAD) / (2 * _VISUAL_HALO_FACTOR))
 
@@ -248,9 +241,7 @@ class ParticleVisualizer(QWidget):
         synthetic_voice = self._synthetic_voice_level()
         energy = min(1.0, max(self._smooth_audio, synthetic_voice) + self._state_burst * 0.32)
 
-        self._draw_back_glow(painter, cx, cy, accent, energy)
-        self._draw_orbit_rings(painter, cx, cy, accent, energy)
-        self._draw_state_effects(painter, cx, cy, accent, energy)
+        # 구체 본체만 — 바깥 glow/링/파동 효과 없음
         self._draw_core_image(painter, cx, cy, energy)
         self._draw_front_sheen(painter, cx, cy, accent, energy)
 
@@ -338,117 +329,6 @@ class ParticleVisualizer(QWidget):
             return 0.50 + 0.25 * (0.5 + 0.5 * math.sin(self._t * 10.0))
         return 0.0
 
-    def _draw_back_glow(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        glow = float(self._profile()["glow"])
-        radius = self._core_r * (1.65 + energy * 0.35)
-        gradient = QRadialGradient(cx, cy, radius)
-        gradient.setColorAt(0.0, QColor(accent[0], accent[1], accent[2], int(65 + glow * 50)))
-        gradient.setColorAt(0.35, QColor(37, 99, 235, int(28 + 42 * energy)))
-        gradient.setColorAt(0.65, QColor(13, 40, 71, int(12 + 20 * energy)))
-        gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.fillRect(QRectF(cx - radius, cy - radius, radius * 2, radius * 2), gradient)
-
-    def _draw_orbit_rings(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        painter.save()
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-        ring_strength = float(self._profile()["ring"])
-        for idx, scale in enumerate((0.88, 1.08, 1.28)):
-            wobble = 1.0 + math.sin(self._t * (1.0 + idx * 0.22) + idx) * 0.015
-            radius = self._core_r * scale * wobble * (1.0 + self._state_burst * 0.10)
-            alpha = int((18 + 28 * energy) * ring_strength / (idx + 1))
-            pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-            pen.setWidthF(0.7 + energy * 0.5)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
-        painter.restore()
-
-    def _draw_state_effects(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        painter.save()
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-
-        if self._state_name in {"PROCESSING", "EXECUTING", "ALERTING"}:
-            self._draw_rotating_arcs(painter, cx, cy, accent, energy)
-        if self._state_name in {"LISTENING", "RESPONDING"}:
-            self._draw_voice_ripples(painter, cx, cy, accent, energy)
-        if self._state_burst > 0.02:
-            self._draw_state_burst(painter, cx, cy, accent)
-
-        painter.restore()
-
-    def _draw_rotating_arcs(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        for idx, radius_scale in enumerate((1.04, 1.20)):
-            radius = self._core_r * radius_scale
-            pen = QPen(QColor(accent[0], accent[1], accent[2], int(55 + energy * 75)))
-            pen.setWidthF(1.2 + idx * 0.4)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
-            start = int((self._t * (130 + idx * 70) + idx * 120) * 16)
-            span = int((52 + energy * 38) * 16)
-            painter.drawArc(rect, start, span)
-            painter.drawArc(rect, start + int(180 * 16), int(span * 0.5))
-
-    def _draw_voice_ripples(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-        energy: float,
-    ) -> None:
-        for idx in range(3):
-            phase = (self._t * 0.75 + idx / 3) % 1.0
-            radius = self._core_r * (0.78 + phase * 0.58)
-            alpha = int((1.0 - phase) * (32 + 70 * energy))
-            pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-            pen.setWidthF(0.9 + energy * 1.0)
-            painter.setPen(pen)
-            painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
-
-    def _draw_state_burst(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        accent: tuple[int, int, int],
-    ) -> None:
-        phase = 1.0 - self._state_burst
-        radius = self._core_r * (0.80 + phase * 0.68)
-        alpha = int(self._state_burst * 130)
-        pen = QPen(QColor(accent[0], accent[1], accent[2], alpha))
-        pen.setWidthF(1.8)
-        painter.setPen(pen)
-        painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
-
     def _draw_core_image(self, painter: QPainter, cx: float, cy: float, energy: float) -> None:
         if self._core_image.isNull():
             self._draw_procedural_core(painter, cx, cy, energy)
@@ -473,7 +353,8 @@ class ParticleVisualizer(QWidget):
         inner_rect = QRectF(cx - inner_side / 2, cy - inner_side / 2, inner_side, inner_side)
         inner_clip = QPainterPath()
         inner_clip.addEllipse(inner_rect)
-        rotation = self._t * 2.8
+        # 동작 중 spin 배율 ↑ → 외곽 링이 빠르게 회전
+        rotation = self._t * float(self._profile()["spin"])
 
         painter.save()
         painter.setOpacity(0.50 + min(0.22, energy * 0.20))

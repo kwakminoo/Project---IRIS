@@ -1,0 +1,29 @@
+"""Knowledge 저장소 Protocol."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from iris.domain.knowledge.models import KnowledgeChunk, KnowledgeSearchHit, KnowledgeSource
+
+
+class KnowledgeIndexRepository(Protocol):
+    """SQLite FTS 인덱스 접근."""
+
+    def register_root(self, canonical_path: str) -> int: ...
+
+    def list_roots(self) -> list[tuple[int, str]]: ...
+
+    def upsert_source(self, source: KnowledgeSource) -> int: ...
+
+    def get_source_by_path(self, canonical_path: str) -> KnowledgeSource | None: ...
+
+    def list_sources(self, *, limit: int = 500) -> list[KnowledgeSource]: ...
+
+    def replace_chunks(self, source_id: int, chunks: list[KnowledgeChunk]) -> None: ...
+
+    def mark_missing(self, source_id: int) -> None: ...
+
+    def search(self, query: str, *, limit: int = 12) -> list[KnowledgeSearchHit]: ...
+
+    def status_counts(self) -> dict[str, int]: ...

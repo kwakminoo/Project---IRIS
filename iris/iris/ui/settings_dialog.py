@@ -39,6 +39,7 @@ from iris.monitoring.browser_tab_monitor import BrowserTabMonitor
 from iris.ui.app_launcher_panel import AppLauncherPanel
 from iris.ui.integrations_panel import IntegrationsPanel
 from iris.ui.chrome_extension_panel import ChromeExtensionPanel
+from iris.ui.iris_wiki_settings_panel import IrisWikiSettingsPanel
 from iris.ui.mic_level_gauge import MicLevelGaugeWidget
 
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -77,6 +78,7 @@ class SettingsDialog(QDialog):
         browser_monitor: Optional[BrowserTabMonitor] = None,
         extension_server_active: Callable[[], bool] | None = None,
         ensure_extension_server: Callable[[], bool] | None = None,
+        on_wiki_sync_requested: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Iris 설정")
@@ -93,6 +95,7 @@ class SettingsDialog(QDialog):
         self._browser_monitor = browser_monitor
         self._extension_server_active = extension_server_active or (lambda: False)
         self._ensure_extension_server = ensure_extension_server or (lambda: False)
+        self._on_wiki_sync = on_wiki_sync_requested
         self._chrome_ext_panel: ChromeExtensionPanel | None = None
         self._models = self._initial_models(settings)
         self._scan_result: MicrophoneScanResult | None = None
@@ -216,6 +219,15 @@ class SettingsDialog(QDialog):
             )
             content_lay.addWidget(self._app_launcher)
 
+        self._wiki_panel: IrisWikiSettingsPanel | None = None
+        if self._db is not None:
+            self._wiki_panel = IrisWikiSettingsPanel(
+                settings,
+                on_sync_requested=self._on_wiki_sync,
+                parent=self,
+            )
+            content_lay.addWidget(self._wiki_panel)
+
         self._device_help = QLabel("")
         self._device_help.setWordWrap(True)
         content_lay.addWidget(self._device_help)
@@ -279,6 +291,15 @@ class SettingsDialog(QDialog):
             default_web_browser=browser,
             thinking_mode=thinking_mode,
         )
+
+    def wiki_selection(self):
+        if self._wiki_panel is None:
+            return None
+        return self._wiki_panel.selection()
+
+    def set_wiki_status(self, text: str) -> None:
+        if self._wiki_panel is not None:
+            self._wiki_panel.set_status_text(text)
 
     def _initial_models(self, settings: Settings) -> list[str]:
         models = list(settings.ai_model_names)

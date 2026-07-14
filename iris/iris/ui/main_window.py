@@ -98,6 +98,7 @@ from iris.ui.email_window import EmailWindow
 from iris.ui.top_status_header import TopStatusHeader
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
+from iris.ui.workspaces.obsidian_workspace_page import ObsidianWorkspacePage
 from iris.ui.workers import AgentWorker, AppLauncherScanWorker, LlmWorker, SearchWorker
 
 
@@ -134,6 +135,23 @@ class MainWindow(QMainWindow):
         self._assistant = IrisAssistant(
             self._db, self._executor, self._gemma, self._app_paths, self._settings
         )
+        self._knowledge_service = None
+        if self._settings.wiki_enabled:
+            from iris.application.knowledge_service import build_knowledge_service
+            from iris.infrastructure.knowledge.vault_repository import default_vault_path
+
+            vault = (
+                Path(self._settings.wiki_vault_path)
+                if self._settings.wiki_vault_path
+                else default_vault_path()
+            )
+            try:
+                self._knowledge_service = build_knowledge_service(
+                    self._db, vault, settings=self._settings
+                )
+                self._assistant.knowledge_service = self._knowledge_service
+            except Exception as exc:
+                self._db.insert_log("knowledge", "init_failed", str(exc)[:300])
         self._dialogue = DialogueAgent(self._assistant, self._gemma)
         self._install_watcher = AppInstallWatcher(self)
         self._install_watcher.install_complete.connect(self._on_install_complete)
@@ -180,10 +198,13 @@ class MainWindow(QMainWindow):
         self._workspace_mode: str = "assistant"
         self._assistant_splitter_state = b""
         self._ide_splitter_state = b""
+        self._obsidian_sidebar_width = 260
         self._ide_backend = IdeBackendManager()
         self._ide_backend_thread: QThread | None = None
         self._ide_backend_worker: IdeBackendWorker | None = None
         self._mobile_runtime_worker: MobileRuntimeWorker | None = None
+        self._knowledge_sync_worker: object | None = None
+        self._shutting_down = False
         self._ide_bridge = IdeBridgeClient()
         self._ide_bridge.start()
         self._ide_bridge_relay = IdeBridgeRelay(self)
@@ -245,10 +266,12 @@ class MainWindow(QMainWindow):
 
         self._assistant_page = AssistantWorkspacePage()
         self._ide_page = IdeWorkspacePage()
+        self._obsidian_page = ObsidianWorkspacePage()
         self._email_page = EmailWindow(self._db)
         self._workspace_stack = QStackedWidget()
         self._workspace_stack.addWidget(self._assistant_page)
         self._workspace_stack.addWidget(self._ide_page)
+        self._workspace_stack.addWidget(self._obsidian_page)
         self._workspace_stack.addWidget(self._email_page)
         splitter.addWidget(self._workspace_stack)
 
@@ -330,10 +353,11 @@ class MainWindow(QMainWindow):
         )
         for action_id, icon_kind, tooltip in (
             ("email", "email", "이메일"),
-            ("mobile", "mobile", "Android Emulator 모바일 런타임 실행"),
+            ("mobile", "mobile", "Android 에뮬레이터 실행"),
             ("instagram", "instagram", "Instagram"),
             ("discord", "discord", "Discord"),
             ("kakao", "kakao", "카카오톡"),
+            ("obsidian", "obsidian", "Iris Wiki"),
             ("telegram", "telegram", "텔레그램"),
         ):
             callback = (
@@ -341,6 +365,8 @@ class MainWindow(QMainWindow):
                 if action_id == "email"
                 else self._on_mobile_runtime_clicked
                 if action_id == "mobile"
+                else self._on_obsidian_toggle
+                if action_id == "obsidian"
                 else None
             )
             actions.add_icon_action(action_id=action_id, icon_kind=icon_kind, tooltip=tooltip, callback=callback)
@@ -352,7 +378,9 @@ class MainWindow(QMainWindow):
         self._ide_page.theia.recover_env_requested.connect(self._run_ide_env_recovery)
         self._ide_page.theia.ready.connect(self._on_theia_ready)
         self._ide_page.coding_send_clicked.connect(self._on_coding_user_text)
+        self._obsidian_page.assistant_dock.chat.send_clicked.connect(self._on_coding_user_text)
         self._continuous_listen.mic_level.connect(self._ide_page.set_mic_level)
+        self._continuous_listen.mic_level.connect(self._obsidian_page.set_mic_level)
 
         self._metrics_worker = MetricsWorker(parent=self)
         self._metrics_worker.snapshot_ready.connect(self._on_metrics_snapshot)
@@ -367,6 +395,10 @@ class MainWindow(QMainWindow):
         apply_cyberspace_theme(self)
 
         self._chat.send_clicked.connect(lambda t: self._on_user_text(t, from_voice=False))
+        self._obsidian_page.note_selected.connect(self._on_obsidian_note_selected)
+        self._left_sidebar.obsidian_detail.view_mode_changed.connect(
+            self._obsidian_page.set_view_mode
+        )
 
         self._monitor_mgr = MonitorManager(
             self._settings,
@@ -416,6 +448,9 @@ class MainWindow(QMainWindow):
     def _deferred_startup_services(self) -> None:
         """창이 뜬 뒤 상시 음성·모니터·STT 워밍업 시작."""
         self._check_recoverable_tasks()
+        if self._settings.wiki_enabled and self._knowledge_service is not None:
+            # 첫 페인트·이벤트 루프가 돈 뒤 인덱싱 — 시작 직후 '응답 없음' 완화
+            QTimer.singleShot(1000, self._start_knowledge_bootstrap)
         if self._settings.always_listen_enabled:
             self._continuous_listen.start()
             self._notes.add_note("상시 음성 대기: 말씀하시면 인식합니다.")
@@ -423,6 +458,97 @@ class MainWindow(QMainWindow):
         self._monitor_mgr.start()
         self._state.reset_to_idle()
         self._viz.set_state(AppState.IDLE)
+
+    def _start_knowledge_bootstrap(self) -> None:
+        """백그라운드 — Vault·Iris 소스 인덱싱."""
+        if self._test_mode or self._knowledge_service is None:
+            return
+        from iris.ui.workers import KnowledgeSyncWorker
+
+        worker = KnowledgeSyncWorker(self._knowledge_service, bootstrap=True, parent=self)
+        worker.finished_report.connect(self._on_knowledge_sync_done)
+        worker.start()
+        self._knowledge_sync_worker = worker
+
+    def _on_knowledge_sync_done(self, indexed: int, total: int) -> None:
+        if self._shutting_down:
+            return
+        msg = f"Iris Wiki: 지식 {indexed}건 인덱싱 완료 (총 {total}건)."
+        if indexed > 0:
+            self._notes.add_note(msg)
+        actions = self._left_sidebar.utility.actions
+        actions.set_action_visible("obsidian", True)
+        self._refresh_obsidian_orb()
+
+    def _refresh_obsidian_orb(self) -> None:
+        """인덱싱된 Iris Wiki 노트(.md/.mdc)로 Obsidian 구체 재구성."""
+        import sqlite3
+
+        from iris.ui.knowledge.obsidian_particle_orb import (
+            ObsidianOrbNode,
+            display_title_for_source,
+            is_obsidian_note_path,
+        )
+
+        if self._shutting_down:
+            return
+        if self._knowledge_service is None:
+            self._obsidian_page.set_notes([])
+            return
+        try:
+            sources = self._knowledge_service.list_sources(limit=10000)
+        except sqlite3.ProgrammingError:
+            # closeEvent가 DB를 닫은 뒤 sync 콜백이 도착하는 레이스
+            return
+        notes: list[ObsidianOrbNode] = []
+        for src in sources:
+            if src.status == "missing":
+                continue
+            if not is_obsidian_note_path(src.canonical_path):
+                continue
+            notes.append(
+                ObsidianOrbNode(
+                    source_id=src.id,
+                    title=display_title_for_source(
+                        title=src.title, path=src.canonical_path
+                    ),
+                    path=src.canonical_path,
+                )
+            )
+        # 제목 기준 안정 정렬 — 구체 배치가 매 진입마다 흔들리지 않게
+        notes.sort(key=lambda n: (n.title.lower(), n.source_id))
+        self._obsidian_page.set_notes(notes)
+        self._left_sidebar.obsidian_detail.clear()
+
+    def _on_obsidian_note_selected(self, source_id: int) -> None:
+        """구체 점 클릭 → 좌측 상세 패널에 제목·본문 표시."""
+        if self._knowledge_service is None:
+            return
+        sources = {
+            s.id: s
+            for s in self._knowledge_service.list_sources(limit=10000)
+            if s.status != "missing"
+        }
+        src = sources.get(source_id)
+        if src is None:
+            return
+        from iris.ui.knowledge.obsidian_particle_orb import display_title_for_source
+
+        body = self._knowledge_service.get_chunk_preview(source_id)
+        self._left_sidebar.obsidian_detail.show_note(
+            title=display_title_for_source(title=src.title, path=src.canonical_path),
+            path=src.canonical_path,
+            body=body,
+        )
+
+    def _on_obsidian_toggle(self) -> None:
+        """Obsidian 워크스페이스 토글."""
+        self._toggle_workspace_icon("obsidian", self.switch_to_obsidian_workspace)
+
+    def _set_workspace_splitter_interactive(self, enabled: bool) -> None:
+        """Obsidian 모드에서만 좌·우 구분선 드래그로 폭 조절."""
+        self._workspace_splitter.setHandleWidth(6 if enabled else 0)
+        self._workspace_splitter.setChildrenCollapsible(False)
 
     def _check_recoverable_tasks(self) -> None:
         """앱 재시작 시 중단 Task 알림."""
@@ -598,15 +724,14 @@ class MainWindow(QMainWindow):
             browser_monitor=self._browser,
             extension_server_active=self._monitor_mgr.extension_ingest_server_active,
             ensure_extension_server=self._monitor_mgr.ensure_extension_ingest_server,
+            on_wiki_sync_requested=self._start_knowledge_bootstrap,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             if resume_listen:
                 self._continuous_listen.start()
             return
         selection = dlg.selection()
-        update_env_values(
-            self._env_path,
-            {
+        env_updates = {
                 "GEMMA_MODEL_NAME": selection.model_name,
                 "AI_MODEL_NAMES": ",".join(selection.model_names),
                 "ALWAYS_LISTEN_INPUT_DEVICE": (
@@ -615,8 +740,20 @@ class MainWindow(QMainWindow):
                 "ALWAYS_LISTEN_SPEECH_RMS": f"{selection.speech_rms:.4f}",
                 "DEFAULT_WEB_BROWSER": selection.default_web_browser,
                 "IRIS_THINKING_MODE": selection.thinking_mode,
-            },
-        )
+            }
+        ksel = dlg.wiki_selection()
+        if ksel is not None:
+            env_updates.update(
+                {
+                    "IRIS_WIKI_ENABLED": "true" if ksel.enabled else "false",
+                    "IRIS_WIKI_VAULT_PATH": ksel.vault_path,
+                    "IRIS_WIKI_EMBED_ENABLED": "true" if ksel.embed_enabled else "false",
+                    "IRIS_WIKI_EMBED_MODEL": ksel.embed_model,
+                    "IRIS_WIKI_MAX_CHUNKS": str(ksel.max_chunks),
+                    "IRIS_WIKI_MAX_CONTEXT_CHARS": str(ksel.max_context_chars),
+                }
+            )
+        update_env_values(self._env_path, env_updates)
         self._apply_runtime_settings()
 
     @pyqtSlot(object)
@@ -679,6 +816,7 @@ class MainWindow(QMainWindow):
         if isinstance(s, AppState):
             self._viz.set_state(s)
             self._ide_page.set_app_state(s)
+            self._obsidian_page.set_app_state(s)
             self._system_sounds.play_state(s, QDateTime.currentMSecsSinceEpoch())
             if isinstance(self._status_strip, TopStatusHeader):
                 self._status_strip.set_app_state(s)
@@ -832,6 +970,10 @@ class MainWindow(QMainWindow):
         self._chat.append_message_typed("Iris", body, speech_sync=speech_sync)
         if self._workspace_mode == "ide":
             self._ide_page.active_chat().append_message_typed(
+                "Iris", body, speech_sync=speech_sync
+            )
+        elif self._workspace_mode == "obsidian":
+            self._obsidian_page.active_chat().append_message_typed(
                 "Iris", body, speech_sync=speech_sync
             )
         if speech_sync:
@@ -1202,9 +1344,11 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_delegate_dialogue_stream(self, user_text: str) -> None:
+        kctx = self._assistant.consume_pending_knowledge_context()
         messages = self._dialogue.build_messages(
             user_text,
             history=self._dialogue_history_slice(),
+            extra_context=kctx or None,
         )
         push_activity_line("UI: streaming dialogue LlmWorker starting.")
         self._start_streaming_llm_worker(
@@ -1411,9 +1555,14 @@ class MainWindow(QMainWindow):
 
     def switch_to_assistant_workspace(self) -> None:
         if self._workspace_mode == "assistant":
+            self._left_sidebar.utility.actions.set_action_active("obsidian", False)
             return
         if self._workspace_mode == "ide":
             self._ide_splitter_state = self._ide_page.save_splitter_state()
+        elif self._workspace_mode == "obsidian":
+            sizes = self._workspace_splitter.sizes()
+            if sizes and sizes[0] >= 180:
+                self._obsidian_sidebar_width = sizes[0]
         self._workspace_stack.setCurrentWidget(self._assistant_page)
         self._workspace_mode = "assistant"
         self._ensure_status_in_title_bar()
@@ -1425,9 +1574,11 @@ class MainWindow(QMainWindow):
         )
         self._left_sidebar.utility.actions.set_action_active("ide", False)
         self._left_sidebar.utility.actions.set_action_active("email", False)
+        self._left_sidebar.utility.actions.set_action_active("obsidian", False)
         self._left_sidebar.utility.actions.set_action_visible("ide", True)
         self._left_sidebar.set_workspace_mode("assistant")
         self._apply_ui_overlay_margins("assistant")
+        self._set_workspace_splitter_interactive(False)
         total = max(sum(self._workspace_splitter.sizes()), self.width())
         self._workspace_splitter.setSizes([self._sidebar_split_size, max(0, total - self._sidebar_split_size)])
         self._viz.request_sync_orb_anchor("switch_to_assistant")
@@ -1439,19 +1590,26 @@ class MainWindow(QMainWindow):
             return
         if self._workspace_mode == "assistant":
             self._assistant_splitter_state = self._assistant_page.save_splitter_state()
+        elif self._workspace_mode == "obsidian":
+            sizes = self._workspace_splitter.sizes()
+            if sizes and sizes[0] >= 180:
+                self._obsidian_sidebar_width = sizes[0]
         self._workspace_stack.setCurrentWidget(self._ide_page)
         self._workspace_mode = "ide"
         self._ensure_status_in_title_bar()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
         sizes = self._workspace_splitter.sizes()
-        if sizes and sizes[0] > 0:
+        # Obsidian icons-only(~150) / 상세 폭은 Persistent Sidebar 기본폭으로 저장하지 않음
+        if sizes and sizes[0] >= 180 and self._left_sidebar.mode != "obsidian":
             self._sidebar_split_size = sizes[0]
         total = max(sum(sizes), self.width())
         self._workspace_splitter.setSizes([0, total])
+        self._set_workspace_splitter_interactive(False)
         self._left_sidebar.set_workspace_mode("ide")
         self._left_sidebar.utility.actions.set_action_active("ide", True)
         self._left_sidebar.utility.actions.set_action_active("email", False)
+        self._left_sidebar.utility.actions.set_action_active("obsidian", False)
         self._apply_ui_overlay_margins("ide")
         self._ide_page.restore_splitter_state(self._ide_splitter_state)
         self._ide_page.show_empty_home()
@@ -1460,19 +1618,53 @@ class MainWindow(QMainWindow):
         self._ide_page.set_workspace_label(summary)
         self._metrics_worker.set_active(True)
 
+    def switch_to_obsidian_workspace(self) -> None:
+        """Obsidian — 좌측 상세+아이콘, 중앙 지식 파티클 구, 우측 Iris Dock."""
+        if self._workspace_mode == "obsidian":
+            return
+        if self._workspace_mode == "assistant":
+            self._assistant_splitter_state = self._assistant_page.save_splitter_state()
+            sizes = self._workspace_splitter.sizes()
+            if sizes and sizes[0] >= 180:
+                self._sidebar_split_size = sizes[0]
+        elif self._workspace_mode == "ide":
+            self._ide_splitter_state = self._ide_page.save_splitter_state()
+        self._refresh_obsidian_orb()
+        self._workspace_stack.setCurrentWidget(self._obsidian_page)
+        self._workspace_mode = "obsidian"
+        self._ensure_status_in_title_bar()
+        self._viz.setVisible(False)
+        self._viz.set_orb_anchor(None)
+        self._left_sidebar.set_workspace_mode("obsidian")
+        self._set_workspace_splitter_interactive(True)
+        total = max(sum(self._workspace_splitter.sizes()), self.width())
+        side_w = max(180, min(480, self._obsidian_sidebar_width))
+        self._workspace_splitter.setSizes([side_w, max(0, total - side_w)])
+        self._left_sidebar.utility.actions.set_action_active("ide", False)
+        self._left_sidebar.utility.actions.set_action_active("email", False)
+        self._left_sidebar.utility.actions.set_action_active("obsidian", True)
+        self._apply_ui_overlay_margins("assistant")
+        self._metrics_worker.set_active(False)
+
     def switch_to_email_workspace(self) -> None:
         if self._workspace_mode == "assistant":
             self._assistant_splitter_state = self._assistant_page.save_splitter_state()
         elif self._workspace_mode == "ide":
             self._ide_splitter_state = self._ide_page.save_splitter_state()
+        elif self._workspace_mode == "obsidian":
+            sizes = self._workspace_splitter.sizes()
+            if sizes and sizes[0] >= 180:
+                self._obsidian_sidebar_width = sizes[0]
         self._workspace_stack.setCurrentWidget(self._email_page)
         self._workspace_mode = "email"
         self._ensure_status_in_title_bar()
         self._viz.setVisible(False)
         self._viz.set_orb_anchor(None)
         self._left_sidebar.set_workspace_mode("assistant")
+        self._set_workspace_splitter_interactive(False)
         self._left_sidebar.utility.actions.set_action_active("ide", False)
         self._left_sidebar.utility.actions.set_action_active("email", True)
+        self._left_sidebar.utility.actions.set_action_active("obsidian", False)
         self._apply_ui_overlay_margins("assistant")
         total = max(sum(self._workspace_splitter.sizes()), self.width())
         self._workspace_splitter.setSizes([self._sidebar_split_size, max(0, total - self._sidebar_split_size)])
@@ -1494,8 +1686,24 @@ class MainWindow(QMainWindow):
         self.switch_to_ide_workspace()
         self._ensure_ide_visible()
 
+    def _is_mobile_runtime_worker_running(self) -> bool:
+        """deleteLater 이후 죽은 QObject 참조를 정리하며 실행 중 여부만 본다."""
+        worker = self._mobile_runtime_worker
+        if worker is None:
+            return False
+        try:
+            from PyQt6 import sip
+
+            if sip.isdeleted(worker):
+                self._mobile_runtime_worker = None
+                return False
+            return bool(worker.isRunning())
+        except RuntimeError:
+            self._mobile_runtime_worker = None
+            return False
+
     def _on_mobile_runtime_clicked(self) -> None:
-        if self._mobile_runtime_worker is not None and self._mobile_runtime_worker.isRunning():
+        if self._is_mobile_runtime_worker_running():
             self._notes.add_note("Android 모바일 런타임 확인이 이미 진행 중입니다.")
             return
 
@@ -1528,22 +1736,37 @@ class MainWindow(QMainWindow):
         self._start_mobile_runtime_worker(install_if_missing=True)
 
     def _start_mobile_runtime_worker(self, *, install_if_missing: bool) -> None:
-        self._notes.add_note("Android 모바일 런타임을 확인하는 중입니다.")
+        self._notes.add_note("Android 에뮬레이터를 시작하는 중입니다.")
+        push_activity_line("Android emulator starting")
+        # 이전 워커가 살아 있으면 참조만 교체 — deleteLater 레이스는 finished 슬롯에서 처리
         self._mobile_runtime_worker = MobileRuntimeWorker(install_if_missing=install_if_missing, parent=self)
         self._mobile_runtime_worker.finished_result.connect(self._on_mobile_runtime_result)
-        self._mobile_runtime_worker.finished.connect(self._mobile_runtime_worker.deleteLater)
+        self._mobile_runtime_worker.finished.connect(self._on_mobile_runtime_worker_finished)
         self._mobile_runtime_worker.start()
+
+    def _on_mobile_runtime_worker_finished(self) -> None:
+        worker = self._mobile_runtime_worker
+        self._mobile_runtime_worker = None
+        if worker is None:
+            return
+        try:
+            from PyQt6 import sip
+
+            if not sip.isdeleted(worker):
+                worker.deleteLater()
+        except RuntimeError:
+            pass
 
     @pyqtSlot(object)
     def _on_mobile_runtime_result(self, result: object) -> None:
         if isinstance(result, EmulatorResult):
             if result.ready:
                 suffix = f" ({result.serial})" if result.serial else ""
-                self._notes.add_note(f"IRIS mobile runtime ready{suffix}")
-                push_activity_line("IRIS mobile runtime ready")
+                self._notes.add_note(f"Android 에뮬레이터가 준비되었습니다{suffix}")
+                push_activity_line("Android emulator ready")
                 return
             detail = result.error_message or ", ".join(result.missing_components) or "상태 확인 실패"
-            self._notes.add_note(f"Android 모바일 런타임 상태: {result.status} - {detail}")
+            self._notes.add_note(f"Android 에뮬레이터 상태: {result.status} - {detail}")
             return
 
         if isinstance(result, dict):
@@ -1742,13 +1965,45 @@ class MainWindow(QMainWindow):
     def _active_chat_panel(self):
         if self._workspace_mode == "ide":
             return self._ide_page.active_chat()
+        if self._workspace_mode == "obsidian":
+            return self._obsidian_page.active_chat()
         return self._chat
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._shutting_down = True
         register_activity_sink(None)
         self._metrics_worker.set_active(False)
         self._metrics_worker.request_stop()
         self._metrics_worker.wait(2000)
+
+        # Wiki sync / 모바일 워커: DB close 전에 콜백 끊고 종료 대기
+        sync_worker = self._knowledge_sync_worker
+        if sync_worker is not None:
+            try:
+                from PyQt6 import sip
+
+                if not sip.isdeleted(sync_worker):
+                    try:
+                        sync_worker.finished_report.disconnect(self._on_knowledge_sync_done)
+                    except (TypeError, RuntimeError):
+                        pass
+                    if sync_worker.isRunning():
+                        sync_worker.wait(5000)
+            except RuntimeError:
+                pass
+            self._knowledge_sync_worker = None
+
+        mobile_worker = self._mobile_runtime_worker
+        self._mobile_runtime_worker = None
+        if mobile_worker is not None:
+            try:
+                from PyQt6 import sip
+
+                if not sip.isdeleted(mobile_worker) and mobile_worker.isRunning():
+                    mobile_worker.wait(3000)
+            except RuntimeError:
+                pass
+
         self._ide_bridge.stop()
         self._stop_ide_backend_worker()
         self._ide_backend.shutdown()

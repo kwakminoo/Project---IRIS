@@ -112,6 +112,24 @@ def _paint_mobile(p: QPainter, active: bool) -> None:
     p.drawPoint(11, 17)
 
 
+def _paint_obsidian(p: QPainter, active: bool) -> None:
+    """Obsidian 보석 실루엣."""
+    pen = _stroke(active)
+    p.setPen(pen)
+    p.setBrush(_fill(active))
+    gem = QPainterPath()
+    gem.moveTo(11, 4)
+    gem.lineTo(16, 9)
+    gem.lineTo(13, 18)
+    gem.lineTo(6, 18)
+    gem.lineTo(3, 9)
+    gem.closeSubpath()
+    p.drawPath(gem)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawLine(11, 4, 11, 18)
+    p.drawLine(3, 9, 16, 9)
+
+
 _PAINTERS = {
     "ide": _paint_ide,
     "email": _paint_email,
@@ -120,6 +138,7 @@ _PAINTERS = {
     "kakao": _paint_kakao,
     "telegram": _paint_telegram,
     "mobile": _paint_mobile,
+    "obsidian": _paint_obsidian,
 }
 
 

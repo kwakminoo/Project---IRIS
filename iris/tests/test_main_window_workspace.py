@@ -12,6 +12,7 @@ from iris.ui.left_sidebar_panel import LeftSidebarPanel
 from iris.ui.workspace_action_panel import WorkspaceActionPanel
 from iris.ui.workspaces.assistant_workspace_page import AssistantWorkspacePage
 from iris.ui.workspaces.ide_workspace_page import IdeWorkspacePage
+from iris.ui.workspaces.obsidian_workspace_page import ObsidianWorkspacePage
 
 
 @pytest.fixture(scope="module")
@@ -64,6 +65,43 @@ def test_assistant_page_preserves_splitter_state(qapp) -> None:
     before = page.save_splitter_state()
     page.restore_splitter_state(before)
     assert page.save_splitter_state() == before
+
+
+def test_left_sidebar_obsidian_mode_keeps_icons_only(qapp) -> None:
+    """Obsidian 모드: 상단 상세·하단 아이콘, Running Windows·메트릭 숨김."""
+    sidebar = LeftSidebarPanel()
+    sidebar.set_workspace_mode("obsidian")
+    assert sidebar.isVisible()
+    assert sidebar.obsidian_detail.isVisible()
+    assert not sidebar.window_list.isVisible()
+    assert sidebar.utility.metrics.isHidden()
+    assert sidebar.utility.actions.isVisible()
+    sidebar.set_workspace_mode("assistant")
+    assert sidebar.window_list.isVisible()
+    assert not sidebar.obsidian_detail.isVisible()
+    assert sidebar.utility.metrics.isVisible()
+
+
+def test_obsidian_page_has_particle_orb_and_dock(qapp) -> None:
+    page = ObsidianWorkspacePage()
+    assert page.orb is not None
+    assert page.assistant_dock is not None
+    assert page.active_chat() is page.assistant_dock.chat
+
+
+def test_obsidian_detail_view_mode_buttons(qapp) -> None:
+    from iris.ui.knowledge.obsidian_detail_panel import ObsidianDetailPanel
+
+    panel = ObsidianDetailPanel()
+    assert panel.view_mode() == "3d"
+    modes: list[str] = []
+    panel.view_mode_changed.connect(modes.append)
+    panel.set_view_mode("2d")
+    assert panel.view_mode() == "2d"
+    assert modes == ["2d"]
+    panel._btn_3d.click()  # noqa: SLF001
+    assert panel.view_mode() == "3d"
+    assert modes[-1] == "3d"
 
 
 def test_ide_page_has_theia_and_coding_panel(qapp) -> None:

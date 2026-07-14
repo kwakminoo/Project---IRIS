@@ -114,6 +114,43 @@ class TurnCoordinator:
         self._gemma = gemma
         self._dialogue = DialogueAgent(assistant, gemma)
 
+    def _maybe_attach_local_knowledge(self, user_text: str) -> None:
+        """로컬 Iris Wiki 검색 결과를 assistant pending 컨텍스트에 저장."""
+        settings = self._assistant._settings
+        if settings is None or not getattr(settings, "wiki_enabled", False):
+            return
+        svc = getattr(self._assistant, "knowledge_service", None)
+        if svc is None:
+            return
+        from iris.assistant.knowledge_context import (
+            build_knowledge_context,
+            needs_local_knowledge,
+        )
+
+        if not needs_local_knowledge(user_text):
+            return
+        try:
+            hits = svc.search(
+                user_text,
+                limit=int(getattr(settings, "wiki_max_chunks", 6)),
+            )
+            ctx = build_knowledge_context(
+                hits,
+                max_chunks=int(getattr(settings, "wiki_max_chunks", 6)),
+                max_chars=int(getattr(settings, "wiki_max_context_chars", 12000)),
+            )
+            if ctx:
+                self._assistant.set_pending_knowledge_context(ctx)
+                push_activity_line("Iris Wiki: local context attached for turn.")
+            styles = svc.search_reference_style(user_text, limit=2)
+            if styles:
+                ref_ctx = "[IRIS REFERENCE STYLE]\n" + "\n---\n".join(styles)
+                prev = self._assistant.consume_pending_knowledge_context()
+                merged = (prev + "\n\n" + ref_ctx).strip() if prev else ref_ctx
+                self._assistant.set_pending_knowledge_context(merged)
+        except Exception as exc:
+            self._assistant._db.insert_log("wiki", "search_failed", str(exc)[:200])
+
     def run_turn(
         self,
         user_text: str,
@@ -132,6 +169,8 @@ class TurnCoordinator:
         timing = start_timing(turn_id) if telemetry_on else None
 
         push_activity_line(f"TurnCoordinator: pipeline started turn_id={turn_id}.")
+
+        self._maybe_attach_local_knowledge(user_text)
 
         block = quick_block_user_text(user_text)
         if block:

@@ -63,13 +63,25 @@ def build_cyberspace_qss() -> str:
         }}
         QFrame#WorkspacePanel,
         QWidget#AssistantWorkspacePage,
+        QWidget#ObsidianWorkspacePage,
+        QWidget#ObsidianParticleOrb,
+        QWidget#ObsidianDetailPanel,
         QWidget#LeftSidebarPanel,
         QWidget#WindowListPanel,
         QWidget#SidebarUtilityPanel,
         QWidget#SystemMetricsPanel,
-        QWidget#WorkspaceActionPanel {{
+        QWidget#WorkspaceActionPanel,
+        QWidget#ObsidianNoteListPanel,
+        QWidget#ObsidianPreviewPanel,
+        QListWidget#ObsidianNoteList,
+        QPlainTextEdit#ObsidianPreviewBody,
+        QTextBrowser#ObsidianPreviewBody {{
             background: transparent;
             border: none;
+        }}
+        QTextBrowser#ObsidianPreviewBody {{
+            color: {t.text_primary};
+            selection-background-color: {t.neon_purple};
         }}
         QLabel#StatusPill {{
             background-color: transparent;
