@@ -1,4 +1,4 @@
-# Iris IDE — Theia 의존성 설치
+﻿# Iris IDE — Theia 의존성 설치
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $IdeDir = Join-Path $Root "iris-ide"

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$StartEmulator,
     [int]$BootTimeoutSec = 180
 )

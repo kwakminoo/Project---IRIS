@@ -1,4 +1,4 @@
-# Iris 의존성 설치 스크립트 (Windows PowerShell)
+﻿# Iris 의존성 설치 스크립트 (Windows PowerShell)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 

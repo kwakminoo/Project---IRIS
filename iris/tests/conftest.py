@@ -72,7 +72,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """pytest-timeout이 없는 로컬 venv에서도 --timeout 옵션을 인식한다."""
+    """pytest-timeout이 없는 로컬 venv에서도 --timeout 옵션을 인식한다.
+
+    pytest-timeout이 설치돼 있으면 그 플러그인이 --timeout을 등록하므로,
+    스텁을 추가하면 'option names {--timeout} already added' 충돌이 난다.
+    따라서 플러그인이 없을 때만 스텁을 등록한다.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("pytest_timeout") is not None:
+        return
     group = parser.getgroup("timeout")
     group.addoption(
         "--timeout",
