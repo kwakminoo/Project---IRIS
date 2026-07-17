@@ -1,4 +1,4 @@
-# Windows Smoke — 테스트가 등록한 PID만 종료
+﻿# Windows Smoke — 테스트가 등록한 PID만 종료
 param(
     [string]$ArtifactsRoot = "iris/artifacts/windows-smoke"
 )
