@@ -22,9 +22,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from iris.ai.coding_prompt import build_coding_messages
 from iris.ai.gemma_client import ChatMessage, GemmaClient
 from iris.ai.stream_sentence import find_first_sentence_end
 from iris.assistant.agent_adapter import IrisAssistant
+from iris.assistant.code_apply_flow import apply_code_from_reply
 from iris.agent.needs_agent import (
     assess_research_quality,
     format_comparison_degraded_context,
@@ -157,6 +159,7 @@ class MainWindow(QMainWindow):
 
         self._history: list[ChatMessage] = []
         self._llm_worker: LlmWorker | None = None
+        self._coding_worker: LlmWorker | None = None
         self._search_worker: SearchWorker | None = None
         self._agent_worker: AgentWorker | None = None
         self._last_user_text = ""
@@ -1695,10 +1698,74 @@ class MainWindow(QMainWindow):
         )
 
     def _on_coding_user_text(self, text: str) -> None:
+        """코딩 패널 전용 — 젬마 직접 호출로 코드 생성 후 승인 거쳐 파일 반영.
+
+        일반 어시스턴트 라우팅(웹검색·스트리밍 등)은 스트림 응답을 메인 채팅으로
+        보내 코딩 패널에 표시되지 않으므로, 코딩은 전용 경로로 처리한다.
+        ponytail: 코딩 패널은 도구 실행 대신 코드 생성 + 안전 파일 반영만 담당.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        chat = self._ide_page.coding_panel.chat
+        chat.append_message_instant("나", text)
+        self._db.insert_log("coding_user", text, None)
+
         ctx_block = self._ide_bridge.build_message_context_block()
-        if ctx_block:
-            text = f"{text}\n\n{ctx_block}"
-        self._on_user_text(text, from_voice=False, use_coding_panel=True)
+        messages = build_coding_messages(text, ctx_block)
+
+        self._state.set_state(AppState.PROCESSING)
+        chat.begin_stream_message("Iris")
+        if self._coding_worker and self._coding_worker.isRunning():
+            self._coding_worker.requestInterruption()
+        worker = LlmWorker(self._gemma, messages, stream=True)
+        worker.chunk_received.connect(chat.append_stream_chunk)
+        worker.finished_text.connect(self._on_coding_reply_done)
+        worker.finished.connect(worker.deleteLater)
+        self._coding_worker = worker
+        worker.start()
+
+    @pyqtSlot(str)
+    def _on_coding_reply_done(self, reply: str) -> None:
+        """코딩 응답 완료 — 파일 제안이 있으면 승인 거쳐 워크스페이스에 반영."""
+        self._state.reset_to_idle()
+        chat = self._ide_page.coding_panel.chat
+        summary = apply_code_from_reply(
+            reply,
+            self._current_ide_workspace_root(),
+            self._approve_file_write,
+            database=self._db,
+        )
+        if summary:
+            chat.append_message_instant("Iris", summary)
+
+    def _current_ide_workspace_root(self) -> str | None:
+        """IDE 워크스페이스 루트 경로. 브리지 컨텍스트 우선, 없으면 설정 기반 폴백."""
+        raw = ""
+        try:
+            raw = self._ide_bridge.get_context().workspace_path or ""
+        except Exception:  # noqa: BLE001 — 브리지 미연결 시 폴백
+            raw = ""
+        raw = raw.replace("file:///", "").replace("file://", "").strip()
+        if raw:
+            return raw
+        try:
+            return str(resolve_ide_workspace(self._settings))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _approve_file_write(self, pending) -> bool:
+        """파일 생성/덮어쓰기(CRITICAL_RISK) — 미리보기 후 명시적 승인."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        verb = "덮어쓸까요" if pending.is_overwrite else "만들까요"
+        reply = QMessageBox.question(
+            self,
+            "파일 반영 승인",
+            f"다음 파일을 {verb}?\n\n{pending.preview(1500)}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _active_chat_panel(self):
         if self._workspace_mode == "ide":
